@@ -113,6 +113,42 @@ class Session:
     def movement_path(self) -> Path:
         return self.players_dir / "movement.parquet"
 
+    @property
+    def ball_dir(self) -> Path:
+        return self.path / "ball"
+
+    @property
+    def ball_sweep_path(self) -> Path:
+        """Ball candidates from the detection pass (``pass1_detect``), image coordinates."""
+        return self.ball_dir / "sweep.parquet"
+
+    @property
+    def ball_sweep_frames_path(self) -> Path:
+        """Frames the ball detector looked at in the detection pass."""
+        return self.ball_dir / "sweep_frames.parquet"
+
+    @property
+    def ball_refine_path(self) -> Path:
+        """Ball candidates from the full-rate windows (``ball_refine``)."""
+        return self.ball_dir / "refine.parquet"
+
+    @property
+    def ball_refine_frames_path(self) -> Path:
+        return self.ball_dir / "refine_frames.parquet"
+
+    @property
+    def ball_track_path(self) -> Path:
+        return self.ball_dir / "track.parquet"
+
+    @property
+    def ball_kinks_path(self) -> Path:
+        """Every motion break the event detector considered, with its features."""
+        return self.ball_dir / "kinks.parquet"
+
+    @property
+    def events_path(self) -> Path:
+        return self.path / "events.parquet"
+
     def job_log_path(self, job_id: int) -> Path:
         return self.logs_dir / f"job-{job_id:05d}.log"
 

@@ -352,10 +352,76 @@ MOVEMENT = table_schema(
     ],
 )
 
+# ---------------------------------------------------------------------------
+# Ball (PLAN.md §7.4-7.5)
+# ---------------------------------------------------------------------------
+
+BALL_CANDIDATES = table_schema(
+    "ball_candidates",
+    1,
+    [
+        field("frame", pa.int64(), None, "Presentation-order frame number", nullable=False),
+        field("t_s", pa.float64(), "s", "Time on the video timeline", nullable=False),
+        field("x", pa.float32(), "px", "Candidate center (full-resolution display pixels)"),
+        field("y", pa.float32(), "px"),
+        field("score", pa.float32(), None, "Detector score (detector-specific scale)"),
+    ],
+)
+
+#: Frames a ball detector looked at (a frame without candidates had no ball found).
+BALL_FRAMES = table_schema(
+    "ball_frames",
+    1,
+    [
+        field("frame", pa.int64(), None, "Presentation-order frame number", nullable=False),
+        field("t_s", pa.float64(), "s", "Time on the video timeline", nullable=False),
+    ],
+)
+
+#: The active ball per frame after linking (``ball_track``).
+BALL_TRACK = table_schema(
+    "ball_track",
+    1,
+    [
+        field("frame", pa.int64(), None, "Presentation-order frame number", nullable=False),
+        field("t_s", pa.float64(), "s", "Time on the video timeline", nullable=False),
+        field("x", pa.float32(), "px", "Ball center (full-resolution display pixels)"),
+        field("y", pa.float32(), "px"),
+        field("score", pa.float32(), None, "Detection confidence 0-1 (0 for interpolated)"),
+        field("tracklet", pa.int32(), None, "Linked tracklet the point belongs to"),
+        field("source", pa.string(), None, "detected | interp (gap filled)"),
+    ],
+)
+
+#: Hits, bounces and net contacts (``events``).
+EVENTS = table_schema(
+    "events",
+    1,
+    [
+        field("event_id", pa.int32(), None, "Event number within the session", nullable=False),
+        field("kind", pa.string(), None, "hit | bounce | net", nullable=False),
+        field("frame", pa.int64(), None, "Frame nearest to the contact", nullable=False),
+        field("t_s", pa.float64(), "s", "Contact time (sub-frame; audio-refined for hits)"),
+        field("x", pa.float32(), "px", "Ball at the contact (full-resolution display pixels)"),
+        field("y", pa.float32(), "px"),
+        field("court_x", pa.float32(), "m", "Bounce: ground point; hit: hitter's position"),
+        field("court_y", pa.float32(), "m"),
+        field("conf", pa.float32(), None, "Confidence 0-1"),
+        field("source", pa.string(), None, "rules | model | user"),
+        field("hitter", pa.string(), None, "Hits: me | opponent | machine | unknown"),
+        field("audio_dt", pa.float32(), "s", "Matched onset minus contact (after delay)"),
+        field("audio_strength", pa.float32(), "z", "Strength of the matched audio onset"),
+    ],
+)
+
 SCHEMAS: dict[str, pa.Schema] = {
     "audio_onsets": AUDIO_ONSETS,
     "pass1_frames": PASS1_FRAMES,
     "person_detections": PERSON_DETECTIONS,
     "player_tracks": PLAYER_TRACKS,
     "movement": MOVEMENT,
+    "ball_candidates": BALL_CANDIDATES,
+    "ball_frames": BALL_FRAMES,
+    "ball_track": BALL_TRACK,
+    "events": EVENTS,
 }

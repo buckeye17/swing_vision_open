@@ -18,6 +18,15 @@ from plotly.subplots import make_subplots
 
 from swingvision import services
 from swingvision.app import state
+from swingvision.app.components.ball_view import (
+    BOUNCE_COLOR,
+    HIT_COLOR,
+    NET_COLOR,
+    ball_card,
+    ball_store,
+    events_store,
+    load_ball,
+)
 from swingvision.app.components.court_diagram import ME_COLOR, heatmap_figure, minimap_figure
 from swingvision.app.components.court_overlay import overlay_svg
 from swingvision.app.components.players_view import (
@@ -74,6 +83,7 @@ def timeline_figure(
     onsets_s: np.ndarray,
     speed_t: np.ndarray | None = None,
     speed_v: np.ndarray | None = None,
+    events: dict | None = None,
 ) -> go.Figure:
     """Audio onsets on top and, once tracked, the player's speed in its own row below.
 
@@ -123,6 +133,27 @@ def timeline_figure(
             row=1,
             col=1,
         )
+    for kind, color, y, symbol in (
+        ("hit", HIT_COLOR, 44, "triangle-down"),
+        ("bounce", BOUNCE_COLOR, 44, "circle"),
+        ("net", NET_COLOR, 44, "x"),
+    ):
+        if not events:
+            break
+        et = [t for t, k in zip(events["t"], events["kind"], strict=True) if k == kind]
+        if et:
+            fig.add_trace(
+                go.Scatter(
+                    x=et,
+                    y=[y] * len(et),
+                    mode="markers",
+                    name=kind,
+                    marker={"color": color, "size": 8, "symbol": symbol},
+                    hovertemplate="%{x:.2f}s<extra>" + kind + "</extra>",
+                ),
+                row=1,
+                col=1,
+            )
     if has_speed:
         fig.add_trace(
             go.Scatter(
@@ -353,6 +384,13 @@ def layout(session_id: str | None = None, **_):
         else None
     )
     speed_t, speed_v = speed_series(movement)
+    ball_track, ball_events = load_ball(session)
+    ball = (
+        ball_store(ball_track, video.display_width, video.display_height)
+        if video and has_proxy
+        else None
+    )
+    evs = events_store(ball_events)
     summary = load_players_summary(session)
     machine = summary.machine if summary else None
     is_machine = bool(config.practice and config.practice.submode == "ball_machine")
@@ -390,6 +428,7 @@ def layout(session_id: str | None = None, **_):
                 style={**OVERLAY_STYLE, "display": "block" if overlays else "none"},
             ),
             html.Div(id="review-box", style={"display": "none"}),
+            html.Img(id="review-ball", src="", style={"display": "none"}),
         ],
         style={"position": "relative"},
     )
@@ -414,6 +453,8 @@ def layout(session_id: str | None = None, **_):
             dcc.Store(id="review-fps", data=fps),
             dcc.Store(id="review-seek"),
             dcc.Store(id="review-track", data=track),
+            dcc.Store(id="review-ball-store", data=ball),
+            dcc.Store(id="review-events", data=evs),
             dcc.Store(id="review-session-id", data=config.id),
             dmc.Grid(
                 [
@@ -442,6 +483,13 @@ def layout(session_id: str | None = None, **_):
                                                     checked=track is not None,
                                                     disabled=track is None,
                                                 ),
+                                                dmc.Switch(
+                                                    id="review-ball-on",
+                                                    label="Ball",
+                                                    size="xs",
+                                                    checked=ball is not None,
+                                                    disabled=ball is None,
+                                                ),
                                             ],
                                             gap="md",
                                         ),
@@ -458,7 +506,7 @@ def layout(session_id: str | None = None, **_):
                                     dcc.Graph(
                                         id="review-timeline",
                                         figure=timeline_figure(
-                                            config, onsets_t, onsets_s, speed_t, speed_v
+                                            config, onsets_t, onsets_s, speed_t, speed_v, evs
                                         ),
                                         config={"displayModeBar": False, "scrollZoom": True},
                                     ),
@@ -491,6 +539,9 @@ def layout(session_id: str | None = None, **_):
                         dmc.Stack(
                             [
                                 _minimap_card(track, machine, is_machine),
+                                ball_card(
+                                    ball_track, ball_events, video.duration_s if video else 0.0, fps
+                                ),
                                 dmc.Paper(
                                     [
                                         dmc.Title("Segments", order=5, mb="xs"),
@@ -655,6 +706,56 @@ clientside_callback(
     Input("review-time", "data"),
     Input("review-box-on", "checked"),
     State("review-track", "data"),
+)
+
+
+clientside_callback(
+    """
+    function(t, on, ball, events) {
+        const hidden = {display: "none"};
+        const host = document.getElementById("review-minimap");
+        const gd = host ? host.querySelector(".js-plotly-plot") : null;
+        const now = (t && t.t) || 0;
+        if (events && gd && window.Plotly && gd.data && gd.data.length >= 3) {
+            const bx = [], by = [];
+            for (let k = 0; k < events.t.length; k++) {
+                if (events.kind[k] === "bounce" && events.cx[k] !== null &&
+                    events.t[k] <= now && events.t[k] >= now - 3) {
+                    bx.push(events.cx[k]); by.push(events.cy[k]);
+                }
+            }
+            window.Plotly.restyle(gd, {x: [bx], y: [by]}, [2]);
+        }
+        if (!on || !ball || !ball.t.length) { return ["", hidden]; }
+        const ts = ball.t;
+        let lo = 0, hi = ts.length - 1, i = -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (ts[mid] <= now + 1e-3) { i = mid; lo = mid + 1; } else { hi = mid - 1; }
+        }
+        if (i < 0 || now - ts[i] > 0.1) { return ["", hidden]; }
+        const pts = [];
+        for (let k = i; k >= 0 && ts[k] >= now - 0.4; k--) {
+            if (k < i && ts[k + 1] - ts[k] > 0.1) { break; }
+            pts.push(ball.x[k] + "," + ball.y[k]);
+        }
+        const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" ' +
+            'preserveAspectRatio="none"><polyline points="' + pts.join(" ") +
+            '" fill="none" stroke="#d8f5a2" stroke-opacity="0.7" stroke-width="2" ' +
+            'vector-effect="non-scaling-stroke"/><circle cx="' + ball.x[i] + '" cy="' +
+            ball.y[i] + '" r="0.6" fill="none" stroke="#e8590c" stroke-width="2" ' +
+            'vector-effect="non-scaling-stroke"/></svg>';
+        return ["data:image/svg+xml;utf8," + encodeURIComponent(svg),
+                {position: "absolute", inset: 0, width: "100%", height: "100%",
+                 pointerEvents: "none", display: "block"}];
+    }
+    """,
+    Output("review-ball", "src"),
+    Output("review-ball", "style"),
+    Input("review-time", "data"),
+    Input("review-ball-on", "checked"),
+    State("review-ball-store", "data"),
+    State("review-events", "data"),
 )
 
 

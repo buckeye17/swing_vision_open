@@ -23,10 +23,13 @@ def test_pages_registered(app):
         "/session/<session_id>",
         "/calibrate/<session_id>",
         "/profiles",
+        "/labeling",
     } <= paths
 
 
-@pytest.mark.parametrize("url", ["/", "/new", "/jobs", "/settings", "/profiles", "/session/nope"])
+@pytest.mark.parametrize(
+    "url", ["/", "/new", "/jobs", "/settings", "/profiles", "/labeling", "/session/nope"]
+)
 def test_pages_render(app, settings, url):
     for page in dash.page_registry.values():
         if page["path"] == url or (page.get("path_template") and url.startswith("/session/")):

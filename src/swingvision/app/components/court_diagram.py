@@ -117,7 +117,8 @@ def click_grid(step_m: float = 0.5) -> go.Scatter:
 
 
 def minimap_figure(machine_xy: tuple[float, float] | None = None, clickable: bool = False):
-    """Live minimap. Trace 0: trail, trace 1: player (moved client-side), then extras."""
+    """Live minimap. Trace 0: trail, 1: player, 2: recent bounces (all moved client-side),
+    then extras."""
     fig = court_figure(height=420)
     fig.add_trace(
         go.Scatter(
@@ -138,6 +139,16 @@ def minimap_figure(machine_xy: tuple[float, float] | None = None, clickable: boo
             marker={"color": ME_COLOR, "size": 13, "line": {"color": "#222", "width": 1.5}},
             hovertemplate="x %{x:.1f} m, y %{y:.1f} m<extra>me</extra>",
             name="me",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[],
+            y=[],
+            mode="markers",
+            marker={"color": "#4dabf7", "size": 9, "line": {"color": "#fff", "width": 1}},
+            hovertemplate="bounce x %{x:.2f} m, y %{y:.2f} m<extra></extra>",
+            name="bounces",
         )
     )
     if machine_xy is not None:

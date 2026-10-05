@@ -59,6 +59,15 @@ class ProcessingDefaults(BaseModel):
     #: calibrated view (camera being set up, picked up, or knocked): detections there are
     #: ignored. Settled play scores 0.8-0.98 (also at dusk); a camera still being aimed ~0.5.
     view_min: float = 0.6
+    #: Ball detector spec (``name[:weights][@size]``, see ``swingvision.ball.detectors``).
+    #: ``auto``: the newest trained U-Net in the output folder, else the motion detector.
+    ball_detector: str = "auto"
+    #: Ball sweep rate in pass 1 (Hz); ``None`` runs the detector on every frame. With a
+    #: rate, ``ball_refine`` re-runs it at the full frame rate around hits, bounces, audio
+    #: onsets and lost-ball gaps (PLAN.md §7.4.2).
+    ball_sweep_hz: float | None = None
+    ball_refine_before_s: float = 0.25
+    ball_refine_after_s: float = 0.35
 
 
 class AppSettings(BaseModel):

@@ -102,7 +102,7 @@ Cross-session trends (`pyarrow.dataset`), annotated proxy render, TensorRT/perfo
 | Person detection | ✅ Ultralytics YOLO11m on the court-ROI crop at 1920 px, 15 Hz, raw model on GPU tensors | M2: 1920 px finds the far player's legs at the frame edge (5/5 frames vs 2/5 at 1280). AGPL, fine for personal use. Weights pinned by SHA-256 in `models/registry.py`. |
 | Multi-object tracking | ✅ Own court-space tracker: Hungarian frame-to-frame association (speed + σ + physical-height gates) and a tracklet-chain DP for "me" | M2: simpler and more robust for one player than BoT-SORT; Phase 2 adds the two-player constraint and re-ID (`boxmot`/OSNet then). See `docs/m2-player-tracking.md`. |
 | Re-ID | OSNet embeddings (via `boxmot` weights) | Appearance profile gallery. |
-| Ball detection | **Slim** TrackNet-style heatmap U-Net (3-frame input + background, width 32, stride-2 stem), trained on own footage at ≈1280 px wide on a court-ROI crop | M0 spike: a TrackNet-size net at 1280×720 runs at only 20 fps, the slim variant at 190 fps. Optionally distil from pretrained TrackNetV3. |
+| Ball detection | ✅ **Slim** TrackNet-style heatmap U-Net (frames t−2, t, t+2; width 32; heatmap at ½ input), trained on own labels at 1920 px wide (half of 4K); a classical motion detector (no training) and a COCO YOLO's sports-ball class as alternatives | M0 spike: a TrackNet-size net at 1280×720 runs at only 20 fps, the slim variant at 190. M3: 1920 px is needed for the far ball; see `docs/m3-ball-tracking.md` for the benchmark. |
 | Court keypoints | ✅ Classical line detector: white top-hat → Hough → court-model hypothesis search → sub-pixel ridge refinement + full camera fit | M1: needs no training data and handles low corner cameras, wide lenses, partly visible courts, pickleball lines and neighboring courts. A keypoint CNN fine-tuned on confirmed calibrations stays an option if a view ever defeats it. See `docs/m1-court-calibration.md`. |
 | 2D pose | ViTPose (HF `transformers` `VitPoseForPoseEstimation`) on 4K player crops | Pure torch. RTMPose via `rtmlib` is the alternative. |
 | 3D lifting | MotionBERT (vendored model code, Apache-2.0) | COCO-17 → H36M-17 joint mapping. |
@@ -271,12 +271,13 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 3 | `audio_onsets` | – | 1 | onset times + strength + spectral features |
 | 4 | `court_auto` | – | 1 | median background per time window, court detection on the dominant camera position, per-window drift check → `court/auto.json` |
 | 5 | `camera` | – | 1 | calibration gate: user-confirmed (`court/user.json`) or auto-accepted calibration → `calibration.json` |
-| 6 | `pass1_detect` | ✓ | 1 | **single decode pass**: person detections at 15 Hz (✅ M2) + ball heatmap peaks (M3). Runs *after* `camera` (crops to the court) but only the 64 px-snapped crop is in its fingerprint, so recalibrating doesn't rerun it |
+| 6 | `pass1_detect` | ✓ | 1 | **single decode pass**: person detections at 15 Hz (✅ M2) + ball candidates on every frame or at the sweep rate (✅ M3). Runs *after* `camera` (crops to the court) but only the 64 px-snapped crops are in its fingerprint, so recalibrating doesn't rerun it; the persons part has its own fingerprint, so changing the ball detector keeps the person boxes |
 | 7 | `players_track` | – | 1 (single player) / 2 (two players) | ✅ court positions, ROI, tracklets, static objects/ball machine, the "me" chain. Phase 2 adds the top-2 singles constraint |
 | 8 | `identity` | ✓ (light) | 2 | tracklet ↔ profile ("me" / "opponent"), confidence. In Phase 1 the only tracked player is "me" |
 | 9 | `movement` | – | 1 | ✅ smoothed position/velocity per player (Kalman/RTS with per-point ground σ), short gaps bridged |
-| 10 | `ball_track` | – | 1 | cleaned trajectory, gap fill, sub-tracks |
-| 11 | `events` | – | 1 | hits (with hitter), bounces, net events, serve candidates |
+| 10a | `ball_refine` | ✓ | 1 | ✅ with a sweep rate: full-rate detection in windows around moments found from the sweep (events, strong audio onsets, track gaps) |
+| 10 | `ball_track` | – | 1 | ✅ linked trajectory (tracklets + Viterbi selection of the ball in play), outliers dropped, short gaps filled |
+| 11 | `events` | – | 1 | ✅ hits (hitter = me / machine), bounces with court position, net contacts, sub-frame contact time, audio match (serve candidates: M6) |
 | 12 | `ball_3d` | – | 1 | per-shot 3D flight fit: speeds, net clearance, apex, landing |
 | 13 | `pass2_pose` | ✓ | 1 | 2D pose on 4K crops in windows around hits (± 1.5 s) at full fps, plus sparse pose elsewhere (e.g. 5 fps) |
 | 14 | `pose3d` | ✓ | 1 | MotionBERT lifting, world placement, scale from profile height |
@@ -289,7 +290,7 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 
 **Calibration gating**: stages 4–5 run automatically. `court_auto` runs right after `ingest`, so the calibration can be reviewed while the proxy encodes. Unless the auto calibration passes the Settings threshold ("continue without review when line RMS < X px", off by default), `camera` stops the job with status `needs_action`; Jobs and the session page link to the Calibrate page, and confirming there re-queues the job. Stage 6 doesn't depend on calibration except for the court-ROI crop. The `camera` stage's fingerprint covers only the chosen camera, so re-confirming an unchanged calibration invalidates nothing; if the user later adjusts calibration, stages 7+ rerun on CPU in minutes. (The runner re-plans each stage just before running it, so a stage's config may read files that upstream stages or the user wrote.)
 
-**Throughput** for 1 h of 4K60 (216k frames), measured in the M0 spike (`docs/spikes/m0-video-pipeline.md`): PyNvVideoCodec decode 305 fps; YOLO11-m @1280 FP16 104 img/s; slim ball U-Net @1280×720 190 img/s. *M2 measured:* YOLO11m at the 1920 px input the far player needs runs 46 img/s, so persons run at 15 Hz; the person pass alone is **0.52× realtime (≈31 min per hour)**. Pass 1 is ≈75–90 fps (**≈45 min per hour**). Add the proxy (≈11 min per hour), pose windows (≈30–40% of frames), and CPU stages. Expected total is **≈1.5–2.5 h per hour of footage**, which fits overnight. NVDEC/NVENC are shared, so GPU stages run one at a time. Optimizations if needed: TensorRT, skipping dead time (ball collection) using frame differencing and audio-onset density.
+**Throughput** for 1 h of 4K60 (216k frames), measured in the M0 spike (`docs/spikes/m0-video-pipeline.md`): PyNvVideoCodec decode 305 fps; YOLO11-m @1280 FP16 104 img/s; slim ball U-Net @1280×720 190 img/s. *M2 measured:* YOLO11m at the 1920 px input the far player needs runs 46 img/s, so persons run at 15 Hz; the person pass alone is **0.52× realtime (≈31 min per hour)**. *M3 measured:* the slim ball U-Net at 1920 px on every frame runs at 0.84× realtime (≈50 min per hour); a 15 Hz sweep with full-rate windows saved nothing on a whole practice session, so pass 1 is ≈1.4× realtime when both detectors run (person boxes are reused when only the ball model changes). Pass 1 is ≈75–90 fps (**≈45 min per hour**). Add the proxy (≈11 min per hour), pose windows (≈30–40% of frames), and CPU stages. Expected total is **≈1.5–2.5 h per hour of footage**, which fits overnight. NVDEC/NVENC are shared, so GPU stages run one at a time. Optimizations if needed: TensorRT, skipping dead time (ball collection) using frame differencing and audio-onset density.
 
 ---
 
@@ -393,8 +394,9 @@ at **full frame rate only around important moments**:
 Schedules are first-class benchmark subjects: `{model} × {sweep rate} × {window size}` all run
 through the same harness. This answers "is a big model at 15 Hz + full-rate windows better
 than a slim model at 60 Hz?" with numbers. In the pipeline this splits ball detection into a
-`ball_sweep` part of pass 1 and a `ball_refine` stage after `events` (which then re-runs on
-the refined detections).
+sweep in pass 1 and a `ball_refine` stage, which links the sweep and finds events itself to
+place its windows; `ball_track` and `events` then run on the merged detections.
+(✅ M3: see `docs/m3-ball-tracking.md` for what the measurements showed.)
 
 ### 7.5 Events: hits, bounces, net
 
@@ -612,22 +614,18 @@ Each milestone ends with tests passing, a demo on real footage, and a short READ
   * **No** spectators, neighboring-court players or objects tracked as the player: 48 of 48 random hitting moments audited by eye have the box on the player; playground spectators beyond the fence are ignored.
   * Oct 4 (51 min): 85% of hitting time, the rest with the player outside the picture (behind the far baseline at the frame's top edge); 18 of 18 tracked audit samples on the player.
 
-#### M3 — Ball detection, trajectory, events (+ labeling)
-* Labeling page first. Label full-frame-rate ground-truth clips (§7.4.1), plus sampled frames
-  for training.
-* `BallDetector` interface, and at least three candidate detectors (§7.4.1).
-* Benchmark harness `sv bench ball` with the accuracy-vs-cost report. Pick the default
-  detector from it.
-* Adaptive frame-rate scheduling (`ball_sweep` + `ball_refine`, §7.4.2), benchmarked against
-  fixed full-rate runs.
-* ROI-crop inference in `pass1_detect`, trajectory linking/cleaning.
-* Event detection (rules + audio fusion with distance-based delay compensation), bounce refinement, machine feeds vs the player's hits.
-* Labeling page (assisted + keyframe interpolation), `sv train ball`, `sv train events`, `sv eval`.
-* Label ~300–500 frames (→ several thousand with interpolation), then fine-tune. Prioritize practice footage and include ball-machine sessions.
-* ✅ Exit criteria:
-  * Ball F1 ≥ 0.85 (near) / ≥ 0.75 (far) on held-out data
-  * Bounce event F1 ≥ 0.85
-  * Median bounce position error ≤ 15 cm near / ≤ 35 cm far (targets to refine after the spike)
+#### M3 — Ball detection, trajectory, events (+ labeling) ✅ (done 2026-10-05)
+* Labeling page (clips cached as JPEGs, labels pre-filled by the current detector + tracker, click-to-snap, no-ball/hidden, keyframe interpolation, events, train/test split, suggestions), `sv labels list|pseudo`.
+* `BallDetector` interface with three detector families: classical frame-differencing `motion` (camera-shake compensation, streak centroids), slim TrackNet-style `unet` trained on own labels, COCO YOLO "sports ball". Benchmark `sv bench ball` (raw candidates cached per subject, HTML table + accuracy-vs-cost Pareto chart); `unet` at every frame is the default (`auto` = newest trained model).
+* Frame-rate schedules: ball sweep in `pass1_detect` + `ball_refine` windows, benchmarked against every frame (no gain on play-dense footage with a 3-frame model, see `docs/m3-ball-tracking.md`).
+* `pass1_detect` v2 (persons + ball in one decode, separate fingerprints so a new ball model keeps the person boxes), `ball_track` (tracklets + Viterbi selection of the ball in play, gap fill), `events` (kinks: line fits + velocity-change test; rules for hit / bounce / net, sub-frame contact, bounce ground point, audio matching with sound-delay compensation, ball-machine feeds).
+* `sv train ball` (half-size frame cache, focal loss, hard negatives at earlier false detections), `sv train events` (gradient boosting on kink features; activated only from 200 labeled kinks, so rules stay in use for now), `sv eval`.
+* Session page: ball and trail on the video, hits/bounces on the timeline, recent bounces on the court map, Ball card; Settings card for the detector and schedule.
+* Labels: 9 held-out ground-truth clips (934 frames with the ball, 467 without, 26 events), 2,500 hand-checked or color-labeled training frames, 900 pseudo-labels. No ball-machine footage exists yet: machine feeds are covered by synthetic tests only.
+* ✅ Exit criteria (held-out clips, `unet:ball-v2`, every frame; details in `docs/m3-ball-tracking.md`):
+  * Ball F1 **0.908** near (≥ 0.85) / **0.951** far (≥ 0.75); with the strict size-only tolerance 0.887 / 0.950
+  * Bounce event F1 **0.941** (≥ 0.85)
+  * Median bounce position error **2.4 cm** near (≤ 15 cm) / **4.3 cm** far (≤ 35 cm), vs label-derived bounces; calibration adds ≈2 cm near, 4–7 cm far
 
 #### M4 — Shots, landings, 3D flight, speed
 * `ball_3d` physics fit with priors/uncertainties, `shots` assembly (initially without stroke type).

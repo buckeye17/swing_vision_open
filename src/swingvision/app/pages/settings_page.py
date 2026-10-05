@@ -134,6 +134,67 @@ def _players_card(s):
     )
 
 
+def _ball_card(s):
+    from swingvision.ball.detectors.unet import list_weights
+
+    p = s.processing
+    opts = [
+        {"value": "auto", "label": "Automatic (newest trained model, else motion)"},
+        {"value": "motion", "label": "Motion (classical, no training)"},
+    ]
+    if s.output_root is not None:
+        for card in sorted(
+            list_weights(s.output_root), key=lambda c: c.get("created_at", ""), reverse=True
+        ):
+            opts.append(
+                {
+                    "value": f"unet:{card['name']}",
+                    "label": f"Trained U-Net {card['name']} ({card.get('train_frames', '?')} "
+                    "labeled frames)",
+                }
+            )
+    if p.ball_detector not in [o["value"] for o in opts]:
+        opts.append({"value": p.ball_detector, "label": p.ball_detector})
+    return dmc.Paper(
+        [
+            dmc.Title("Ball detection", order=4),
+            dmc.Text(
+                "Train your own model from labeled clips (Labeling page, then sv train ball). "
+                "A sweep rate runs the detector on part of the frames and every frame only "
+                "around hits, bounces and lost-ball gaps.",
+                size="sm",
+                c="dimmed",
+                mb="sm",
+            ),
+            dmc.SimpleGrid(
+                [
+                    dmc.Select(
+                        id="set-ball-detector",
+                        label="Detector",
+                        data=opts,
+                        value=p.ball_detector,
+                        allowDeselect=False,
+                    ),
+                    dmc.Select(
+                        id="set-ball-sweep",
+                        label="Frames analysed",
+                        data=[
+                            {"value": "full", "label": "Every frame"},
+                            {"value": "30", "label": "30 Hz + full-rate windows"},
+                            {"value": "15", "label": "15 Hz + full-rate windows"},
+                        ],
+                        value="full" if not p.ball_sweep_hz else str(int(p.ball_sweep_hz)),
+                        allowDeselect=False,
+                    ),
+                ],
+                cols={"base": 1, "sm": 2},
+            ),
+        ],
+        p="lg",
+        withBorder=True,
+    )
+
+
 def layout(**_):
     s = state.settings()
     return dmc.Container(
@@ -270,6 +331,7 @@ def layout(**_):
                         withBorder=True,
                     ),
                     _players_card(s),
+                    _ball_card(s),
                     dmc.Paper(
                         [
                             dmc.Title("System", order=4, mb="xs"),
@@ -333,6 +395,8 @@ def _browser_start(value):
     State("set-person-rate", "value"),
     State("set-person-input", "value"),
     State("set-roi-beside", "value"),
+    State("set-ball-detector", "value"),
+    State("set-ball-sweep", "value"),
     prevent_initial_call=True,
 )
 def _save(
@@ -349,6 +413,8 @@ def _save(
     person_rate,
     person_input,
     roi_beside,
+    ball_detector,
+    ball_sweep,
 ):
     if not n:
         return no_update, no_update
@@ -378,6 +444,8 @@ def _save(
     s.processing.person_rate_hz = float(person_rate or s.processing.person_rate_hz)
     s.processing.person_input_px = int(person_input or s.processing.person_input_px)
     s.processing.roi_beside_m = float(roi_beside or s.processing.roi_beside_m)
+    s.processing.ball_detector = ball_detector or s.processing.ball_detector
+    s.processing.ball_sweep_hz = None if ball_sweep in (None, "full") else float(ball_sweep)
     save_settings(s)
     if state.OPTIONS.start_worker:
         ensure_worker(s.output_root)

@@ -21,6 +21,7 @@ PAGE_MODULES = [
     "session_review",
     "calibrate",
     "profiles",
+    "labeling",
     "settings_page",
 ]
 
@@ -29,6 +30,7 @@ NAV = [
     ("New session", "/new", "tabler:video-plus", "exact"),
     ("Jobs", "/jobs", "tabler:list-check", "exact"),
     ("Profiles", "/profiles", "tabler:users", "exact"),
+    ("Labeling", "/labeling", "tabler:target", "exact"),
     ("Settings", "/settings", "tabler:settings", "exact"),
 ]
 

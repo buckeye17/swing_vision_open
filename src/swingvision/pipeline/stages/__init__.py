@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from swingvision.pipeline.runner import Registry
+from swingvision.pipeline.stages.ball import BallRefineStage, BallTrackStage, EventsStage
 from swingvision.pipeline.stages.court import CameraStage, CourtAutoStage
 from swingvision.pipeline.stages.ingest import AudioOnsetsStage, IngestStage, ProxyStage
 from swingvision.pipeline.stages.players import (
@@ -26,5 +27,8 @@ def default_registry() -> Registry:
             Pass1DetectStage(),
             PlayersTrackStage(),
             MovementStage(),
+            BallRefineStage(),
+            BallTrackStage(),
+            EventsStage(),
         ]
     )

@@ -19,6 +19,12 @@ models_app = typer.Typer(no_args_is_help=True, help="Pretrained model weights.")
 app.add_typer(models_app, name="models")
 profiles_app = typer.Typer(no_args_is_help=True, help="Player profiles.")
 app.add_typer(profiles_app, name="profiles")
+labels_app = typer.Typer(no_args_is_help=True, help="Ball and event labels.")
+app.add_typer(labels_app, name="labels")
+bench_app = typer.Typer(no_args_is_help=True, help="Benchmarks.")
+app.add_typer(bench_app, name="bench")
+train_app = typer.Typer(no_args_is_help=True, help="Train models on your labels.")
+app.add_typer(train_app, name="train")
 
 
 @app.command("app")
@@ -266,6 +272,180 @@ def profiles_add(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from None
     typer.echo(f"Created profile {p.id} ({p.name})")
+
+
+# ---------------------------------------------------------------------------
+# Ball: labels, benchmark, training, evaluation (M3)
+# ---------------------------------------------------------------------------
+
+
+def _label_store():
+    from swingvision.training.labels import LabelStore
+
+    settings = load_settings()
+    return settings, LabelStore(settings.require_output_root())
+
+
+def _gt_clips(store, split: str | None, done_only: bool = True):
+    clips = [c for c in store.list_clips() if c.kind == "gt"]
+    if done_only:
+        clips = [c for c in clips if c.status == "done"]
+    if split:
+        clips = [c for c in clips if c.split == split]
+    return clips
+
+
+@labels_app.command("list")
+def labels_list() -> None:
+    """Labeled clips: frames labeled, visibility counts, events."""
+    _, store = _label_store()
+    for c in store.list_clips():
+        vis = {"visible": 0, "none": 0, "occluded": 0}
+        for f in c.frames:
+            lab = c.label(f)
+            if lab is not None:
+                vis[lab.vis] += 1
+        typer.echo(
+            f"{c.session_id}/{c.clip_id:<8} {c.kind:<6} {c.split or '-':<5} {c.status:<11} "
+            f"{c.t0_s:8.1f}s {len(c.frames):4d} fr  visible {vis['visible']:4d}  none "
+            f"{vis['none']:4d}  occluded {vis['occluded']:4d}  events {len(c.events)}"
+        )
+
+
+@labels_app.command("pseudo")
+def labels_pseudo(
+    session_id: str,
+    clips: Annotated[int, typer.Option(help="Number of sample clips to create")] = 20,
+    detector: Annotated[str, typer.Option(help="Detector spec (default: the active one)")] = "auto",
+    seed: int = 0,
+) -> None:
+    """Create training clips at hitting moments, labeled from confident detections."""
+    from swingvision.ball.detectors import resolve_spec
+    from swingvision.training.pseudo import make_pseudo_clips
+
+    settings, store = _label_store()
+    spec = resolve_spec(detector, settings.output_root)
+    made = make_pseudo_clips(store, settings, session_id, clips, spec, seed=seed, log=typer.echo)
+    typer.echo(f"{len(made)} clips, {sum(n for _, n in made)} pseudo-labels ({spec})")
+
+
+@bench_app.command("ball")
+def bench_ball(
+    subjects: Annotated[
+        list[str] | None,
+        typer.Argument(help="detector[,sweep_hz], e.g. motion  motion,15  unet:ball-v1"),
+    ] = None,
+    split: Annotated[str, typer.Option(help="Clips to score: test | train | all")] = "test",
+    refresh: Annotated[bool, typer.Option(help="Re-run detectors (ignore cached runs)")] = False,
+) -> None:
+    """Compare ball detectors and schedules on the ground-truth clips (HTML report)."""
+    from swingvision.training.bench_ball import parse_subject, run_bench
+
+    settings, store = _label_store()
+    clips = _gt_clips(store, None if split == "all" else split)
+    if not clips:
+        raise typer.BadParameter("No finished ground-truth clips (label some on the Labeling page)")
+    subs = [parse_subject(s) for s in (subjects or ["motion"])]
+    res = run_bench(store, settings, subs, clips, refresh=refresh, log=typer.echo)
+    typer.echo(f"Report: {res.report}")
+
+
+@train_app.command("ball")
+def train_ball_cmd(
+    name: Annotated[str, typer.Argument(help="Name of the new weights")],
+    epochs: int = 30,
+    batch: int = 16,
+    lr: float = 2e-3,
+    val_split: Annotated[
+        str | None, typer.Option(help="Validation clips' split (monitoring only)")
+    ] = "test",
+) -> None:
+    """Train the slim U-Net ball detector on the labeled clips (split=train)."""
+    from swingvision.training.train_ball import TrainConfig, ensure_cached, train
+
+    settings, store = _label_store()
+    clips = [c for c in store.list_clips() if c.kind in ("gt", "sample")]
+    tr = [c for c in clips if c.split != "test"]
+    va = [c for c in clips if val_split and c.split == val_split and c.status == "done"]
+    ensure_cached(store, settings, tr + va, log=typer.echo)
+    card = train(store, settings, TrainConfig(name, epochs, batch, lr), tr, va, log=typer.echo)
+    typer.echo(f"Trained {card['name']} on {card['train_frames']} frames")
+
+
+@train_app.command("events")
+def train_events_cmd(
+    name: Annotated[str, typer.Argument(help="Name of the new event model")],
+    detector: Annotated[str, typer.Option(help="Detector whose tracks to learn from")] = "auto",
+) -> None:
+    """Train the event classifier on kinks of predicted tracks vs labeled events."""
+    from swingvision.ball.detectors import resolve_spec
+    from swingvision.training.bench_ball import Bench, Subject
+    from swingvision.training.train_events import collect_kinks, fit, save_model
+
+    settings, store = _label_store()
+    spec = resolve_spec(detector, settings.output_root)
+    clips = [c for c in _gt_clips(store, "train") if c.events_labeled]
+    # The detector usually trained on these clips: fine for event features (not a score).
+    bench = Bench(store, settings, honor_folds=False)
+    feats, labels = collect_kinks(bench, Subject(spec), clips, log=typer.echo)
+    if not feats:
+        raise typer.BadParameter("No kinks found on the training clips")
+    clf = fit(feats, labels)
+    counts = {k: labels.count(k) for k in sorted(set(labels))}
+    path = save_model(
+        settings.require_output_root(),
+        name,
+        clf,
+        {"detector": spec, "train_clips": len(clips), "kinks": len(feats), "classes": counts},
+    )
+    from swingvision.training.train_events import MIN_TRAIN_KINKS
+
+    typer.echo(f"Saved {path} ({len(feats)} kinks: {counts})")
+    if len(feats) < MIN_TRAIN_KINKS:
+        typer.echo(
+            f"Not activated: fewer than {MIN_TRAIN_KINKS} kinks; the rules stay in use. "
+            "Label hits and bounces on more clips."
+        )
+
+
+@app.command("eval")
+def eval_cmd(
+    detector: Annotated[str, typer.Option(help="Detector spec (default: the active one)")] = "auto",
+    sweep_hz: Annotated[float | None, typer.Option(help="Sweep rate (default: full rate)")] = None,
+    split: str = "test",
+) -> None:
+    """Ball and event metrics on the held-out ground-truth clips vs the M3 exit criteria."""
+    import json
+
+    from swingvision.ball.detectors import resolve_spec
+    from swingvision.ball.schedule import Schedule
+    from swingvision.training.bench_ball import Bench, Subject
+
+    settings, store = _label_store()
+    spec = resolve_spec(detector, settings.output_root)
+    clips = _gt_clips(store, split)
+    r = Bench(store, settings).score(Subject(spec, Schedule(sweep_hz)), clips, log=typer.echo)
+    b, ev = r["ball"], r["bounce"]
+    checks = [
+        ("Ball F1 near >= 0.85", b["near"]["f1"], b["near"]["f1"] >= 0.85),
+        ("Ball F1 far >= 0.75", b["far"]["f1"], b["far"]["f1"] >= 0.75),
+        ("Bounce F1 >= 0.85", ev["f1"], ev["f1"] >= 0.85),
+        (
+            "Bounce error near <= 0.15 m",
+            ev["median_pos_err_near_m"],
+            ev["median_pos_err_near_m"] is not None and ev["median_pos_err_near_m"] <= 0.15,
+        ),
+        (
+            "Bounce error far <= 0.35 m",
+            ev["median_pos_err_far_m"],
+            ev["median_pos_err_far_m"] is not None and ev["median_pos_err_far_m"] <= 0.35,
+        ),
+    ]
+    typer.echo(
+        json.dumps({k: r[k] for k in ("subject", "clips", "ball", "bounce", "hit")}, indent=1)
+    )
+    for label, value, ok in checks:
+        typer.echo(f"{'PASS' if ok else 'FAIL'}  {label}: {value}")
 
 
 @settings_app.command("show")

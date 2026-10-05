@@ -4,12 +4,13 @@ A personal, local-first tennis video analysis tool. Point a fixed camera at the 
 a practice or a match, and let your NVIDIA GPU break the footage down. The roadmap and
 architecture are in [PLAN.md](PLAN.md).
 
-**Status: milestones M0–M2 are complete.** The app ingests footage, builds a
+**Status: milestones M0–M3 are complete.** The app ingests footage, builds a
 browser-playable proxy, detects audio onsets, finds the court and fits a full camera model
 (sub-pixel on real footage), checks whether the camera moved during the recording, and lets
-you review the calibration. It then tracks you on the court (also at dusk) and reports your
-movement: distance, speeds, a live court map and a heatmap. Ball tracking and practice
-analytics arrive in M3–M7.
+you review the calibration. It tracks you on the court (also at dusk) and reports your
+movement: distance, speeds, a live court map and a heatmap. It tracks the ball on every frame
+with a detector trained on your own labeled footage and finds hits, bounces (with their spot
+on the court) and net contacts. Shot speeds and practice analytics arrive in M4–M7.
 
 ## Requirements
 
@@ -77,6 +78,35 @@ On the session page:
 For ball-machine sessions, the machine is recognized when it stands still in view; otherwise
 turn on *Click the court to place the ball machine* under the court map and click its spot.
 
+### Ball tracking and events
+
+In the same decoding pass the worker looks for the ball on every frame (or, to save GPU
+time, at a lower rate with full-rate windows around hits, bounces and lost-ball moments) and
+links the detections into one ball track. Hits, bounces and net contacts are found where the
+ball's path breaks; bounces get a position on the court, hits are timed with the racket
+sound when one matches.
+
+On the session page, *Ball* draws the ball and a short trail on the video, the timeline marks
+hits (orange) and bounces (blue), and the court map shows recent bounces.
+
+The ball detector works out of the box (a classical motion detector, slow at ≈3 GPU-hours per
+footage hour and unreliable near the player) and gets much better and faster when trained on
+your own footage (≈50 GPU-minutes per footage hour):
+
+1. **Labeling** page: pick a session, create a 3 s clip (suggestions list moments where the
+   tracker struggled). Labels are pre-filled from the current detector. Step through the
+   frames (←/→), click the ball where it's wrong (clicks snap to the moving ball), *N* for no
+   ball, *O* when it's hidden, *I* to interpolate between labeled frames, *H*/*B* for hits and
+   bounces. Mark the clip *Done* as **Train** or **Test**.
+2. `uv run sv train ball my-model` trains the detector on the Train clips (≈30 min on an RTX
+   A5000 laptop); `uv run sv labels pseudo <session-id>` adds automatically labeled clips from
+   confident detections.
+3. `uv run sv bench ball motion unet:my-model "unet:my-model,15"` compares detectors and
+   frame-rate schedules on the Test clips (HTML report with an accuracy-vs-cost chart);
+   `uv run sv eval` checks the active detector against the targets.
+4. In **Settings → Ball detection** pick the detector (*Automatic* uses your newest model),
+   then reprocess sessions (person detections are kept).
+
 ### Profiles
 
 Create a profile for yourself on **Profiles** (name, handedness, one- or two-handed
@@ -97,6 +127,12 @@ uv run sv probe D:\footage\practice.mp4
 uv run sv court detect D:\footage\practice.mp4 --out overlay.jpg  # court fit + overlay image
 uv run sv models list                  # model weights, licenses, download status
 uv run python scripts/m2_eval_tracking.py <session-id> --out sheets/  # tracking check
+uv run sv labels list                  # labeled clips
+uv run sv labels pseudo <session-id> --clips 20   # training clips from confident detections
+uv run sv train ball my-model          # train the ball detector on your labels
+uv run sv train events my-events       # learned hit/bounce classifier (optional)
+uv run sv bench ball motion unet:my-model "unet:my-model,15"   # compare (HTML report)
+uv run sv eval                         # metrics on the Test clips vs the M3 targets
 ```
 
 ## Recording tips
@@ -132,6 +168,8 @@ src/swingvision/
   io/                ffprobe, ffmpeg runner, proxy encode, audio + onsets, frame decoding
   court/             court model, camera model, detection, calibration (M1)
   players/           person detection, tracking, movement (M2)
+  ball/              ball detectors, frame-rate schedules, linking, events (M3)
+  training/          labels, labeling helpers, training, benchmark, evaluation (M3)
   models/            pretrained weights registry (URLs, SHA-256, licenses)
   pipeline/          stage framework, DAG runner, worker process, stages/
   app/               Dash + Mantine UI (pages/, components/, assets/)

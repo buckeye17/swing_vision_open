@@ -113,3 +113,44 @@ def court_video(tmp_path_factory):
     proc.stdin.close()
     assert proc.wait() == 0
     return path
+
+
+BALL_FPS = 60
+
+
+@pytest.fixture(scope="session")
+def ball_video(tmp_path_factory):
+    """2.5 s, 1280×720 @ 60 fps: a "player" at the near baseline and a ball hit to the far
+    court at 0.3 s. Returns (path, image positions (n, 2) with NaN where no ball, bounce times)."""
+    if not HAS_FFMPEG:
+        pytest.skip("ffmpeg not available")
+    import numpy as np
+
+    from tests.synth_ball import Flight, draw_ball, image_track
+
+    path = tmp_path_factory.mktemp("ball") / "ball.mp4"
+    base = render(COURT_CAMERA, occluder=False)
+    n = int(2.5 * BALL_FPS)
+    t = np.arange(n) / BALL_FPS
+    fl = Flight(0.3, (1.0, -11.0, 1.0), (-1.5, 18.0, 4.5))
+    px, bounces, _ = image_track(COURT_CAMERA, fl, t)
+    X, _, _ = fl.positions(t)
+    proc = subprocess.Popen(
+        [
+            "ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+            "-s", "1280x720", "-r", str(BALL_FPS), "-i", "pipe:0",
+            "-c:v", "libx264", "-crf", "10", "-pix_fmt", "yuv420p", str(path),
+        ],
+        stdin=subprocess.PIPE,
+    )  # fmt: skip
+    for i in range(n):
+        frame = base.copy()
+        cv2.rectangle(frame, (700, 420), (760, 640), (40, 200, 60), -1)
+        if np.isfinite(px[i]).all():
+            depth = COURT_CAMERA.depth(X[i : i + 1])[0]
+            r = max(2.2, 2 * COURT_CAMERA.f * 0.0335 / depth)
+            draw_ball(frame, px[i, 0], px[i, 1], r=r)
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    assert proc.wait() == 0
+    return path, px, bounces
