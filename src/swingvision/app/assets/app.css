@@ -1,0 +1,12 @@
+/* File browser rows */
+.sv-fb-row {
+    padding: 6px 10px;
+    border-radius: var(--mantine-radius-sm);
+}
+.sv-fb-row:hover {
+    background: var(--mantine-color-default-hover);
+}
+.sv-fb-row-selected,
+.sv-fb-row-selected:hover {
+    background: var(--mantine-primary-color-light);
+}

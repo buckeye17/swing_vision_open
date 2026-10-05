@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "swingvision-app",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "sv", "app", "--port", "8050"],
+      "port": 8050
+    }
+  ]
+}

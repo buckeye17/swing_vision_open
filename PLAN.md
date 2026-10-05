@@ -1,0 +1,717 @@
+# Swing Vision Open — Implementation Plan
+
+A personal, local-first tennis video analysis tool. It ingests full-court footage from a fixed camera, runs computer vision on the local NVIDIA GPU, and presents results in a Dash Mantine Components web app.
+
+---
+
+## 1. Decisions captured
+
+| Topic | Decision |
+|---|---|
+| Camera | Fixed, raised, behind one baseline, full court visible. Camera doesn't move during a recording. |
+| Footage | 4K @ 60 fps (read fps/resolution from file; don't hard-code). |
+| Recording length | 1–2 hours typical; overnight batch processing is acceptable. |
+| Format | Singles only (≤ 2 players tracked). |
+| Court calibration | Auto-detect court keypoints → user can drag to adjust → saved per video. |
+| Player identity | Stored appearance profile (re-ID embeddings), matched automatically across videos. |
+| Match scoring | CV infers point winners, user reviews/corrects in a timeline UI. |
+| Match formats | Standard sets (ad/no-ad, tiebreaks), pro sets / first-to-N, match tiebreak, free play (no score). |
+| Practice targets | Drawn on a top-down court diagram (rectangles/circles). |
+| Segments | Timestamps only (no clip files); played in the in-app player. |
+| Swing analysis | 3D pose lifting, stroke classification, swing phase timing. |
+| Model training | User will label a few hundred frames; plan includes labeling UI + fine-tuning. |
+| Hardware | NVIDIA RTX A5000 Laptop GPU, 16 GB VRAM, Windows 11. |
+| Stack | Python 3.12 via `uv`, PyTorch (CUDA), Dash ≥ 3 + dash-mantine-components ≥ 2. |
+| Priority | **Phase 1 (MVP) = practice mode**, including speed, movement, strokes, and 3D swing analysis. **Phase 2 = match mode.** Phase 3 = cross-session trends and polish. |
+
+---
+
+## 1a. Feature priorities
+
+### Phase 1 — MVP: practice mode (one player on court, optionally a ball machine)
+
+| Feature | Notes |
+|---|---|
+| App shell, settings, output folder, file-selection modal, job queue/worker | Foundation |
+| Ingest, browser proxy, audio onsets | Foundation |
+| Court calibration (auto + adjust) and full camera model incl. net points | Needed for landings and speed |
+| Single-player detection/tracking, ball-machine handling | The only player in the court ROI is "me" (no re-ID needed) |
+| Profile basics: name, handedness, 1H/2H backhand, height | Used by stroke rules and 3D pose scaling |
+| Player movement (position, distance, speed, heatmaps) | |
+| Ball detection, trajectory, hit/bounce/net events, labeling + fine-tuning | |
+| Ball landing spots + **3D flight fit → speed**, net clearance, apex | |
+| Practice segmentation: one segment per shot, grouped into blocks; auto hitting side | Sub-modes: self-feed, ball machine, serve practice |
+| Targets drawn on court (relative/absolute, optional stroke filter) + accuracy tracking | Core practice deliverable |
+| 2D pose → 3D lifting, kinematics, swing phases, stroke classification | |
+| Session review, Practice, Swings, and per-session Stats pages; CSV/Parquet export | |
+
+### Phase 2 — Match mode (human hitting partner)
+
+| Feature | Notes |
+|---|---|
+| Two-player tracking (singles constraint), opponent tracking | |
+| Appearance profiles: OSNet re-ID gallery, outfits, identity review flow | |
+| Match segmentation: serve detection state machine, faults, lets, warm-up, match start marker | |
+| Point outcome inference with confidence + line-call uncertainty | |
+| Scoring engine (all formats), end-switching modes, server consistency checks | |
+| Points review page (review queue, overrides, split/merge, live rescoring, lock) | |
+| Match stats (serve %, points won on serve/return, rally length, opponent stats) | |
+
+### Phase 3 — Later
+
+Cross-session trends (`pyarrow.dataset`), annotated proxy render, TensorRT/performance pass, plus the §15 ideas.
+
+**Forward compatibility rule for Phase 1:** schemas, the stage framework, and `session.json` must already carry match-mode fields (`mode`, `hitter`, `player_id`, `segment.kind`, `format`). That way Phase 2 adds stages and pages without migrating Phase 1 data. The stage DAG is mode-aware, so practice sessions skip match-only stages.
+
+---
+
+## 2. System overview
+
+```
+                ┌───────────────────────── Dash app (127.0.0.1) ─────────────────────────┐
+                │ Library · New Session · Calibrate · Jobs · Review · Points · Practice   │
+                │ Swings · Stats · Profiles · Labeling · Settings                         │
+                └───────────────┬───────────────────────────────▲─────────────────────────┘
+                     enqueue job │                               │ read parquet (pyarrow) / sqlite
+                                 ▼                               │
+                ┌──────────── Worker process (GPU) ──────────────┴───────┐
+                │ Pipeline stages (resumable, versioned, cached)          │
+                │ ingest → court → pass1 (players+ball) → identity →      │
+                │ events → shots/3D ball → pass2 (pose) → swings →        │
+                │ segmentation → outcomes/scoring | practice → stats      │
+                └──────────────────────────┬──────────────────────────────┘
+                                           ▼
+                     <output_root>/  (user-selected external folder)
+```
+
+* **App process**: Dash UI only. It never runs heavy CV in callbacks.
+* **Worker process**: started by the app (or `sv worker`). It pulls jobs from a SQLite queue in the output root and runs pipeline stages on the GPU.
+* **Storage**: Parquet files written and read with **PyArrow** for per-frame and per-event data, JSON for configs and calibration, SQLite for the library index, job queue, and profiles. Cross-session queries use `pyarrow.dataset`. No pandas or polars (see §5.1).
+* **CLI** (`sv`): headless equivalents of everything (process, train, evaluate, run app).
+
+---
+
+## 3. Technology choices
+
+| Concern | Choice | Notes |
+|---|---|---|
+| Env / packaging | `uv`, `pyproject.toml`, `.python-version` = 3.12 | System Python is 3.8; uv manages 3.12. |
+| Deep learning | `torch`, `torchvision` from the PyTorch CUDA 12.8 index | Configured with `[tool.uv.index]` + `[tool.uv.sources]`. |
+| Video decode | `FrameSource` abstraction: **PyNvVideoCodec** (NVDEC → GPU tensor via DLPack) primary; **PyAV** CPU fallback | ✅ M0 spike: 305 fps of upright 4K RGB on the GPU (PyAV hwaccel 81, CPU 29). See `docs/spikes/m0-video-pipeline.md`. |
+| Probe / audio / proxy | `ffmpeg`/`ffprobe` binaries (path set in Settings) | NVENC for 720p proxy encode. |
+| Person detection | Ultralytics YOLO (latest, e.g. YOLO11-l/x) at ~1280 px | AGPL. Fine for personal use. |
+| Multi-object tracking | BoT-SORT/ByteTrack via `boxmot` | Plus court-ROI filtering and singles constraints. |
+| Re-ID | OSNet embeddings (via `boxmot` weights) | Appearance profile gallery. |
+| Ball detection | **Slim** TrackNet-style heatmap U-Net (3-frame input + background, width 32, stride-2 stem), trained on own footage at ≈1280 px wide on a court-ROI crop | M0 spike: a TrackNet-size net at 1280×720 runs at only 20 fps, the slim variant at 190 fps. Optionally distil from pretrained TrackNetV3. |
+| Court keypoints | 14-keypoint court detector (TennisCourtDetector-style CNN) + line-fitting refinement | Fine-tuned from confirmed calibrations. |
+| 2D pose | ViTPose (HF `transformers` `VitPoseForPoseEstimation`) on 4K player crops | Pure torch. RTMPose via `rtmlib` is the alternative. |
+| 3D lifting | MotionBERT (vendored model code, Apache-2.0) | COCO-17 → H36M-17 joint mapping. |
+| Audio onsets | `librosa` | Racket-impact sounds help confirm hits. |
+| Classical ML | `scikit-learn`, `lightgbm` | Bounce classifier, stroke classifier baseline. |
+| Optimization | `scipy.optimize.least_squares` | Camera calibration, 3D ball trajectory fits. |
+| Data | `pyarrow` (Parquet I/O, `pyarrow.compute`, `pyarrow.dataset`), `numpy`, `pydantic` v2 | No pandas or polars in project code (see §5.1). |
+| UI | `dash>=3`, `dash-mantine-components>=2`, `dash-iconify`, `plotly` | Native `html.Video` + small clientside JS for sync. |
+| CLI / misc | `typer`, `platformdirs`, `loguru`, `filelock` | |
+| Dev | `ruff`, `pytest`, `pytest-cov`, `pre-commit`, `pyright` (basic) | |
+
+> Check each pretrained model's license when vendoring/downloading weights; record it in `models/registry.py`.
+
+`pyproject.toml` torch index snippet:
+
+```toml
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+```
+
+---
+
+## 4. Repository layout
+
+```
+swing_vision_open/
+├─ pyproject.toml  uv.lock  .python-version  README.md  PLAN.md
+├─ src/swingvision/
+│  ├─ cli.py                    # typer: app, worker, process, train, eval, models
+│  ├─ settings.py               # app settings (platformdirs), output_root, ffmpeg path
+│  ├─ models/registry.py        # weight URLs, checksums, licenses, download/cache
+│  ├─ io/
+│  │  ├─ probe.py               # ffprobe → VideoInfo (fps, size, duration, rotation, codec)
+│  │  ├─ frames.py              # FrameSource (NVDEC / PyAV), batched, seek-to-window
+│  │  ├─ audio.py               # extract wav, onset detection
+│  │  └─ proxy.py               # NVENC 720p proxy (+ optional annotated proxy)
+│  ├─ storage/
+│  │  ├─ library.py             # SQLite: sessions, jobs, profiles
+│  │  ├─ session.py             # Session dir API, manifests, pyarrow.parquet read/write
+│  │  ├─ schemas.py             # pydantic models (JSON) + pyarrow schemas (Parquet)
+│  │  ├─ tables.py              # Arrow helpers: write/read, append parts, to_numpy, to_rows
+│  │  └─ edits.py               # user overrides layered over derived data
+│  ├─ court/
+│  │  ├─ model.py               # ITF court geometry (meters), keypoints, lines, zones
+│  │  ├─ detect.py              # keypoint CNN inference + line refinement
+│  │  ├─ homography.py          # image↔court plane, uncertainty (Jacobian)
+│  │  └─ camera.py              # intrinsics/extrinsics (PnP w/ net points), lens k1
+│  ├─ players/
+│  │  ├─ detect.py  track.py    # YOLO + BoT-SORT, court-ROI filter, singles constraint
+│  │  ├─ reid.py                # OSNet embeddings, tracklet ↔ profile matching
+│  │  └─ movement.py            # feet → court coords, smoothing, speed/distance/heatmaps
+│  ├─ ball/
+│  │  ├─ detectors/             # pluggable BallDetector implementations (slim U-Net, TrackNetV3, YOLO, …)
+│  │  ├─ schedule.py            # adaptive frame-rate plan: sparse sweep → full-rate event windows
+│  │  ├─ detect.py              # runs a detector over a schedule on court-ROI crops, background model
+│  │  ├─ trajectory.py          # outlier rejection, gap fill, sub-tracks
+│  │  ├─ events.py              # hit / bounce / net candidates + classifiers + audio
+│  │  └─ physics.py             # 3D flight fit (drag + optional Magnus) → speed etc.
+│  ├─ pose/
+│  │  ├─ pose2d.py  lift3d.py   # ViTPose crops, MotionBERT lifting, world placement
+│  │  ├─ kinematics.py          # joint angles, segment rotations, angular velocities
+│  │  ├─ phases.py              # swing phase segmentation
+│  │  └─ strokes.py             # rules + learned stroke classifier
+│  ├─ analysis/
+│  │  ├─ shots.py               # assemble Shot records
+│  │  ├─ segmentation.py        # match points / practice shots & blocks
+│  │  ├─ outcomes.py            # point-ending reason + winner inference + confidence
+│  │  ├─ practice.py            # targets, accuracy metrics
+│  │  └─ stats.py               # session + cross-session aggregates
+│  ├─ scoring/
+│  │  ├─ formats.py             # MatchFormat config + presets
+│  │  └─ engine.py              # pure score state machine (server, ends, tiebreaks)
+│  ├─ pipeline/
+│  │  ├─ stage.py               # Stage base: version, deps, config hash, chunking
+│  │  ├─ stages/*.py            # one module per stage
+│  │  ├─ runner.py              # DAG resolution, resume, invalidation
+│  │  └─ worker.py              # job loop, progress, cancel, GPU memory hygiene
+│  ├─ training/
+│  │  ├─ labels.py              # label stores (ball, court, events, strokes)
+│  │  ├─ bench_ball.py          # ball-detector comparison: accuracy × cost on labelled clips
+│  │  ├─ train_ball.py  train_court.py  train_events.py  train_strokes.py
+│  │  └─ evaluate.py            # metrics vs ground truth
+│  └─ app/
+│     ├─ main.py  layout.py  server_routes.py   # Flask media routes (range requests)
+│     ├─ components/            # file_browser, video_player, court_diagram,
+│     │                         # calib_editor, skeleton3d, timeline, job_card
+│     ├─ pages/                 # library, new_session, calibrate, jobs, review,
+│     │                         # points, practice, swings, stats, profiles,
+│     │                         # labeling, settings
+│     └─ assets/                # video_sync.js, keyboard shortcuts, css
+├─ tests/                       # unit + synthetic + golden-clip regression
+└─ scripts/                     # benchmarks, one-off utilities
+```
+
+---
+
+## 5. Output folder (external, chosen in UI)
+
+```
+<output_root>/
+├─ library.sqlite                     # sessions, jobs queue, profiles, settings snapshot
+├─ profiles/<profile_id>/
+│  ├─ profile.json                    # name, handedness, height, backhand (1H/2H)
+│  ├─ reid_gallery.npy  gallery.json  # embeddings grouped by "outfit"
+│  └─ thumbs/
+├─ sessions/<YYYY-MM-DD>_<slug>_<shortid>/
+│  ├─ session.json                    # source path + fast hash, mode, format, targets, players
+│  ├─ calibration.json                # keypoints, H, K, R|t, k1, reproj error, user_confirmed
+│  ├─ proxy_720p.mp4                  # browser playback (H.264, NVENC)
+│  ├─ audio_onsets.parquet
+│  ├─ manifests/<stage>.json          # stage version, config hash, input hashes, timing, status
+│  ├─ players/detections/part-*.parquet  tracks.parquet  identity.json  movement.parquet
+│  ├─ ball/raw/part-*.parquet  track.parquet
+│  ├─ events.parquet                  # hits, bounces, net, serve_toss (frame, xy, conf, source)
+│  ├─ shots.parquet                   # one row per shot (see §8)
+│  ├─ pose/pose2d.parquet  pose3d.parquet  swings.parquet
+│  ├─ segments.parquet                # points (match) or shots/blocks (practice)
+│  ├─ points.parquet  score_log.parquet   (match)
+│  ├─ practice.parquet                (practice: per-shot accuracy)
+│  ├─ stats.json
+│  ├─ edits.json                      # user overrides (never mutate derived files)
+│  └─ logs/
+├─ training/{ball,court,events,strokes}/   # exported labels from UI + corrections
+└─ models/                            # fine-tuned weights (base weights in app data dir)
+```
+
+Principles:
+
+* Raw footage is **never copied**. The session stores its absolute path plus a fast content hash (size + hash of the first/last 8 MB) so it can be relinked if moved.
+* Detections are stored in **image coordinates**, and court-coordinate data is derived from them. Recalibrating then reruns only the cheap projection and analysis stages, not the GPU passes.
+* User edits live in `edits.json` and are applied on read. They're also exported as training labels.
+
+### 5.1 Tabular data conventions (PyArrow only)
+
+* **In-memory type**: `pyarrow.Table` is the only tabular type passed between modules. Numeric work (geometry, smoothing, fits) converts columns with `Table.column(...).to_numpy()` and builds results back with `pa.table({...}, schema=...)`.
+* **Explicit schemas**: every Parquet file has a `pa.schema` defined in `storage/schemas.py`, with units in the field metadata (e.g. `{"unit": "m"}`) plus a `schema_version` in the file metadata. Writers validate against the schema, so there's no type inference.
+  * Fixed-size arrays use `pa.list_(pa.float32(), n)`. For example, pose keypoints are `list<float32>[17*3]` per player-frame.
+* **Writing**: `pyarrow.parquet.write_table` with `compression="zstd"`. Per-frame data uses sensible row-group sizes (e.g. one row group per 2-minute chunk).
+  * Chunked GPU stages write one part file per chunk (`players/detections/part-0007.parquet`), which matches the resume checkpoints.
+  * Writes are atomic: write to a temp file, then rename.
+* **Reading**: `pq.read_table(path, columns=[...], filters=[...])` reads only the columns and rows needed. Part-file directories are read with `pyarrow.dataset.dataset(dir)`.
+* **Transforms**: filtering, joins, group-by, and aggregation use `pyarrow.compute` and `Table.join`/`Table.group_by`. When logic is clearer in Python (state machines, scoring), it iterates over `to_pylist()` or NumPy arrays.
+* **Cross-session queries**: one `pyarrow.dataset` over `sessions/*/shots.parquet` (and similar), with a `session_id` column. These feed Phase 3 trends.
+* **UI boundary**: Plotly figures use `plotly.graph_objects` fed with NumPy arrays or lists. Plotly Express needs a DataFrame, so it isn't used. Tables in the UI get `table.to_pylist()`. CSV export uses `pyarrow.csv.write_csv`.
+* **Enforcement**: a ruff `flake8-tidy-imports` banned-API rule (`TID251`) blocks `import pandas`/`import polars` in `src/`. Transitive dependencies (e.g. Ultralytics) may still install pandas, and that's fine as long as project code never uses it.
+
+---
+
+## 6. Pipeline stages
+
+Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes outputs plus a manifest. The runner skips a stage when its manifest matches (version + config hash + upstream hashes). Heavy stages process in **chunks** (e.g. 2-minute windows) with per-chunk checkpoints, so an overnight job that crashes resumes mid-video.
+
+| # | Stage | GPU | Phase | Inputs → Outputs |
+|---|---|---|---|---|
+| 1 | `ingest` | – | 1 | probe, fast hash, audio wav, `session.json` |
+| 2 | `proxy` | NVENC | 1 | 720p H.264 proxy for browser playback |
+| 3 | `audio_onsets` | – | 1 | onset times + strength + spectral features |
+| 4 | `court_auto` | ✓ | 1 | keypoints on sampled frames (median-robust), refined lines, `calibration.json` (unconfirmed) |
+| 5 | `camera` | – | 1 | intrinsics/extrinsics/lens k1 from keypoints + net points |
+| 6 | `pass1_detect` | ✓ | 1 | **single decode pass**: person detections + ball heatmap peaks for every frame |
+| 7 | `players_track` | – | 1 (single player) / 2 (two players) | tracks filtered to court ROI, stitched tracklets. Phase 2 adds the top-2 singles constraint |
+| 8 | `identity` | ✓ (light) | 2 | tracklet ↔ profile ("me" / "opponent"), confidence. In Phase 1 the only tracked player is "me" |
+| 9 | `movement` | – | 1 | feet → court coords, smoothed position/velocity per player |
+| 10 | `ball_track` | – | 1 | cleaned trajectory, gap fill, sub-tracks |
+| 11 | `events` | – | 1 | hits (with hitter), bounces, net events, serve candidates |
+| 12 | `ball_3d` | – | 1 | per-shot 3D flight fit: speeds, net clearance, apex, landing |
+| 13 | `pass2_pose` | ✓ | 1 | 2D pose on 4K crops in windows around hits (± 1.5 s) at full fps, plus sparse pose elsewhere (e.g. 5 fps) |
+| 14 | `pose3d` | ✓ | 1 | MotionBERT lifting, world placement, scale from profile height |
+| 15 | `swings` | – | 1 | kinematics, phases, stroke class per hit |
+| 16 | `shots` | – | 1 | join events + ball_3d + swings → `shots.parquet` |
+| 17 | `segments` | – | 1 (practice) / 2 (match) | Practice: shots grouped into blocks. Match: points (+ warm-up) |
+| 18 | `outcomes` + `scoring` | – | 2 | match only: point winner, reason, confidence, score log |
+| 19 | `practice_eval` | – | 1 | practice only: per-shot target hit/miss, distance, block summaries |
+| 20 | `stats` | – | 1 (session) / 2 (match stats) | session aggregates → `stats.json` |
+
+**Calibration gating**: stages 4–5 run automatically. The job then pauses with status `needs_calibration_review` (configurable: "auto-continue if reprojection error < X px"). Stage 6 doesn't depend on calibration except for the court-ROI crop. If the user later adjusts calibration, stages 7+ rerun on CPU in minutes.
+
+**Throughput** for 1 h of 4K60 (216k frames), measured in the M0 spike (`docs/spikes/m0-video-pipeline.md`): PyNvVideoCodec decode 305 fps; YOLO11-m @1280 FP16 104 img/s (run at 30 Hz); slim ball U-Net @1280×720 190 img/s. Pass 1 is ≈75–90 fps (**≈45 min per hour**). Add the proxy (≈11 min per hour), pose windows (≈30–40% of frames), and CPU stages. Expected total is **≈1.5–2.5 h per hour of footage**, which fits overnight. NVDEC/NVENC are shared, so GPU stages run one at a time. Optimizations if needed: TensorRT, skipping dead time (ball collection) using frame differencing and audio-onset density.
+
+---
+
+## 7. Core algorithms
+
+### 7.1 Court calibration and camera model
+
+1. Sample ~30 frames across the video, run the keypoint CNN, and take a per-keypoint median, which is robust to players occluding lines.
+2. Refine: detect white line pixels (top-hat + threshold), fit lines near each predicted court line (RANSAC), and recompute intersections at subpixel precision.
+3. Homography `H` (image → court plane, meters, origin at court center, x across, y along) from ≥ 4 points with RANSAC. Report reprojection error.
+4. **Full camera model** (needed for 3D ball flight and pose orientation):
+   * Lens distortion `k1` (and optionally `k2`) estimated by maximizing straightness of the detected court lines.
+   * Focal length from homography constraints (square pixels, principal point at center).
+   * Extrinsics by `solvePnP` with ground keypoints **plus non-planar net points**: net post tops (1.07 m) and center strap top (0.914 m). The UI shows these as extra draggable points. They're auto-proposed by projecting with an initial estimate, then the user fixes them.
+   * Joint refinement by bundle-style least squares over all points.
+5. Per-point uncertainty: propagate ±1 px through the homography Jacobian to get σ (meters) for any court location. This feeds line-call confidence.
+6. Drift check: every N minutes, re-detect keypoints and warn if they moved more than a threshold (tripod bumped). Calibration may then be piecewise by time range.
+
+Court model (`court/model.py`): ITF dimensions, 23.77 × 10.97 m (singles 8.23 m), service line 6.40 m from net, line width 5 cm. Named zones: service boxes, deuce/ad, no-man's land, alleys. Includes a helper to **mirror coordinates by hitting side**.
+
+### 7.2 Players: detection, tracking, identity
+
+> **Phase 1** covers ROI filtering and tracking of the single player, who is assumed to be "me", plus ball-machine handling. The singles two-player constraint and appearance re-ID are **Phase 2**.
+
+* Use YOLO person detections each frame. Keep detections whose foot point (bbox bottom center, later ankle midpoint from pose) projects inside the **court ROI** (court + 6 m behind baselines + 4 m beside sidelines). This excludes neighboring courts and spectators.
+* BoT-SORT tracking, then **singles constraint**: at most one "near-side" and one "far-side" player while in play. Short tracklets are stitched by position and time continuity plus appearance similarity.
+* **Identity**: compute OSNet embeddings for sampled crops per tracklet and average them. Match tracklets to the "me" profile gallery (cosine similarity, max over outfits). Use Hungarian assignment between the two players for each continuous play period, so the higher-similarity player is "me".
+  * If confidence is low (e.g. a new outfit), the session gets the flag `identity_review`. The UI shows thumbnails of both players, the user clicks themself once, and the new outfit embeddings are added to the gallery.
+  * The opponent can optionally be a named profile too (for stats against a regular partner).
+* **Ball machine**: in practice/ball-machine mode, the static machine is detected as a non-person stationary source of shots. Its location is either auto-detected from the origin of feed trajectories or marked by the user.
+
+### 7.3 Movement
+
+* Foot position comes from the ankle midpoint (pose) when available, otherwise the bbox bottom center. Project with `H`, then smooth with a constant-velocity Kalman/RTS smoother.
+* Metrics: distance covered (total, per point/drill), speed and acceleration profiles, max sprint speed, court-position heatmaps, average position by context (serving/returning/rallying), recovery position and time after each shot, and distance-to-ball at contact.
+
+### 7.4 Ball detection and trajectory
+
+* **Crop to the court ROI** (court bbox projected in 4K with a margin above the image for lobs), then resize to the model input (default 1280×720, configurable). The far-court ball is ~6–8 px in 4K, and naive 512×288 downscaling would erase it.
+* TrackNet-style network: 3 consecutive frames + a background median image, outputting a heatmap. Peaks are found with subpixel refinement (centroid on the heatmap), and multiple candidates per frame are kept with scores.
+* Trajectory linking: a dynamic program / Kalman multi-hypothesis over candidates penalizes physically implausible jumps. Outliers are rejected, short gaps (≤ ~8 frames) are filled with local parabolic fits, and the track is split into **sub-tracks** at hits and bounces.
+* A labeling-driven fine-tuning loop is in §10.
+
+#### 7.4.1 Pluggable detectors and model comparison
+
+Ball detection is expected to be the hardest part of the system, so it's built to try several
+models side by side instead of committing to one.
+
+* **`BallDetector` interface** (`ball/detectors/`): `prepare(video_info, roi)`, `frames_needed`
+  (temporal context, e.g. 3 for TrackNet), `input_size`, and
+  `detect(batch) → candidates (frame, x, y, score)` in full-resolution image coordinates.
+  Detectors are registered by name with their weights, so a config such as
+  `ball.detector = "tracknetv3@512x288"` picks one.
+* **Candidates to compare** (initial list):
+  * slim U-Net at about 1280 px (≈190 fps)
+  * full TrackNetV3 at 512×288 and on court-ROI crops
+  * YOLO11-s/m with a single ball class at 1920 px, or tiled (SAHI-style)
+  * any of the above fine-tuned on the user's labels, vs pretrained only
+* **Benchmark harness** (`sv bench ball`, `training/bench_ball.py`):
+  * Runs each detector, *and each frame-rate schedule*, over the same held-out labelled clips
+    and stores every run's raw candidates as Parquet, so trajectory linking and events can be
+    re-scored without re-running models.
+  * Metrics, split by court zone (near/far half) and ball state (in flight, near racket, at
+    bounce):
+    * detection precision/recall/F1 within 4 px and position error
+    * track continuity (gaps, ID switches)
+    * downstream hit/bounce event F1 and bounce landing error in meters
+  * **Cost** in GPU-seconds per footage-hour, measured from the same runs.
+  * Output: a comparison table plus an **accuracy-vs-cost Pareto chart** (HTML report), so
+    detector choice is a measured trade-off.
+* **Ground truth for a fair comparison** must be labelled at **full frame rate**. That means
+  contiguous clips covering serves, rallies, near and far bounces, lobs, and dark/backlit
+  spans, not just sampled frames. The keyframe-interpolation labeling tool (§10) makes this
+  affordable.
+
+#### 7.4.2 Adaptive frame-rate scheduling
+
+Bigger, more accurate models can run at a **lower frame rate across the whole video** and then
+at **full frame rate only around important moments**:
+
+1. **Sweep**: run the detector at a reduced rate (configurable; e.g. every 4th frame = 15 Hz)
+   over the full video. TrackNet-style models still get their 3-frame context from adjacent
+   frames, decoded but not otherwise processed.
+2. **Find moments** from the sweep plus cheap signals:
+   * trajectory direction changes (candidate hits/bounces)
+   * ball near a player's racket-side wrist
+   * audio onsets (sound-delay compensated)
+   * gaps where the sweep lost the ball
+3. **Refine**: decode windows around each moment (e.g. −0.25 s … +0.35 s) and run the detector
+   at the **full 60 fps**. Optionally use a bigger model or a tighter, higher-resolution crop
+   around the predicted ball position. Windows are merged and processed in time order so
+   NVDEC seeks stay cheap.
+4. **Fill**: in between, the trajectory comes from sweep detections plus parabolic/physics
+   interpolation (§7.6). That's sufficient in free flight, where nothing interesting happens
+   between samples.
+
+Schedules are first-class benchmark subjects: `{model} × {sweep rate} × {window size}` all run
+through the same harness. This answers "is a big model at 15 Hz + full-rate windows better
+than a slim model at 60 Hz?" with numbers. In the pipeline this splits ball detection into a
+`ball_sweep` part of pass 1 and a `ball_refine` stage after `events` (which then re-runs on
+the refined detections).
+
+### 7.5 Events: hits, bounces, net
+
+* **Hit candidates**: sharp change in image velocity direction or magnitude while the ball is near a player's bbox or wrist, especially reversing toward the other side.
+  * Fused with audio onsets: a racket impact is a sharp broadband onset. The expected audio delay is `distance(camera, hitter)/343 m/s`, about **70 ms (~4 frames) for the far player**, which is compensated before matching.
+* **Bounce candidates**: change in the sign of vertical image acceleration plus a speed drop, away from players. The bounce point is refined by intersecting the fitted pre- and post-bounce curves, giving a subpixel ground contact.
+* A **LightGBM event classifier** over trajectory windows (positions, velocities, accelerations, player proximity, audio features) is trained on labeled and corrected events, with rule-based candidates as the bootstrap.
+* **Net**: the trajectory ends or reverses near the projected net line without crossing, or the 3D fit (7.6) crosses the net plane below net height.
+* **Serve candidate**: a player stationary behind the baseline, ball rising above the head (toss), and the wrist high at contact. This is also used by segmentation.
+
+### 7.6 3D ball flight, speed, and landing
+
+The homography alone only gives positions on the ground. For speed:
+
+* For each shot sub-track (hit → bounce, or hit → next hit for volleys), fit a **physical 3D trajectory** with gravity + quadratic drag (+ optional Magnus with 1–2 spin parameters) by minimizing 2D reprojection error of the detected ball positions through the calibrated camera.
+* Constraints and priors:
+  * Start point near the hitter's contact location: court position from feet plus contact height from the wrist in 3D pose (serve ~2.5–3 m, groundstroke ~0.5–1.3 m).
+  * End point on the ground (z = ball radius) at the detected bounce.
+  * Ball mass 57 g, diameter 6.7 cm, Cd ≈ 0.55.
+* Outputs per shot: **speed off the racket**, speed at net, speed before bounce, average speed, **net clearance**, apex height, flight time, landing point (from the bounce detection, which is more precise than the 3D fit), and an optional rough spin estimate (sign of Magnus = topspin/slice).
+* Each output has an uncertainty from the fit covariance.
+* **Validation**: compare with known ball-machine speed settings and/or a radar gun on a few sessions.
+
+### 7.7 Pose: 2D, 3D, kinematics, phases, strokes
+
+* **2D pose**: ViTPose on **4K crops** of each player (the far player is still ~150–250 px tall). Run at full fps in windows of ± 1.5 s around each hit, and sparsely otherwise.
+* **3D lifting**: MotionBERT on 2D sequences (padded/strided windows), giving root-relative 3D joints in the camera frame. These are rotated into the court frame with the camera extrinsics and translated to the court position from the feet. Bone lengths are scaled to the profile's height.
+  * Caveat: depth along the camera axis is the least reliable, especially for the far player. Every metric carries a quality flag (near/far, keypoint confidence).
+* **Kinematics** (per frame, per swing):
+  * Knee flexion, hip and shoulder rotation relative to the baseline, **hip-shoulder separation**, trunk lean, elbow angle.
+  * Wrist (racket hand) linear speed, as a proxy for racket speed.
+  * Contact point relative to the body: in front/beside, height, distance.
+  * Stance width, center-of-mass height drop.
+  * **Kinetic chain sequencing**: timing of peak angular velocity for hips → trunk → shoulder → elbow → wrist.
+* **Swing phases** (from 3D hand trajectory relative to the trunk, plus trunk rotation):
+  1. Ready / split step (if detected: vertical CoM bounce before the opponent's contact)
+  2. Unit turn / preparation: shoulder rotation away from the net begins
+  3. Backswing: until the hand's maximum posterior displacement
+  4. Forward swing: until contact (hit frame)
+  5. Follow-through: until hand speed drops below a threshold
+  6. Recovery: until the player resumes ready position or moves toward center
+
+  Phase durations, tempo ratios, and contact timing are stored.
+* **Stroke classification**: classes are serve, forehand, backhand, forehand volley, backhand volley, overhead (plus `other`).
+  * Rules bootstrap: contact side relative to the dominant hand from 3D pose; volley = no bounce since the previous hit and the player inside the service line; serve = the point-start hit by the server; overhead = contact above the head mid-rally.
+  * Learned model: a small temporal network (GRU or ST-GCN) over a ±0.6 s pose window + ball features, trained on rule labels + user corrections. The model replaces the rules once validated.
+  * Handedness and 1H/2H backhand come from the profile.
+
+### 7.8 Segmentation
+
+**Match mode** uses a per-frame state machine: `IDLE → SERVE_SETUP → IN_PLAY → DEAD`.
+
+* `SERVE_SETUP`: a serve candidate (toss + server behind baseline).
+* `IN_PLAY`: from serve contact through subsequent hits.
+* `DEAD`: double bounce, ball out with no return within T, net with no recovery, or no ball activity for T seconds while players walk.
+* **A point includes a first-serve fault plus the second serve.** Lets are detected heuristically (serve clips net, lands in box, play stops) and flagged.
+* Rallies before the first serve, or explicitly marked by the user, become **warm-up** segments. The user can set a "match starts here" marker.
+* Segment = `[first_event − pad_before, last_event + pad_after]`, with configurable padding (default 2 s / 2 s).
+
+**Practice mode**: each segment is **one shot** (a feed or self-drop → hit → landing/net). Shots are grouped into **blocks** separated by long gaps (ball collection) or a change of hitting side.
+
+* Sub-modes:
+  * **Self-feed / basket**: hitting side auto-detected per shot, so the player can switch ends.
+  * **Ball machine**: one fixed hitting side. Machine feeds are recognized as not-the-user's shots and reported as feed consistency.
+  * **Serve practice**: serve targets in service boxes.
+
+### 7.9 Point outcomes and scoring
+
+* For each point, `outcomes.py` produces `(winner, reason, confidence, evidence)`. Reasons: `ace`, `service_winner`, `double_fault`, `winner`, `forced/unforced_error_out_long|wide`, `net`, `double_bounce`, `let`, `unknown`.
+  * Line calls use the bounce position vs line edges with tolerance. If |margin| < 2σ (from §7.1 uncertainty), the call is **low confidence**.
+  * Serve faults use the correct service box for the current server and side, which comes from the score state.
+* **Scoring engine** (`scoring/engine.py`): a pure, deterministic, heavily unit-tested state machine. It's fed point winners and outputs a score log, server, and serving side per point.
+  * `MatchFormat`: `sets_to_win`, `games_per_set`, `win_by_two_games`, `tiebreak_at` (or none), `tiebreak_points`, `no_ad`, `final_set` (`normal` | `match_tiebreak(10)` | `advantage`), `pro_set_games` (first-to-N), `free_play`.
+  * Presets: "Best of 3 (7-pt TB)", "Best of 3, MTB 3rd", "Pro set to 8", "First to 6, no TB", "Fast4", "Free play".
+  * **Ends**: `switch_ends` = `per_rules` | `never` | `auto` (from detected player sides per point). The first server is auto-detected from the first serve and confirmable.
+* Consistency check: the detected server for each point should match the engine's expected server. Mismatches flag earlier points for review.
+* **Review UI** (§9) applies overrides, then the engine re-runs instantly.
+
+### 7.10 Practice accuracy
+
+* Targets are drawn on the court diagram: rectangles/circles, named, optionally filtered to stroke types (e.g. "FH crosscourt deep" applies to forehands only).
+* **Target frame**: `relative` (default: defined on the *opponent's* half relative to the hitter, so it auto-mirrors when the player switches ends) or `absolute`.
+* Per shot: in-court, in-target, distance to target center, depth/width error, net.
+* Per block/session: target hit %, in % and net %, mean/median distance, depth consistency (std), and a rolling accuracy curve over the session (fatigue/learning). Breakdowns by stroke type and speed bands.
+
+---
+
+## 8. Key data records
+
+`shots.parquet` (one row per hit):
+
+```
+shot_id, session_id, segment_id, hitter (me|opponent|machine), frame_contact, t_contact,
+stroke_type, stroke_conf, is_serve, serve_number,
+contact_court_xy, contact_height, landing_xy, landing_sigma_m, landing_in, landing_zone,
+speed_racket_kmh, speed_avg_kmh, speed_bounce_kmh, speed_sigma, net_clearance_m, apex_m,
+spin_sign, flight_time_s, outcome (in|out_long|out_wide|net|winner|…),
+swing_id, quality_flags
+```
+
+`swings.parquet`: `swing_id, shot_id, phase_{name}_start/end frames, durations, contact metrics, peak angular velocities and timings, joint angle summary (min/max/at-contact), pose_quality`.
+
+`segments.parquet`: `segment_id, kind (point|warmup|practice_shot|block), start_t, end_t, block_id, point_index, server, first_serve_in, rally_length, end_reason`.
+
+`points.parquet` / `score_log.parquet`: `point_index, winner_inferred, winner_final, reason, confidence, evidence_json, score_before/after, server, ends, overridden`.
+
+`movement.parquet`: `frame, player, x, y, vx, vy, speed, source (pose|bbox)`.
+
+---
+
+## 9. Web app (Dash + Mantine)
+
+Global: `dmc.MantineProvider` (light/dark toggle), `dmc.AppShell` with a navbar, `dmc.NotificationProvider`. Bound to **127.0.0.1 only**. Multi-page via Dash Pages.
+
+### 9.1 Components
+
+* **Server-side file browser modal** (`components/file_browser.py`). A browser upload can't expose local paths, so a `dmc.Modal` lists drives (Windows) and folders from the server with breadcrumbs, a filter by extension (`.mp4 .mov .mkv .avi`), and file size/duration preview. The same component has a **folder-select mode** for choosing the output root. Optional "native dialog" button (tkinter in a subprocess) as a convenience.
+* **Video player**: native `html.Video` served from Flask routes with HTTP range support (`send_file(conditional=True)`), restricted to registered session files. `assets/video_sync.js` (clientside) publishes `currentTime` to a `dcc.Store` at ~10 Hz and handles seek commands. Keyboard shortcuts: J/K/L, ←/→ frame step, N/P next/previous segment.
+* **Timeline**: a Plotly strip under the video showing segments, events (hits/bounces), and flags. Click to seek.
+* **Court diagram**: a Plotly top-down court in meters. Layers include ball landings (colored by stroke/outcome), player positions/heatmaps, and targets. Supports `drawrect`/`drawcircle` editing modes for targets.
+* **Calibration editor**: a Plotly image of a representative frame with keypoints as draggable shapes. The projected court model is overlaid and updated live on drag, with reprojection error shown. Includes net post/strap points, a zoom loupe, and buttons for reset / re-detect / confirm.
+* **3D skeleton viewer**: Plotly `scatter3d` animation of a swing in court coordinates with a phase slider, side by side with the video segment. Joint-angle curves have phase bands below.
+
+### 9.2 Pages
+
+Phase 1 (MVP): Settings, Profiles (basics), New session (practice path), Jobs, Calibrate, Library, Session review, Practice, Swings, Stats (per session), Labeling.
+Phase 2 adds: the match path in New session, appearance enrollment in Profiles, Points, and match sections of Stats. Phase 3 adds cross-session trends in Stats.
+
+1. **Settings / first run**: output root (folder modal), ffmpeg path, model weights status + download, GPU info, processing defaults (padding, auto-continue threshold, pose window).
+2. **Profiles**: create a profile (name, handedness, 1H/2H backhand, height). Enroll appearance by picking a player track from any processed session. Manage outfits.
+3. **New session** (`dmc.Stepper`):
+   1. Pick video (file modal), with probe info + thumbnail
+   2. Mode: Match / Practice (self-feed, ball machine, serve)
+   3. Match: format preset or custom, first server (auto/manual), switch ends (per rules/never/auto). Practice: draw targets (or load a saved target set)
+   4. Players: "me" profile, optional opponent profile
+   5. Review & enqueue
+4. **Jobs**: queue with per-stage progress bars, ETA, logs tail, cancel/retry. Sessions that need action (calibration review, identity review) show a call-to-action.
+5. **Calibrate**: the calibration editor. Confirming triggers the dependent stages.
+6. **Library**: sessions table (date, mode, duration, status, headline stats), search/filter, relink missing video, delete session data.
+7. **Session review**: video + timeline + live court minimap (ball and player positions at the current time) + segment list. Filter segments by stroke type, outcome, or flags.
+8. **Points** (match): point table (score, server, inferred winner, reason, confidence badge). Low-confidence rows are highlighted and sorted first via a "review queue" toggle. Overrides: winner dropdown, mark let, split/merge/insert/delete points, set the match start marker. The score recomputes live, and a "Confirm score" action locks it.
+9. **Practice**: target overlay with landing scatter (hit/miss coloring), accuracy KPIs, rolling accuracy chart, per-block table, and clicking a landing plays that shot.
+10. **Swings**: list of swings filtered by stroke type, 3D viewer, phase timing, metric table. **Compare** two swings (overlay angle curves aligned at contact), or one swing vs the user's average for that stroke.
+11. **Stats**: per session and across sessions (`pyarrow.dataset` + `pyarrow.compute`). Speed distributions by stroke, landing heatmaps, depth, first-serve %, points won by serve/return, rally length, movement distance and heatmaps, trends over time.
+12. **Labeling** (§10).
+
+### 9.3 Event/edit plumbing
+
+* All UI edits write to `edits.json` through a small API (`storage/edits.py`) with optimistic versioning. Cheap derived stages (`scoring`, `practice_eval`, `stats`) rerun synchronously in the app process.
+* Edits that change events (e.g. "this was a forehand", "bounce here") enqueue a CPU-only partial rerun from the affected stage.
+
+---
+
+## 10. Labeling and model fine-tuning
+
+Goal: high-quality ball detection on the user's camera setup with a few hundred hand-labeled frames, amplified by assisted labeling.
+
+* **Frame sampling** for labeling (via the Labeling page, from any processed session):
+  * Low-confidence frames, frames near detected events, frames where the track has gaps, plus random frames.
+  * Stratified by near/far court and lighting.
+* **Ball labeling UI**: the ROI crop at full res. Click the ball center, or mark "not visible"/"occluded".
+  * **Assisted**: model prediction pre-filled, Enter to accept.
+  * **Keyframe interpolation**: label every ~5th frame in a short clip, and a parabolic fit fills the gaps for user verification. This yields contiguous labeled sequences that TrackNet's 3-frame input needs.
+* **Event labeling**: hit/bounce corrections in the Review page are stored as labels automatically.
+* **Court labels**: every confirmed calibration is a training sample for the court keypoint model.
+* **Stroke labels**: stroke corrections in the Swings/Review pages.
+* **Training CLIs**: `sv train ball|court|events|strokes`.
+  * Train/val split by session (to avoid leakage), mixed precision, early stopping.
+  * Writes versioned weights to `<output_root>/models/` with a model card (data, metrics).
+  * The app can switch the active weights per model.
+* **Evaluation**: `sv eval`.
+  * Ball: detection precision/recall/F1 within 4 px; trajectory metrics.
+  * Bounces: position error (m); event F1 within ±2 frames.
+  * Segmentation: boundary IoU; point winner accuracy.
+  * Stroke: confusion matrix.
+  * Runs against a held-out, fully labeled ground-truth session.
+
+---
+
+## 11. Milestones
+
+Each milestone ends with tests passing, a demo on real footage, and a short README update. Milestones are ordered by priority. **Phase 1 ends with a usable practice-mode MVP release.**
+
+### Phase 1 — MVP: practice mode
+
+#### M0 — Foundation and spikes ✅ (done 2026-10-05)
+* `uv init`, `pyproject.toml` (deps, torch index, ruff/pytest config), `.python-version` 3.12, pre-commit, `sv` CLI skeleton.
+* Settings (platformdirs), output-root handling, SQLite library schema + migrations. Schemas carry match-mode fields from day one (see §1a).
+* Dash app shell: AppShell, theme toggle, Settings page, **file/folder browser modal**, Library (empty), Jobs page.
+* Worker process + job queue + mode-aware stage framework (manifests, chunking, resume, cancel, progress).
+* `ingest`, `proxy`, `audio_onsets` stages. Session review page with proxy video playback + time sync.
+* **Spikes** (with written results in `docs/spikes/`):
+  * (a) 4K60 decode backends on Windows (PyNvVideoCodec vs PyAV vs torchcodec)
+  * (b) YOLO + TrackNet throughput at candidate resolutions
+  * (c) HEVC/H.264 playback in the browser
+* ✅ Exit criteria: pick a video in the UI, enqueue it, watch progress, and play the proxy with synced timestamps.
+
+#### M1 — Court calibration and camera model
+* ITF court model, keypoint detector inference, line refinement, homography + uncertainty, lens k1, PnP with net points, drift check.
+* Calibration editor page + gating (`needs_calibration_review`).
+* ✅ Exit criteria: reprojection error < 2 px on the user's footage. A projected court overlay visibly aligns, and synthetic tests recover known cameras.
+
+#### M2 — Single player tracking, profile basics, movement
+* `pass1_detect` (players part), court-ROI filtering, single-player tracking + tracklet stitching, ball-machine detection (stationary feed source).
+* Profiles page (basics only): name, handedness, 1H/2H backhand, height.
+* Movement stage + court minimap + movement stats/heatmaps.
+* ✅ Exit criteria: the player is tracked for > 98% of hitting time in a 30-minute practice session, with no spectators or neighboring-court players tracked.
+
+#### M3 — Ball detection, trajectory, events (+ labeling)
+* Labeling page first. Label full-frame-rate ground-truth clips (§7.4.1), plus sampled frames
+  for training.
+* `BallDetector` interface, and at least three candidate detectors (§7.4.1).
+* Benchmark harness `sv bench ball` with the accuracy-vs-cost report. Pick the default
+  detector from it.
+* Adaptive frame-rate scheduling (`ball_sweep` + `ball_refine`, §7.4.2), benchmarked against
+  fixed full-rate runs.
+* ROI-crop inference in `pass1_detect`, trajectory linking/cleaning.
+* Event detection (rules + audio fusion with distance-based delay compensation), bounce refinement, machine feeds vs the player's hits.
+* Labeling page (assisted + keyframe interpolation), `sv train ball`, `sv train events`, `sv eval`.
+* Label ~300–500 frames (→ several thousand with interpolation), then fine-tune. Prioritize practice footage and include ball-machine sessions.
+* ✅ Exit criteria:
+  * Ball F1 ≥ 0.85 (near) / ≥ 0.75 (far) on held-out data
+  * Bounce event F1 ≥ 0.85
+  * Median bounce position error ≤ 15 cm near / ≤ 35 cm far (targets to refine after the spike)
+
+#### M4 — Shots, landings, 3D flight, speed
+* `ball_3d` physics fit with priors/uncertainties, `shots` assembly (initially without stroke type).
+* Review page shows per-shot landing + speed.
+* ✅ Exit criteria: synthetic tests recover speeds within 3%, and real-world speeds are within ~10% of ball-machine/radar references.
+
+#### M5 — Practice mode: segmentation, targets, accuracy
+* Practice segmentation (one segment per shot, blocks, auto hitting-side detection, ball-machine feeds, serve-practice sub-mode).
+* New-session wizard (practice path), target drawing (relative/absolute, saved target sets), `practice_eval`.
+* Practice page: target overlay, landing scatter, KPIs, rolling accuracy, per-block table, click-to-play.
+* ✅ Exit criteria: ≥ 95% of practice shots segmented correctly on labeled sessions, and target accuracy is correct for every confirmed landing.
+* 🎯 **First usable milestone**: practice sessions with landings, speed, movement, and accuracy.
+
+#### M6 — Pose, swings, strokes
+* `pass2_pose` (windowed 4K crops), MotionBERT lifting, world placement and scaling.
+* Kinematics, swing phases, kinetic-chain timing, stroke rules → learned classifier (`sv train strokes`).
+  * Serve detection here is pose-based (toss + overhead contact behind the baseline). It doesn't depend on match state.
+* Swings page with 3D viewer, phase-annotated angle curves, compare mode.
+* Target stroke filters and per-stroke accuracy breakdowns are enabled on the Practice page.
+* ✅ Exit criteria:
+  * Stroke classification ≥ 90% (near player) / ≥ 80% (far player)
+  * Contact frame within ±2 frames of hit events
+  * Phase timings consistent across repeated swings
+
+#### M7 — MVP hardening and release
+* Per-session Stats page (speed distributions by stroke, landing heatmaps, depth, movement), CSV/Parquet export of shots.
+* Error handling, relink-missing-video flow, README + recording guide.
+* ✅ Exit criteria: a 2-hour practice session processes unattended overnight. Tag the **v0.1 (MVP)** release.
+
+### Phase 2 — Match mode
+
+#### M8 — Two players and appearance profiles
+* Singles two-player constraint, opponent tracking.
+* OSNet re-ID gallery, enrollment from a processed session, outfits, `identity` stage + identity-review flow, optional opponent profile.
+* ✅ Exit criteria: on a 30-minute match, "me" is correctly identified for > 98% of in-play time.
+
+#### M9 — Match segmentation
+* Serve/rally/dead-ball state machine, first/second serves, lets, warm-up segments, match-start marker.
+* New-session wizard (match path): format presets, first server, switch-ends mode.
+* ✅ Exit criteria: ≥ 95% of points segmented correctly on labeled matches.
+
+#### M10 — Outcomes, scoring, review
+* `scoring/engine.py` with exhaustive unit tests (all formats, tiebreak serve rotation, end changes, no-ad, MTB, pro sets).
+  * The engine is pure and has no CV dependencies, so it can be built earlier if convenient.
+* `outcomes.py` with confidence and evidence, server-consistency checks.
+* Points page with review queue, overrides, split/merge, live rescoring, lock. Match sections on the Stats page.
+* ✅ Exit criteria: ≥ 85% of point winners correct before review, ≤ 2 minutes of review per set, and the final score always matches after review.
+* Tag **v0.2 (match mode)**.
+
+### Phase 3 — Later
+
+#### M11 — Trends and polish
+* Cross-session trends (`pyarrow.dataset`): accuracy, speed, and movement over time.
+* Optional annotated proxy render (ball trail, skeletons, landings).
+* Performance pass (TensorRT/FP16, batching).
+* ✅ Exit criteria: all pages are responsive with 50+ sessions in the library.
+
+---
+
+## 12. Testing strategy
+
+* **Pure units**:
+  * Scoring engine: table-driven, property-based with `hypothesis`, e.g. "a set always ends at a valid score"
+  * Court geometry, homography/PnP: recover synthetic cameras
+  * Physics fit: recover synthetic trajectories with noise
+  * Segmentation and outcome rules: synthetic event streams
+  * Target mirroring, edits layering
+* **Stage contract tests**: each stage runs on a tiny synthetic session (rendered court + moving dots) on CPU, with checks on schema, manifest, and resume behavior.
+* **Golden clip regression**: a ~2-minute labeled clip of the user's footage, kept outside git and referenced by path in a local config. `sv eval --golden` reports metric deltas vs the last baseline.
+* **UI**: callback unit tests for the edit/score logic, plus a smoke test that starts the app and loads each page (`dash.testing` optional).
+* CI (optional, GitHub Actions): ruff + CPU-only unit tests. GPU tests are marked `@pytest.mark.gpu` and run locally.
+
+---
+
+## 13. Recording guide (ships in README)
+
+* Mount the camera **centered behind the baseline, as high as practical (≥ 2.5–3 m)**. Height is the single biggest factor in far-court accuracy.
+* Frame the entire court, including all lines, the area behind the far baseline, and some sky above the far baseline for lobs.
+* 4K60, with **locked exposure/focus** if the phone allows it, and fast shutter (≤ 1/1000 s) in good light to reduce ball blur.
+* Don't touch the camera once recording starts. If it's bumped, the drift check will flag it.
+* Hit the record button before warm-up, and optionally clap once at match start (an audio marker the app can detect).
+
+---
+
+## 14. Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Far-court ball is tiny and blurred at 4K | ROI crop at higher model res, fine-tuning on own footage, multi-hypothesis tracking, physics gap fill. |
+| Line calls near the far baseline have depth uncertainty of tens of cm | Propagate uncertainty, mark low-confidence calls, review queue. Advise a higher camera mount. |
+| Single-camera 3D pose depth errors (far player especially) | Quality flags, profile-height scaling, report angles mostly in robust planes. Compare a swing to the same player's history rather than absolute norms. |
+| Re-ID fails after clothing change | Outfit galleries, one-click confirm flow, continuity constraints within a session. |
+| Windows GPU video decode tooling | M0 spike, `FrameSource` abstraction with PyAV fallback. |
+| Ball speed bias from calibration errors | Full camera model with net points, validation against ball machine/radar, uncertainty reporting. |
+| Lets, net cords, and odd endings mis-scored | Explicit `unknown`/`let` reasons, server-consistency checks, review UI. |
+| Long processing times | Chunked resumable stages, windowed pose, FP16/TensorRT, overnight queue. |
+| Model license constraints | Personal, non-distributed use. Licenses recorded in the model registry. |
+
+---
+
+## 15. Out of scope for v1 (future ideas)
+
+Doubles; live/real-time processing; racket keypoint tracking and true racket-head speed; spin rate measurement; multi-camera fusion; moving/handheld cameras; automatic highlight reels and clip export; cloud sync; mobile capture app.
