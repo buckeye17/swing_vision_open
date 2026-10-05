@@ -17,6 +17,7 @@ from swingvision.storage.schemas import (
     PlayersConfig,
     PracticeConfig,
     PracticeSubmode,
+    Profile,
     SessionConfig,
 )
 from swingvision.storage.session import Session
@@ -46,6 +47,7 @@ def create_session(
     name: str | None = None,
     mode: Mode = "practice",
     practice_submode: PracticeSubmode = "self_feed",
+    me_profile_id: str | None = None,
 ) -> Session:
     library = open_library(settings)
     source = source_info(Path(source_path))
@@ -66,7 +68,7 @@ def create_session(
         mode=mode,
         practice=PracticeConfig(submode=practice_submode) if mode == "practice" else None,
         match=MatchConfig() if mode == "match" else None,
-        players=PlayersConfig(),
+        players=PlayersConfig(me_profile_id=me_profile_id),
     )
     session.save_config(config)
     library.add_session(
@@ -112,3 +114,90 @@ def delete_session(settings: AppSettings, session_id: str) -> None:
         raise ValueError(f"Refusing to delete unexpected path {session_dir}")
     library.delete_session(session_id)
     shutil.rmtree(session_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+
+
+def _profile(row: dict) -> Profile:
+    return Profile.model_validate({k: row[k] for k in Profile.model_fields})
+
+
+def list_profiles(settings: AppSettings) -> list[Profile]:
+    return [_profile(r) for r in open_library(settings).list_profiles()]
+
+
+def get_profile(settings: AppSettings, profile_id: str | None) -> Profile | None:
+    if not profile_id:
+        return None
+    row = open_library(settings).get_profile(profile_id)
+    return _profile(row) if row else None
+
+
+def save_profile(
+    settings: AppSettings,
+    name: str,
+    handedness: str = "right",
+    backhand: str = "two_handed",
+    height_m: float | None = None,
+    profile_id: str | None = None,
+) -> Profile:
+    """Create a profile, or update ``profile_id``. Validates the values first."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("A profile needs a name.")
+    ts = now_iso()
+    candidate = Profile(
+        id=profile_id or secrets.token_hex(4),
+        name=name,
+        handedness=handedness,  # type: ignore[arg-type]
+        backhand=backhand,  # type: ignore[arg-type]
+        height_m=height_m,
+        created_at=ts,
+        updated_at=ts,
+    )
+    library = open_library(settings)
+    fields = candidate.model_dump(include=set(library.PROFILE_FIELDS))
+    if profile_id:
+        if library.get_profile(profile_id) is None:
+            raise ValueError(f"Unknown profile {profile_id}")
+        library.update_profile(profile_id, **fields)
+    else:
+        library.add_profile(id=candidate.id, **fields)
+    return _profile(library.get_profile(candidate.id))
+
+
+def delete_profile(settings: AppSettings, profile_id: str) -> int:
+    """Delete a profile and unassign it from sessions. Returns how many sessions used it."""
+    library = open_library(settings)
+    cleared = 0
+    for row in library.list_sessions():
+        session = Session.open(library.root, row["dir_name"])
+        if not session.config_path.exists():
+            continue
+        config = session.load_config()
+        changed = False
+        if config.players.me_profile_id == profile_id:
+            config.players.me_profile_id = None
+            changed = True
+        if config.players.opponent_profile_id == profile_id:
+            config.players.opponent_profile_id = None
+            changed = True
+        if changed:
+            session.save_config(config)
+            cleared += 1
+    library.delete_profile(profile_id)
+    return cleared
+
+
+def set_session_player(settings: AppSettings, session_id: str, profile_id: str | None) -> None:
+    session = session_by_id(settings, session_id)
+    if session is None:
+        raise ValueError(f"Unknown session {session_id}")
+    if profile_id and open_library(settings).get_profile(profile_id) is None:
+        raise ValueError(f"Unknown profile {profile_id}")
+    config = session.load_config()
+    config.players.me_profile_id = profile_id or None
+    session.save_config(config)

@@ -87,6 +87,32 @@ class Session:
         """The calibration downstream stages use (written by the ``camera`` stage)."""
         return self.path / "calibration.json"
 
+    @property
+    def pass1_frames_path(self) -> Path:
+        """Frames the detection pass processed (time, brightness)."""
+        return self.path / "pass1" / "frames.parquet"
+
+    @property
+    def players_dir(self) -> Path:
+        return self.path / "players"
+
+    @property
+    def person_detections_path(self) -> Path:
+        """Raw person boxes in image coordinates (``pass1_detect``)."""
+        return self.players_dir / "detections.parquet"
+
+    @property
+    def player_tracks_path(self) -> Path:
+        return self.players_dir / "tracks.parquet"
+
+    @property
+    def players_summary_path(self) -> Path:
+        return self.players_dir / "identity.json"
+
+    @property
+    def movement_path(self) -> Path:
+        return self.players_dir / "movement.parquet"
+
     def job_log_path(self, job_id: int) -> Path:
         return self.logs_dir / f"job-{job_id:05d}.log"
 

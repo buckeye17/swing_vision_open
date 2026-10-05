@@ -1,8 +1,10 @@
-"""Session review: proxy video + timeline synced to playback.
+"""Session review: proxy video + timeline synced to playback, player tracking, movement.
 
 ``assets/video_sync.js`` publishes the video's current time into the
 ``review-time`` store (~10 Hz) and moves the timeline cursor directly with
-Plotly, so playback stays smooth without a server round trip per frame.
+Plotly, so playback stays smooth without a server round trip per frame. The
+player box on the video and the court minimap follow the same store client-side,
+from the tracked positions in ``review-track``.
 """
 
 from __future__ import annotations
@@ -11,20 +13,35 @@ import dash
 import dash_mantine_components as dmc
 import numpy as np
 import plotly.graph_objects as go
-from dash import Input, Output, State, clientside_callback, dcc, html
+from dash import Input, Output, State, callback, clientside_callback, dcc, html, no_update
+from plotly.subplots import make_subplots
 
+from swingvision import services
 from swingvision.app import state
+from swingvision.app.components.court_diagram import ME_COLOR, heatmap_figure, minimap_figure
 from swingvision.app.components.court_overlay import overlay_svg
+from swingvision.app.components.players_view import (
+    load_movement,
+    movement_card,
+    player_card,
+    profile_facts,
+    speed_series,
+    track_store,
+)
 from swingvision.app.components.ui import (
     fmt_duration,
     icon,
     no_output_root_alert,
+    notification,
     page_header,
     status_badge,
 )
+from swingvision.app.worker_control import ensure_worker
 from swingvision.court import calibration as calib
 from swingvision.pipeline.runner import plan
 from swingvision.pipeline.stages import default_registry
+from swingvision.pipeline.stages.players import load_players_summary
+from swingvision.players.movement import heatmap
 from swingvision.storage import tables
 from swingvision.storage.schemas import (
     AUDIO_ONSETS,
@@ -51,9 +68,27 @@ def _tick_labels(duration: float) -> tuple[list[float], list[str]]:
     return vals, [fmt_duration(v) for v in vals]
 
 
-def timeline_figure(config: SessionConfig, onsets_t: np.ndarray, onsets_s: np.ndarray) -> go.Figure:
+def timeline_figure(
+    config: SessionConfig,
+    onsets_t: np.ndarray,
+    onsets_s: np.ndarray,
+    speed_t: np.ndarray | None = None,
+    speed_v: np.ndarray | None = None,
+) -> go.Figure:
+    """Audio onsets on top and, once tracked, the player's speed in its own row below.
+
+    Both rows share the time axis (zooming one zooms both); the cursor spans both.
+    """
     duration = config.video.duration_s if config.video else 1.0
-    fig = go.Figure()
+    has_speed = speed_t is not None and len(speed_t) > 0
+    rows = 2 if has_speed else 1
+    fig = make_subplots(
+        rows=rows,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        row_heights=[0.55, 0.45] if has_speed else [1.0],
+    )
     # Invisible click-catcher so a click anywhere on the strip seeks.
     grid = np.arange(0, duration, 0.25)
     fig.add_trace(
@@ -65,7 +100,9 @@ def timeline_figure(config: SessionConfig, onsets_t: np.ndarray, onsets_s: np.nd
             hoverinfo="skip",
             showlegend=False,
             name="seek",
-        )
+        ),
+        row=1,
+        col=1,
     )
     if len(onsets_t):
         fig.add_trace(
@@ -82,20 +119,37 @@ def timeline_figure(config: SessionConfig, onsets_t: np.ndarray, onsets_s: np.nd
                 },
                 hovertemplate="%{x:.2f}s · strength %{customdata:.1f}<extra></extra>",
                 customdata=onsets_s,
-            )
+            ),
+            row=1,
+            col=1,
+        )
+    if has_speed:
+        fig.add_trace(
+            go.Scatter(
+                x=speed_t,
+                y=speed_v * 3.6,
+                mode="lines",
+                name="Player speed",
+                line={"color": ME_COLOR, "width": 1.5},
+                connectgaps=False,
+                hovertemplate="%{x:.1f}s · %{y:.1f} km/h<extra>player speed</extra>",
+            ),
+            row=2,
+            col=1,
         )
     ticks, labels = _tick_labels(duration)
+    axis = {"range": [0, duration], "showgrid": False, "fixedrange": False}
+    fig.update_xaxes(**axis)
+    fig.update_xaxes(tickvals=ticks, ticktext=labels, row=rows, col=1)
+    if rows > 1:
+        fig.update_xaxes(showticklabels=False, row=1, col=1)
+    fig.update_yaxes(fixedrange=True, showgrid=False, zeroline=False)
+    fig.update_yaxes(title_text="onset", row=1, col=1)
+    if has_speed:
+        fig.update_yaxes(title_text="km/h", rangemode="tozero", row=2, col=1)
     fig.update_layout(
-        height=150,
-        margin={"l": 40, "r": 10, "t": 10, "b": 30},
-        xaxis={
-            "range": [0, duration],
-            "tickvals": ticks,
-            "ticktext": labels,
-            "showgrid": False,
-            "fixedrange": False,
-        },
-        yaxis={"title": "onset", "fixedrange": True, "showgrid": False, "zeroline": False},
+        height=220 if has_speed else 150,
+        margin={"l": 44, "r": 10, "t": 10, "b": 30},
         hovermode="closest",
         dragmode="zoom",
         showlegend=False,
@@ -210,6 +264,54 @@ def _calibration_card(session_id: str, cal: Calibration | None, label: str):
     return dmc.Paper(dmc.Stack(rows, gap=6), p="md", withBorder=True)
 
 
+def _minimap_card(track: dict | None, machine, is_machine: bool):
+    if is_machine:
+        if machine is None:
+            machine_text = "Ball machine not found yet. Turn on placing and click its spot."
+        else:
+            how = "placed by you" if machine.source == "user" else "found automatically"
+            machine_text = f"Ball machine at ({machine.x:.1f}, {machine.y:.1f}) m, {how}."
+    else:
+        machine_text = ""
+    return dmc.Paper(
+        [
+            dmc.Group(
+                [
+                    dmc.Title("Court", order=5),
+                    dmc.Text(id="review-pos", size="xs", c="dimmed", ff="monospace"),
+                ],
+                justify="space-between",
+            ),
+            dcc.Graph(
+                id="review-minimap",
+                figure=minimap_figure(
+                    (machine.x, machine.y) if machine else None, clickable=is_machine
+                ),
+                config={"displayModeBar": False},
+            ),
+            dmc.Text(
+                "Player tracking hasn't run yet." if track is None else "",
+                size="xs",
+                c="dimmed",
+            ),
+            dmc.Stack(
+                [
+                    dmc.Text(machine_text, id="review-machine-text", size="xs", c="dimmed"),
+                    dmc.Switch(
+                        id="review-machine-place",
+                        label="Click the court to place the ball machine",
+                        size="xs",
+                    ),
+                ],
+                gap=4,
+                style={} if is_machine else {"display": "none"},
+            ),
+        ],
+        p="md",
+        withBorder=True,
+    )
+
+
 def layout(session_id: str | None = None, **_):
     if state.settings().output_root is None:
         return dmc.Container([page_header("Session"), no_output_root_alert()], size="xl", px=0)
@@ -244,6 +346,18 @@ def layout(session_id: str | None = None, **_):
     has_proxy = session.proxy_path.exists()
     overlays = _overlays(cal) if cal is not None and has_proxy else None
 
+    movement, frames = load_movement(session)
+    track = (
+        track_store(movement, video.display_width, video.display_height)
+        if video and has_proxy
+        else None
+    )
+    speed_t, speed_v = speed_series(movement)
+    summary = load_players_summary(session)
+    machine = summary.machine if summary else None
+    is_machine = bool(config.practice and config.practice.submode == "ball_machine")
+    profiles = services.list_profiles(state.settings())
+
     if has_proxy:
         player = html.Video(
             id="review-video",
@@ -275,6 +389,7 @@ def layout(session_id: str | None = None, **_):
                 src=overlays["main"] if overlays else "",
                 style={**OVERLAY_STYLE, "display": "block" if overlays else "none"},
             ),
+            html.Div(id="review-box", style={"display": "none"}),
         ],
         style={"position": "relative"},
     )
@@ -298,6 +413,8 @@ def layout(session_id: str | None = None, **_):
             dcc.Store(id="review-time"),
             dcc.Store(id="review-fps", data=fps),
             dcc.Store(id="review-seek"),
+            dcc.Store(id="review-track", data=track),
+            dcc.Store(id="review-session-id", data=config.id),
             dmc.Grid(
                 [
                     dmc.GridCol(
@@ -318,6 +435,13 @@ def layout(session_id: str | None = None, **_):
                                                     checked=overlays is not None,
                                                     disabled=overlays is None,
                                                 ),
+                                                dmc.Switch(
+                                                    id="review-box-on",
+                                                    label="Player box",
+                                                    size="xs",
+                                                    checked=track is not None,
+                                                    disabled=track is None,
+                                                ),
                                             ],
                                             gap="md",
                                         ),
@@ -333,17 +457,30 @@ def layout(session_id: str | None = None, **_):
                                 dmc.Paper(
                                     dcc.Graph(
                                         id="review-timeline",
-                                        figure=timeline_figure(config, onsets_t, onsets_s),
+                                        figure=timeline_figure(
+                                            config, onsets_t, onsets_s, speed_t, speed_v
+                                        ),
                                         config={"displayModeBar": False, "scrollZoom": True},
                                     ),
                                     withBorder=True,
                                     p=4,
                                 ),
                                 dmc.Text(
-                                    f"{len(onsets_t)} audio onsets. Click the timeline to "
-                                    "seek; drag to zoom, double-click to reset.",
+                                    f"{len(onsets_t)} audio onsets"
+                                    + (" and player speed" if len(speed_t) else "")
+                                    + ". Click the timeline to seek; drag to zoom, "
+                                    "double-click to reset.",
                                     size="xs",
                                     c="dimmed",
+                                ),
+                                html.Div(
+                                    movement_card(
+                                        movement,
+                                        frames,
+                                        state.settings().processing.dark_luma,
+                                        state.settings().processing.view_min,
+                                    ),
+                                    id="review-movement",
                                 ),
                             ],
                             gap="xs",
@@ -353,6 +490,7 @@ def layout(session_id: str | None = None, **_):
                     dmc.GridCol(
                         dmc.Stack(
                             [
+                                _minimap_card(track, machine, is_machine),
                                 dmc.Paper(
                                     [
                                         dmc.Title("Segments", order=5, mb="xs"),
@@ -365,6 +503,7 @@ def layout(session_id: str | None = None, **_):
                                     p="md",
                                     withBorder=True,
                                 ),
+                                player_card(config, profiles),
                                 _calibration_card(config.id, cal, cal_label),
                                 dmc.Paper(
                                     [
@@ -461,3 +600,125 @@ clientside_callback(
     Output("review-seek", "data"),
     Input("review-timeline", "clickData"),
 )
+
+
+clientside_callback(
+    """
+    function(t, boxOn, track) {
+        const hidden = {display: "none"};
+        const host = document.getElementById("review-minimap");
+        const gd = host ? host.querySelector(".js-plotly-plot") : null;
+        if (!track || !track.t.length) { return [hidden, ""]; }
+        const now = (t && t.t) || 0;
+        const ts = track.t;
+        // Last sample at or before now.
+        let lo = 0, hi = ts.length - 1, i = -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (ts[mid] <= now + 1e-3) { i = mid; lo = mid + 1; } else { hi = mid - 1; }
+        }
+        const live = i >= 0 && now - ts[i] <= 0.15;
+        const tx = [], ty = [];
+        let px = [], py = [];
+        if (live) {
+            px = [track.x[i]]; py = [track.y[i]];
+            for (let k = i; k >= 0 && ts[k] >= now - 3 && track.run[k] === track.run[i]; k--) {
+                tx.push(track.x[k]); ty.push(track.y[k]);
+            }
+        }
+        if (gd && window.Plotly && gd.data && gd.data.length >= 2) {
+            window.Plotly.restyle(gd, {x: [tx, px], y: [ty, py]}, [0, 1]);
+        }
+        let label = "not tracked";
+        if (live) {
+            let v = 0;
+            if (i > 0 && track.run[i - 1] === track.run[i]) {
+                const dt = ts[i] - ts[i - 1];
+                v = Math.hypot(track.x[i] - track.x[i - 1], track.y[i] - track.y[i - 1]) / dt;
+            }
+            label = "x " + track.x[i].toFixed(1) + " y " + track.y[i].toFixed(1) + " m · " +
+                    (v * 3.6).toFixed(1) + " km/h" + (track.interp[i] ? " · bridged" : "");
+        }
+        if (!boxOn || !live) { return [hidden, label]; }
+        const b = track.b[i];
+        return [{
+            position: "absolute", pointerEvents: "none", boxSizing: "border-box",
+            left: b[0] + "%", top: b[1] + "%", width: (b[2] - b[0]) + "%",
+            height: (b[3] - b[1]) + "%",
+            border: "2px " + (track.interp[i] ? "dashed " : "solid ") + "#ffd43b",
+            borderRadius: "3px",
+        }, label];
+    }
+    """,
+    Output("review-box", "style"),
+    Output("review-pos", "children"),
+    Input("review-time", "data"),
+    Input("review-box-on", "checked"),
+    State("review-track", "data"),
+)
+
+
+@callback(
+    Output("review-heatmap", "figure"),
+    Input("review-heat-fold", "checked"),
+    State("review-session-id", "data"),
+    prevent_initial_call=True,
+)
+def _fold_heatmap(fold, session_id):
+    found = state.session_for(session_id or "")
+    if found is None:
+        return no_update
+    movement, _ = load_movement(found[2])
+    return heatmap_figure(*heatmap(movement, fold=bool(fold)), height=440)
+
+
+@callback(
+    Output("review-profile-facts", "children"),
+    Output("notify", "sendNotifications", allow_duplicate=True),
+    Input("review-profile", "value"),
+    State("review-session-id", "data"),
+    prevent_initial_call=True,
+)
+def _set_profile(profile_id, session_id):
+    s = state.settings()
+    try:
+        services.set_session_player(s, session_id, profile_id)
+    except ValueError as exc:
+        return no_update, notification(str(exc), color="red")
+    p = services.get_profile(s, profile_id)
+    if p is None:
+        return "No profile assigned.", no_update
+    return profile_facts(p), notification(f"Player set to {p.name}.", icon_name="tabler:check")
+
+
+@callback(
+    Output("review-machine-text", "children"),
+    Output("review-machine-place", "checked"),
+    Output("notify", "sendNotifications", allow_duplicate=True),
+    Input("review-minimap", "clickData"),
+    State("review-machine-place", "checked"),
+    State("review-session-id", "data"),
+    prevent_initial_call=True,
+)
+def _place_machine(click, placing, session_id):
+    if not placing or not click or not click.get("points"):
+        return no_update, no_update, no_update
+    pt = click["points"][0]
+    x, y = round(float(pt["x"]), 2), round(float(pt["y"]), 2)
+    s = state.settings()
+    session = services.session_by_id(s, session_id)
+    if session is None:
+        return no_update, no_update, no_update
+    config = session.load_config()
+    if config.practice is None:
+        return no_update, no_update, no_update
+    config.practice.machine_xy = [x, y]
+    session.save_config(config)
+    try:
+        job_id = services.enqueue(s, session_id, targets=["movement"])
+        msg = f"Ball machine placed. Tracking reruns (job #{job_id}); reload when it's done."
+        if state.OPTIONS.start_worker:
+            ensure_worker(s.output_root)
+    except ValueError as exc:
+        msg = f"Ball machine placed. {exc} Process the session again afterwards."
+    return f"Ball machine at ({x:.1f}, {y:.1f}) m, placed by you.", False, notification(msg)

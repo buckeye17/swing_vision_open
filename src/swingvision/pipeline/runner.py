@@ -34,7 +34,7 @@ class Registry:
     def add(self, stage: Stage) -> None:
         if stage.name in self._stages:
             raise ValueError(f"Duplicate stage {stage.name}")
-        for dep in stage.depends_on:
+        for dep in (*stage.depends_on, *stage.after):
             if dep not in self._stages:
                 raise ValueError(f"{stage.name} depends on unknown/later stage {dep}")
         self._stages[stage.name] = stage
@@ -83,7 +83,7 @@ def plan(
         if name in needed:
             return
         needed.add(name)
-        for dep in applicable[name].depends_on:
+        for dep in (*applicable[name].depends_on, *applicable[name].after):
             if dep not in applicable:
                 raise ValueError(f"{name} depends on {dep}, which is not applicable")
             visit(dep)
@@ -93,12 +93,15 @@ def plan(
 
     force = set(force)
     fingerprints: dict[str, str] = {}
+    rerun: set[str] = set()
     result: list[PlannedStage] = []
     for stage in registry.for_mode(config.mode):  # registration order is topological
         if stage.name not in needed:
             continue
-        p = _plan_stage(stage, session, config, settings, fingerprints, force)
+        p = _plan_stage(stage, session, config, settings, fingerprints, force, rerun)
         fingerprints[stage.name] = p.fingerprint
+        if not p.fresh:
+            rerun.add(stage.name)
         result.append(p)
     return result
 
@@ -110,7 +113,10 @@ def _plan_stage(
     settings: AppSettings,
     fingerprints: dict[str, str],
     force: set[str],
+    rerun: set[str] = frozenset(),  # type: ignore[assignment]
 ) -> PlannedStage:
+    """``rerun``: stages that run (or will) in this job. Their outputs may change even when
+    their fingerprint doesn't (a forced rerun), so their dependents rerun too."""
     config_hash = stable_hash(stage.config(session, config, settings))
     inputs = {dep: fingerprints[dep] for dep in stage.depends_on}
     fingerprint = stable_hash([stage.name, stage.version, config_hash, inputs])
@@ -124,6 +130,8 @@ def _plan_stage(
         fresh, reason = False, _stale_reason(manifest, stage, config_hash, inputs)
     elif missing:
         fresh, reason = False, f"missing output {missing[0].name}"
+    elif upstream := [d for d in stage.depends_on if d in rerun]:
+        fresh, reason = False, f"upstream reruns ({', '.join(upstream)})"
     else:
         fresh, reason = True, "up to date"
     return PlannedStage(stage, config_hash, inputs, fingerprint, fresh, reason)
@@ -175,7 +183,7 @@ def run(
         # Re-plan just before running: a stage's config may depend on files that upstream
         # stages (or the user, e.g. calibration edits) wrote after the initial plan.
         config = session.load_config()
-        p = _plan_stage(initial.stage, session, config, settings, fingerprints, force)
+        p = _plan_stage(initial.stage, session, config, settings, fingerprints, force, set(ran))
         fingerprints[name] = p.fingerprint
         if p.fresh:
             hooks.on_stage_end(name, "skipped", p.reason)

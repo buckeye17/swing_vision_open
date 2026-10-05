@@ -78,6 +78,8 @@ class Target(BaseModel):
 class PracticeConfig(BaseModel):
     submode: PracticeSubmode = "self_feed"
     targets: list[Target] = Field(default_factory=list)
+    #: Ball-machine position on the court (m), placed by the user. ``None``: auto-detect.
+    machine_xy: list[float] | None = None
 
 
 class MatchFormat(BaseModel):
@@ -119,6 +121,59 @@ class SessionConfig(BaseModel):
     match: MatchConfig | None = None
     players: PlayersConfig = Field(default_factory=PlayersConfig)
     notes: str = ""
+
+
+Handedness = Literal["right", "left"]
+Backhand = Literal["two_handed", "one_handed"]
+HANDEDNESS_LABELS: dict[str, str] = {"right": "Right-handed", "left": "Left-handed"}
+BACKHAND_LABELS: dict[str, str] = {"two_handed": "Two-handed", "one_handed": "One-handed"}
+
+
+class Profile(BaseModel):
+    """A player profile (``profiles`` table). Appearance galleries arrive in Phase 2."""
+
+    id: str
+    name: str
+    handedness: Handedness = "right"
+    backhand: Backhand = "two_handed"
+    height_m: float | None = Field(default=None, ge=1.0, le=2.5)
+    created_at: str
+    updated_at: str
+
+
+# ---------------------------------------------------------------------------
+# Players (PLAN.md §7.2)
+# ---------------------------------------------------------------------------
+
+
+class StaticObject(BaseModel):
+    """Something person-like that never moves (ball machine, bag on a bench, a post)."""
+
+    x: float
+    y: float
+    t0_s: float
+    t1_s: float
+    seen_s: float  # time covered by its detections
+    height_m: float | None = None
+
+
+class MachineInfo(BaseModel):
+    x: float
+    y: float
+    source: Literal["user", "auto"]
+
+
+class PlayersSummary(BaseModel):
+    """``players/identity.json``: who is who, and how well "me" was tracked."""
+
+    method: Literal["single_player"] = "single_player"
+    n_detections: int = 0
+    n_in_roi: int = 0
+    n_tracklets: int = 0
+    me_tracklets: list[int] = Field(default_factory=list)
+    me_detections: int = 0
+    static_objects: list[StaticObject] = Field(default_factory=list)
+    machine: MachineInfo | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -229,4 +284,78 @@ AUDIO_ONSETS = table_schema(
     ],
 )
 
-SCHEMAS: dict[str, pa.Schema] = {"audio_onsets": AUDIO_ONSETS}
+PASS1_FRAMES = table_schema(
+    "pass1_frames",
+    1,
+    [
+        field("frame", pa.int64(), None, "Presentation-order frame number", nullable=False),
+        field("t_s", pa.float64(), "s", "Time on the video timeline", nullable=False),
+        field("luma", pa.float32(), None, "Mean luma 0-255 (darkness check)"),
+        field(
+            "view",
+            pa.float32(),
+            None,
+            "Correlation with the court background (< 0.6: camera not on the court)",
+        ),
+    ],
+)
+
+PERSON_DETECTIONS = table_schema(
+    "person_detections",
+    1,
+    [
+        field("frame", pa.int64(), None, "Presentation-order frame number", nullable=False),
+        field("t_s", pa.float64(), "s", "Time on the video timeline", nullable=False),
+        field("x0", pa.float32(), "px", "Box left (full-resolution display pixels)"),
+        field("y0", pa.float32(), "px", "Box top"),
+        field("x1", pa.float32(), "px", "Box right"),
+        field("y1", pa.float32(), "px", "Box bottom"),
+        field("conf", pa.float32(), None, "Detector confidence"),
+    ],
+)
+
+#: Every person detection with its court position and tracking annotations.
+PLAYER_TRACKS = table_schema(
+    "player_tracks",
+    1,
+    [
+        *PERSON_DETECTIONS,
+        field("court_x", pa.float32(), "m", "Foot point on the court (x across)"),
+        field("court_y", pa.float32(), "m", "Foot point on the court (y along, + away)"),
+        field("height_m", pa.float32(), "m", "Box height at the foot point (NaN: box cut off)"),
+        field("sigma_x", pa.float32(), "m", "1-σ foot position across, from box jitter"),
+        field("sigma_y", pa.float32(), "m", "1-σ foot position along the court"),
+        field("track_id", pa.int32(), None, "Tracklet id (-1: not tracked)"),
+        field("role", pa.string(), None, "me | other | static | outside"),
+    ],
+)
+
+MOVEMENT = table_schema(
+    "movement",
+    1,
+    [
+        field("frame", pa.int64(), None, "Presentation-order frame number", nullable=False),
+        field("t_s", pa.float64(), "s", "Time on the video timeline", nullable=False),
+        field("player", pa.string(), None, "me | opponent", nullable=False),
+        field("x", pa.float32(), "m", "Smoothed court position (x across)"),
+        field("y", pa.float32(), "m", "Smoothed court position (y along, + away)"),
+        field("vx", pa.float32(), "m/s"),
+        field("vy", pa.float32(), "m/s"),
+        field("speed", pa.float32(), "m/s"),
+        field("sigma_m", pa.float32(), "m", "1-σ position uncertainty (major axis)"),
+        field("source", pa.string(), None, "bbox | interp (gap bridged, no detection)"),
+        field("run", pa.int32(), None, "Continuous tracked stretch number"),
+        field("bx0", pa.float32(), "px", "Player box (detected or interpolated)"),
+        field("by0", pa.float32(), "px"),
+        field("bx1", pa.float32(), "px"),
+        field("by1", pa.float32(), "px"),
+    ],
+)
+
+SCHEMAS: dict[str, pa.Schema] = {
+    "audio_onsets": AUDIO_ONSETS,
+    "pass1_frames": PASS1_FRAMES,
+    "person_detections": PERSON_DETECTIONS,
+    "player_tracks": PLAYER_TRACKS,
+    "movement": MOVEMENT,
+}

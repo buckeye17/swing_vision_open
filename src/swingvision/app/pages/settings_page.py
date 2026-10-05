@@ -15,6 +15,7 @@ from swingvision.app.components.file_browser import file_browser, register_file_
 from swingvision.app.components.ui import icon, notification, page_header
 from swingvision.app.worker_control import ensure_worker
 from swingvision.io.ffmpeg import available_encoders
+from swingvision.models.registry import REGISTRY, weights_dir
 from swingvision.settings import save_settings, settings_path
 from swingvision.storage.library import Library
 
@@ -63,6 +64,74 @@ def _tool_report(ffmpeg: str, ffprobe: str) -> list:
     except FileNotFoundError:
         pass
     return rows
+
+
+def _players_card(s):
+    p = s.processing
+    models = [
+        {
+            "value": name,
+            "label": f"{name} ({spec.description.split(':')[0].split(';')[0].lower()})"
+            + ("" if spec.available() else " · downloads on first use"),
+        }
+        for name, spec in REGISTRY.items()
+    ]
+    return dmc.Paper(
+        [
+            dmc.Title("Player detection", order=4),
+            dmc.Text(
+                "People are detected on the court region of each sampled frame. A higher "
+                "rate or input size costs GPU time (about 0.6× realtime at the defaults on an "
+                "RTX A5000 laptop).",
+                size="sm",
+                c="dimmed",
+                mb="sm",
+            ),
+            dmc.SimpleGrid(
+                [
+                    dmc.Select(
+                        id="set-person-model",
+                        label="Detector",
+                        data=models,
+                        value=p.person_model,
+                        allowDeselect=False,
+                    ),
+                    dmc.Select(
+                        id="set-person-rate",
+                        label="Frames analysed per second",
+                        data=[{"value": str(v), "label": f"{v} Hz"} for v in (10, 15, 20, 30)],
+                        value=str(int(p.person_rate_hz)),
+                        allowDeselect=False,
+                    ),
+                    dmc.Select(
+                        id="set-person-input",
+                        label="Input size (long side)",
+                        data=[
+                            {"value": "1280", "label": "1280 px (faster, misses far feet)"},
+                            {"value": "1920", "label": "1920 px (recommended for 4K)"},
+                            {"value": "2560", "label": "2560 px (slow)"},
+                        ],
+                        value=str(p.person_input_px),
+                        allowDeselect=False,
+                    ),
+                    dmc.NumberInput(
+                        id="set-roi-beside",
+                        label="Track up to this far beside the court (m)",
+                        description="Smaller if a neighboring court is close",
+                        value=p.roi_beside_m,
+                        min=0.5,
+                        max=8,
+                        step=0.5,
+                        decimalScale=1,
+                    ),
+                ],
+                cols={"base": 1, "sm": 2},
+            ),
+            dmc.Text(f"Weights are cached in {weights_dir()}", size="xs", c="dimmed", mt="sm"),
+        ],
+        p="lg",
+        withBorder=True,
+    )
 
 
 def layout(**_):
@@ -200,6 +269,7 @@ def layout(**_):
                         p="lg",
                         withBorder=True,
                     ),
+                    _players_card(s),
                     dmc.Paper(
                         [
                             dmc.Title("System", order=4, mb="xs"),
@@ -259,9 +329,27 @@ def _browser_start(value):
     State("set-cal-auto", "checked"),
     State("set-cal-threshold", "value"),
     State("set-cal-drift", "value"),
+    State("set-person-model", "value"),
+    State("set-person-rate", "value"),
+    State("set-person-input", "value"),
+    State("set-roi-beside", "value"),
     prevent_initial_call=True,
 )
-def _save(n, output_root, ffmpeg, ffprobe, proxy_height, chunk, cal_auto, cal_thr, cal_drift):
+def _save(
+    n,
+    output_root,
+    ffmpeg,
+    ffprobe,
+    proxy_height,
+    chunk,
+    cal_auto,
+    cal_thr,
+    cal_drift,
+    person_model,
+    person_rate,
+    person_input,
+    roi_beside,
+):
     if not n:
         return no_update, no_update
     s = state.settings()
@@ -286,6 +374,10 @@ def _save(n, output_root, ffmpeg, ffprobe, proxy_height, chunk, cal_auto, cal_th
     s.processing.chunk_seconds = float(chunk or 120)
     s.processing.calibration_auto_accept_px = float(cal_thr or 1.5) if cal_auto else None
     s.processing.calibration_drift_px = float(cal_drift or 3.0)
+    s.processing.person_model = person_model or s.processing.person_model
+    s.processing.person_rate_hz = float(person_rate or s.processing.person_rate_hz)
+    s.processing.person_input_px = int(person_input or s.processing.person_input_px)
+    s.processing.roi_beside_m = float(roi_beside or s.processing.roi_beside_m)
     save_settings(s)
     if state.OPTIONS.start_worker:
         ensure_worker(s.output_root)

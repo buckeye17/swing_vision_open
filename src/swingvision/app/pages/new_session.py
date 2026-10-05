@@ -1,7 +1,7 @@
 """New session: pick a video, choose mode, create + enqueue processing.
 
-M0 covers the practice path. Targets (M5), the player profile (M2), and the
-match path (Phase 2) slot into this page later.
+Covers the practice path and the player profile. Targets (M5) and the match path
+(Phase 2) slot into this page later.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ register_file_browser("video-browser", mode="file", extensions=VIDEO_EXTENSIONS)
 def layout(**_):
     if state.settings().output_root is None:
         return dmc.Container([page_header("New session"), no_output_root_alert()], size="md", px=0)
+    profiles = services.list_profiles(state.settings())
     return dmc.Container(
         [
             page_header("New session", "Pick footage, choose what kind of session it is."),
@@ -106,10 +107,38 @@ def layout(**_):
                                         ],
                                         gap=4,
                                     ),
+                                    dmc.Group(
+                                        [
+                                            dmc.Select(
+                                                id="ns-profile",
+                                                label="Player",
+                                                description="Who is practicing (handedness "
+                                                "and height feed the swing analysis).",
+                                                data=[
+                                                    {"value": p.id, "label": p.name}
+                                                    for p in profiles
+                                                ],
+                                                value=profiles[0].id
+                                                if len(profiles) == 1
+                                                else None,
+                                                placeholder="Choose a profile"
+                                                if profiles
+                                                else "No profiles yet",
+                                                clearable=True,
+                                                flex=1,
+                                            ),
+                                            dmc.Anchor(
+                                                "Manage profiles",
+                                                href="/profiles",
+                                                size="sm",
+                                                pb=6,
+                                            ),
+                                        ],
+                                        align="flex-end",
+                                    ),
                                     dmc.Text(
-                                        "Targets and player profile are added in later "
-                                        "milestones; you'll be able to set them on existing "
-                                        "sessions.",
+                                        "Practice targets arrive in a later milestone; you'll "
+                                        "be able to set them on existing sessions.",
                                         size="xs",
                                         c="dimmed",
                                     ),
@@ -246,15 +275,18 @@ def _video_picked(result, name):
     State("ns-name", "value"),
     State("ns-mode", "value"),
     State("ns-submode", "value"),
+    State("ns-profile", "value"),
     running=[(Output("ns-create", "loading"), True, False)],
     prevent_initial_call=True,
 )
-def _create(n, video, name, mode, submode):
+def _create(n, video, name, mode, submode, profile_id):
     if not n or not video:
         return no_update, no_update
     s = state.settings()
     try:
-        session = services.create_session(s, Path(video["path"]), name, mode, submode)
+        session = services.create_session(
+            s, Path(video["path"]), name, mode, submode, me_profile_id=profile_id or None
+        )
         config = session.load_config()
         job_id = services.enqueue(s, config.id)
     except Exception as exc:

@@ -18,8 +18,10 @@ from swingvision.app.components.ui import (
     status_badge,
 )
 from swingvision.app.worker_control import ensure_worker
+from swingvision.pipeline.stage import read_manifest
 from swingvision.pipeline.stages import default_registry
 from swingvision.storage.schemas import PRACTICE_SUBMODE_LABELS
+from swingvision.storage.session import Session
 
 
 def layout(**_):
@@ -63,7 +65,14 @@ def layout(**_):
 dash.register_page(__name__, path="/", title="Library · Swing Vision Open", order=0, layout=layout)
 
 
-def _row(s: dict):
+def _moved(root, s: dict) -> str:
+    """Headline stat: distance covered (from the movement stage's manifest)."""
+    m = read_manifest(Session.open(root, s["dir_name"]), "movement")
+    dist = (m or {}).get("extra", {}).get("distance_m")
+    return f"{dist:,.0f} m" if dist is not None else "–"
+
+
+def _row(root, s: dict):
     mode = s["mode"].capitalize()
     if s["submode"]:
         mode += f" · {PRACTICE_SUBMODE_LABELS.get(s['submode'], s['submode'])}"
@@ -114,6 +123,7 @@ def _row(s: dict):
             dmc.TableTd(dmc.Anchor(s["name"], href=f"/session/{sid}", fw=600)),
             dmc.TableTd(mode),
             dmc.TableTd(fmt_duration(s["duration_s"])),
+            dmc.TableTd(_moved(root, s)),
             dmc.TableTd(fmt_time(s["created_at"])),
             dmc.TableTd(status_badge(s["status"]), style={"whiteSpace": "nowrap"}),
             dmc.TableTd(menu),
@@ -136,10 +146,10 @@ def _render(_, last_sig):
     sig = repr([(s["id"], s["status"], s["updated_at"], s["name"]) for s in sessions])
     if sig == last_sig:
         return no_update, no_update
-    return _table(sessions), sig
+    return _table(lib.root, sessions), sig
 
 
-def _table(sessions: list[dict]):
+def _table(root, sessions: list[dict]):
     if not sessions:
         return dmc.Paper(
             dmc.Stack(
@@ -156,12 +166,15 @@ def _table(sessions: list[dict]):
         )
     head = dmc.TableThead(
         dmc.TableTr(
-            [dmc.TableTh(h) for h in ("", "Name", "Mode", "Length", "Created", "Status", "")]
+            [
+                dmc.TableTh(h)
+                for h in ("", "Name", "Mode", "Length", "Moved", "Created", "Status", "")
+            ]
         )
     )
     return dmc.Paper(
         dmc.Table(
-            [head, dmc.TableTbody([_row(s) for s in sessions])],
+            [head, dmc.TableTbody([_row(root, s) for s in sessions])],
             highlightOnHover=True,
             verticalSpacing="xs",
         ),

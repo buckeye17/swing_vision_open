@@ -5,11 +5,17 @@ from __future__ import annotations
 from swingvision.pipeline.runner import Registry
 from swingvision.pipeline.stages.court import CameraStage, CourtAutoStage
 from swingvision.pipeline.stages.ingest import AudioOnsetsStage, IngestStage, ProxyStage
+from swingvision.pipeline.stages.players import (
+    MovementStage,
+    Pass1DetectStage,
+    PlayersTrackStage,
+)
 
 
 def default_registry() -> Registry:
     # court_auto runs right after ingest so the calibration can be reviewed while the
-    # proxy encodes; the camera gate comes last so playback is ready even when it pauses.
+    # proxy encodes; the camera gate comes before the GPU detection pass (which crops to the
+    # court) so playback is ready even when it pauses.
     return Registry(
         [
             IngestStage(),
@@ -17,5 +23,8 @@ def default_registry() -> Registry:
             ProxyStage(),
             AudioOnsetsStage(),
             CameraStage(),
+            Pass1DetectStage(),
+            PlayersTrackStage(),
+            MovementStage(),
         ]
     )

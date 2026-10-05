@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 
 from platformdirs import user_config_dir, user_data_dir
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from swingvision.storage.fsutil import atomic_write_text
 
@@ -41,6 +41,24 @@ class ProcessingDefaults(BaseModel):
     calibration_window_s: float = 300.0  # drift check: one re-calibration per window
     calibration_frames_per_window: int = 5
     calibration_drift_px: float = 3.0  # RMS keypoint shift that flags a moved camera
+    #: Person detection (``pass1_detect``). The court-ROI crop is scaled so its long side is
+    #: ``person_input_px``; 1920 (half of 4K) finds the far player far more reliably than 1280.
+    person_model: str = "yolo11m"
+    person_rate_hz: float = 15.0
+    person_input_px: int = 1920
+    person_conf: float = 0.1
+    decode_backend: str = "auto"  # auto | nvdec | pyav
+    #: Court region of interest: the court plus this much run-off (m) behind the baselines and
+    #: beside the doubles sidelines. Neighboring courts usually start ≈3.7 m beside.
+    roi_behind_m: float = 6.0
+    roi_beside_m: float = 3.5
+    #: Frames darker than this mean luma (0-255) count as unusable for player tracking. The
+    #: detector still finds a player at dusk down to about 4 (measured on the Oct 1 session).
+    dark_luma: float = 4.0
+    #: Frames whose correlation with the court background is below this don't show the
+    #: calibrated view (camera being set up, picked up, or knocked): detections there are
+    #: ignored. Settled play scores 0.8-0.98 (also at dusk); a camera still being aimed ~0.5.
+    view_min: float = 0.6
 
 
 class AppSettings(BaseModel):
@@ -50,6 +68,12 @@ class AppSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8050
     processing: ProcessingDefaults = Field(default_factory=ProcessingDefaults)
+
+    @field_validator("output_root", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value):
+        # Path("") would silently mean the current directory.
+        return None if isinstance(value, str) and not value.strip() else value
 
     def ffmpeg(self) -> str:
         return _resolve_tool(self.ffmpeg_path)

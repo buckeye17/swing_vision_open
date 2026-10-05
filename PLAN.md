@@ -99,8 +99,8 @@ Cross-session trends (`pyarrow.dataset`), annotated proxy render, TensorRT/perfo
 | Deep learning | `torch`, `torchvision` from the PyTorch CUDA 12.8 index | Configured with `[tool.uv.index]` + `[tool.uv.sources]`. |
 | Video decode | `FrameSource` abstraction: **PyNvVideoCodec** (NVDEC → GPU tensor via DLPack) primary; **PyAV** CPU fallback | ✅ M0 spike: 305 fps of upright 4K RGB on the GPU (PyAV hwaccel 81, CPU 29). See `docs/spikes/m0-video-pipeline.md`. |
 | Probe / audio / proxy | `ffmpeg`/`ffprobe` binaries (path set in Settings) | NVENC for 720p proxy encode. |
-| Person detection | Ultralytics YOLO (latest, e.g. YOLO11-l/x) at ~1280 px | AGPL. Fine for personal use. |
-| Multi-object tracking | BoT-SORT/ByteTrack via `boxmot` | Plus court-ROI filtering and singles constraints. |
+| Person detection | ✅ Ultralytics YOLO11m on the court-ROI crop at 1920 px, 15 Hz, raw model on GPU tensors | M2: 1920 px finds the far player's legs at the frame edge (5/5 frames vs 2/5 at 1280). AGPL, fine for personal use. Weights pinned by SHA-256 in `models/registry.py`. |
+| Multi-object tracking | ✅ Own court-space tracker: Hungarian frame-to-frame association (speed + σ + physical-height gates) and a tracklet-chain DP for "me" | M2: simpler and more robust for one player than BoT-SORT; Phase 2 adds the two-player constraint and re-ID (`boxmot`/OSNet then). See `docs/m2-player-tracking.md`. |
 | Re-ID | OSNet embeddings (via `boxmot` weights) | Appearance profile gallery. |
 | Ball detection | **Slim** TrackNet-style heatmap U-Net (3-frame input + background, width 32, stride-2 stem), trained on own footage at ≈1280 px wide on a court-ROI crop | M0 spike: a TrackNet-size net at 1280×720 runs at only 20 fps, the slim variant at 190 fps. Optionally distil from pretrained TrackNetV3. |
 | Court keypoints | ✅ Classical line detector: white top-hat → Hough → court-model hypothesis search → sub-pixel ridge refinement + full camera fit | M1: needs no training data and handles low corner cameras, wide lenses, partly visible courts, pickleball lines and neighboring courts. A keypoint CNN fine-tuned on confirmed calibrations stays an option if a view ever defeats it. See `docs/m1-court-calibration.md`. |
@@ -158,7 +158,7 @@ swing_vision_open/
 │  │  ├─ camera.py              # pinhole + division-model distortion, PnP/line fits
 │  │  └─ calibration.py         # frame sampling, drift windows, editor solves, files
 │  ├─ players/
-│  │  ├─ detect.py  track.py    # YOLO + BoT-SORT, court-ROI filter, singles constraint
+│  │  ├─ detect.py  track.py    # YOLO on ROI crops; court-space tracklets, static objects, "me" chain
 │  │  ├─ reid.py                # OSNet embeddings, tracklet ↔ profile matching
 │  │  └─ movement.py            # feet → court coords, smoothing, speed/distance/heatmaps
 │  ├─ ball/
@@ -212,7 +212,7 @@ swing_vision_open/
 <output_root>/
 ├─ library.sqlite                     # sessions, jobs queue, profiles, settings snapshot
 ├─ profiles/<profile_id>/
-│  ├─ profile.json                    # name, handedness, height, backhand (1H/2H)
+│  ├─ (name, handedness, height, backhand live in library.sqlite → profiles)
 │  ├─ reid_gallery.npy  gallery.json  # embeddings grouped by "outfit"
 │  └─ thumbs/
 ├─ sessions/<YYYY-MM-DD>_<slug>_<shortid>/
@@ -222,7 +222,8 @@ swing_vision_open/
 │  ├─ proxy_720p.mp4                  # browser playback (H.264, NVENC)
 │  ├─ audio_onsets.parquet
 │  ├─ manifests/<stage>.json          # stage version, config hash, input hashes, timing, status
-│  ├─ players/detections/part-*.parquet  tracks.parquet  identity.json  movement.parquet
+│  ├─ pass1/frames.parquet             # sampled frames: time, brightness, view check
+│  ├─ players/detections.parquet  tracks.parquet  identity.json  movement.parquet
 │  ├─ ball/raw/part-*.parquet  track.parquet
 │  ├─ events.parquet                  # hits, bounces, net, serve_toss (frame, xy, conf, source)
 │  ├─ shots.parquet                   # one row per shot (see §8)
@@ -249,7 +250,7 @@ Principles:
 * **Explicit schemas**: every Parquet file has a `pa.schema` defined in `storage/schemas.py`, with units in the field metadata (e.g. `{"unit": "m"}`) plus a `schema_version` in the file metadata. Writers validate against the schema, so there's no type inference.
   * Fixed-size arrays use `pa.list_(pa.float32(), n)`. For example, pose keypoints are `list<float32>[17*3]` per player-frame.
 * **Writing**: `pyarrow.parquet.write_table` with `compression="zstd"`. Per-frame data uses sensible row-group sizes (e.g. one row group per 2-minute chunk).
-  * Chunked GPU stages write one part file per chunk (`players/detections/part-0007.parquet`), which matches the resume checkpoints.
+  * Chunked GPU stages write one part file per chunk (`work/pass1_detect/det/part-00007.parquet`), which matches the resume checkpoints, and consolidate them into one file at the end.
   * Writes are atomic: write to a temp file, then rename.
 * **Reading**: `pq.read_table(path, columns=[...], filters=[...])` reads only the columns and rows needed. Part-file directories are read with `pyarrow.dataset.dataset(dir)`.
 * **Transforms**: filtering, joins, group-by, and aggregation use `pyarrow.compute` and `Table.join`/`Table.group_by`. When logic is clearer in Python (state machines, scoring), it iterates over `to_pylist()` or NumPy arrays.
@@ -270,10 +271,10 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 3 | `audio_onsets` | – | 1 | onset times + strength + spectral features |
 | 4 | `court_auto` | – | 1 | median background per time window, court detection on the dominant camera position, per-window drift check → `court/auto.json` |
 | 5 | `camera` | – | 1 | calibration gate: user-confirmed (`court/user.json`) or auto-accepted calibration → `calibration.json` |
-| 6 | `pass1_detect` | ✓ | 1 | **single decode pass**: person detections + ball heatmap peaks for every frame |
-| 7 | `players_track` | – | 1 (single player) / 2 (two players) | tracks filtered to court ROI, stitched tracklets. Phase 2 adds the top-2 singles constraint |
+| 6 | `pass1_detect` | ✓ | 1 | **single decode pass**: person detections at 15 Hz (✅ M2) + ball heatmap peaks (M3). Runs *after* `camera` (crops to the court) but only the 64 px-snapped crop is in its fingerprint, so recalibrating doesn't rerun it |
+| 7 | `players_track` | – | 1 (single player) / 2 (two players) | ✅ court positions, ROI, tracklets, static objects/ball machine, the "me" chain. Phase 2 adds the top-2 singles constraint |
 | 8 | `identity` | ✓ (light) | 2 | tracklet ↔ profile ("me" / "opponent"), confidence. In Phase 1 the only tracked player is "me" |
-| 9 | `movement` | – | 1 | feet → court coords, smoothed position/velocity per player |
+| 9 | `movement` | – | 1 | ✅ smoothed position/velocity per player (Kalman/RTS with per-point ground σ), short gaps bridged |
 | 10 | `ball_track` | – | 1 | cleaned trajectory, gap fill, sub-tracks |
 | 11 | `events` | – | 1 | hits (with hitter), bounces, net events, serve candidates |
 | 12 | `ball_3d` | – | 1 | per-shot 3D flight fit: speeds, net clearance, apex, landing |
@@ -288,7 +289,7 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 
 **Calibration gating**: stages 4–5 run automatically. `court_auto` runs right after `ingest`, so the calibration can be reviewed while the proxy encodes. Unless the auto calibration passes the Settings threshold ("continue without review when line RMS < X px", off by default), `camera` stops the job with status `needs_action`; Jobs and the session page link to the Calibrate page, and confirming there re-queues the job. Stage 6 doesn't depend on calibration except for the court-ROI crop. The `camera` stage's fingerprint covers only the chosen camera, so re-confirming an unchanged calibration invalidates nothing; if the user later adjusts calibration, stages 7+ rerun on CPU in minutes. (The runner re-plans each stage just before running it, so a stage's config may read files that upstream stages or the user wrote.)
 
-**Throughput** for 1 h of 4K60 (216k frames), measured in the M0 spike (`docs/spikes/m0-video-pipeline.md`): PyNvVideoCodec decode 305 fps; YOLO11-m @1280 FP16 104 img/s (run at 30 Hz); slim ball U-Net @1280×720 190 img/s. Pass 1 is ≈75–90 fps (**≈45 min per hour**). Add the proxy (≈11 min per hour), pose windows (≈30–40% of frames), and CPU stages. Expected total is **≈1.5–2.5 h per hour of footage**, which fits overnight. NVDEC/NVENC are shared, so GPU stages run one at a time. Optimizations if needed: TensorRT, skipping dead time (ball collection) using frame differencing and audio-onset density.
+**Throughput** for 1 h of 4K60 (216k frames), measured in the M0 spike (`docs/spikes/m0-video-pipeline.md`): PyNvVideoCodec decode 305 fps; YOLO11-m @1280 FP16 104 img/s; slim ball U-Net @1280×720 190 img/s. *M2 measured:* YOLO11m at the 1920 px input the far player needs runs 46 img/s, so persons run at 15 Hz; the person pass alone is **0.52× realtime (≈31 min per hour)**. Pass 1 is ≈75–90 fps (**≈45 min per hour**). Add the proxy (≈11 min per hour), pose windows (≈30–40% of frames), and CPU stages. Expected total is **≈1.5–2.5 h per hour of footage**, which fits overnight. NVDEC/NVENC are shared, so GPU stages run one at a time. Optimizations if needed: TensorRT, skipping dead time (ball collection) using frame differencing and audio-onset density.
 
 ---
 
@@ -316,7 +317,8 @@ Court model (`court/model.py`): ITF dimensions, 23.77 × 10.97 m (singles 8.23 m
 
 > **Phase 1** covers ROI filtering and tracking of the single player, who is assumed to be "me", plus ball-machine handling. The singles two-player constraint and appearance re-ID are **Phase 2**.
 
-* Use YOLO person detections each frame. Keep detections whose foot point (bbox bottom center, later ankle midpoint from pose) projects inside the **court ROI** (court + 6 m behind baselines + 4 m beside sidelines). This excludes neighboring courts and spectators.
+* Use YOLO person detections (15 Hz). Keep detections whose foot point (bbox bottom center, later ankle midpoint from pose) projects inside the **court ROI** (court + 6 m behind baselines + 3.5 m beside sidelines; neighboring courts start ≈3.7 m beside). This excludes neighboring courts and spectators. Frames that don't show the calibrated view (camera being handled) are ignored.
+* ✅ Phase 1 (M2): tracklets by court-space Hungarian association gated by speed, ground σ and physical height; motionless short objects (ball machine, bags) are flagged static; "me" is the best chain of tracklets (confidence gained, physically possible links, restart penalty). Details in `docs/m2-player-tracking.md`.
 * BoT-SORT tracking, then **singles constraint**: at most one "near-side" and one "far-side" player while in play. Short tracklets are stitched by position and time continuity plus appearance similarity.
 * **Identity**: compute OSNet embeddings for sampled crops per tracklet and average them. Match tracklets to the "me" profile gallery (cosine similarity, max over outfits). Use Hungarian assignment between the two players for each continuous play period, so the higher-similarity player is "me".
   * If confidence is low (e.g. a new outfit), the session gets the flag `identity_review`. The UI shows thumbnails of both players, the user clicks themself once, and the new outfit embeddings are added to the gallery.
@@ -499,7 +501,7 @@ swing_id, quality_flags
 
 `points.parquet` / `score_log.parquet`: `point_index, winner_inferred, winner_final, reason, confidence, evidence_json, score_before/after, server, ends, overridden`.
 
-`movement.parquet`: `frame, player, x, y, vx, vy, speed, source (pose|bbox)`.
+`movement.parquet`: `frame, t_s, player, x, y, vx, vy, speed, sigma_m, source (bbox|interp; pose from M6), run, bx0..by1`.
 
 ---
 
@@ -600,11 +602,15 @@ Each milestone ends with tests passing, a demo on real footage, and a short READ
   * The projected court overlay aligns on the background, on each drift window, and on the playing video.
   * Synthetic tests recover known cameras (wide, narrow with off-center principal point, low corner camera) to < 1 px keypoint error, focal length within 1%, camera position within 10 cm, including through an H.264 encode and the full stage pipeline.
 
-#### M2 — Single player tracking, profile basics, movement
-* `pass1_detect` (players part), court-ROI filtering, single-player tracking + tracklet stitching, ball-machine detection (stationary feed source).
-* Profiles page (basics only): name, handedness, 1H/2H backhand, height.
-* Movement stage + court minimap + movement stats/heatmaps.
-* ✅ Exit criteria: the player is tracked for > 98% of hitting time in a 30-minute practice session, with no spectators or neighboring-court players tracked.
+#### M2 — Single player tracking, profile basics, movement ✅ (done 2026-10-05)
+* `pass1_detect` (players part: dense NVDEC/PyAV `FrameSource`, YOLO11m on the court-ROI crop at 1920 px, 15 Hz, plus per-frame brightness and a view check that ignores frames where the camera is being handled), court-ROI filtering, single-player tracking (court-space tracklets with speed/σ/height gates, a tracklet-chain DP that tolerates overlapping duplicate tracks, feet-out-of-frame placement from the head), static-object detection with ball-machine adoption or click-to-place (feed-origin detection needs M3's ball tracks).
+* Profiles page (basics only): name, handedness, 1H/2H backhand, height; profile choice in New session and on the session page; `sv profiles`.
+* Movement stage (Kalman/RTS with per-point ground σ, gap bridging) + live court minimap and player box on the video + speed timeline row + movement stats/heatmaps; distance in the Library.
+* Framework fixes found on the way: ordering-only stage dependencies (`after`), and a forced/rerun stage now reruns its dependents even when its fingerprint is unchanged.
+* ✅ Exit criteria (details in `docs/m2-player-tracking.md`):
+  * Oct 1 session (28 min, self-feed, into dusk): the player is tracked in **99.94%** of hitting time while in the picture (95.0% counting two walks off camera and the camera setup as hitting time; hitting time approximated from strong audio onsets until M3 labels hits).
+  * **No** spectators, neighboring-court players or objects tracked as the player: 48 of 48 random hitting moments audited by eye have the box on the player; playground spectators beyond the fence are ignored.
+  * Oct 4 (51 min): 85% of hitting time, the rest with the player outside the picture (behind the far baseline at the frame's top edge); 18 of 18 tracked audit samples on the player.
 
 #### M3 — Ball detection, trajectory, events (+ labeling)
 * Labeling page first. Label full-frame-rate ground-truth clips (§7.4.1), plus sampled frames

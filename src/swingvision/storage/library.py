@@ -399,6 +399,51 @@ class Library:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # -- profiles ----------------------------------------------------------------
+    PROFILE_FIELDS = ("name", "handedness", "backhand", "height_m")
+
+    def add_profile(
+        self,
+        *,
+        id: str,
+        name: str,
+        handedness: str = "right",
+        backhand: str = "two_handed",
+        height_m: float | None = None,
+    ) -> None:
+        ts = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO profiles (id, name, handedness, backhand, height_m, created_at,
+                                         updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (id, name, handedness, backhand, height_m, ts, ts),
+            )
+
+    def get_profile(self, profile_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_profiles(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM profiles ORDER BY name COLLATE NOCASE").fetchall()
+        return [dict(r) for r in rows]
+
+    def update_profile(self, profile_id: str, **fields: Any) -> None:
+        unknown = set(fields) - set(self.PROFILE_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown profile fields {sorted(unknown)}")
+        if not fields:
+            return
+        fields["updated_at"] = now_iso()
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE profiles SET {cols} WHERE id = ?", (*fields.values(), profile_id))
+
+    def delete_profile(self, profile_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+
     # -- worker heartbeat ----------------------------------------------------------
     def worker_heartbeat(self, worker_id: str, pid: int, state: str, started_at: str) -> None:
         with self.connect() as conn:

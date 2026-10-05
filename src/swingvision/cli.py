@@ -15,6 +15,10 @@ settings_app = typer.Typer(no_args_is_help=True, help="Show or change app settin
 app.add_typer(settings_app, name="settings")
 court_app = typer.Typer(no_args_is_help=True, help="Court detection and calibration tools.")
 app.add_typer(court_app, name="court")
+models_app = typer.Typer(no_args_is_help=True, help="Pretrained model weights.")
+app.add_typer(models_app, name="models")
+profiles_app = typer.Typer(no_args_is_help=True, help="Player profiles.")
+app.add_typer(profiles_app, name="profiles")
 
 
 @app.command("app")
@@ -57,13 +61,25 @@ def create(
     name: Annotated[str | None, typer.Option()] = None,
     mode: Annotated[str, typer.Option(help="practice | match")] = "practice",
     submode: Annotated[str, typer.Option(help="self_feed | ball_machine | serve")] = "self_feed",
+    profile: Annotated[
+        str | None, typer.Option(help="Player profile id (sv profiles list)")
+    ] = None,
     process: Annotated[bool, typer.Option(help="Enqueue processing right away")] = True,
 ) -> None:
     """Create a session from a video (and enqueue processing)."""
     from swingvision import services
 
     settings = load_settings()
-    session = services.create_session(settings, video, name, mode, submode)  # type: ignore[arg-type]
+    if profile and services.get_profile(settings, profile) is None:
+        raise typer.BadParameter(f"Unknown profile {profile}")
+    session = services.create_session(
+        settings,
+        video,
+        name,
+        mode,  # type: ignore[arg-type]
+        submode,  # type: ignore[arg-type]
+        me_profile_id=profile,
+    )
     config = session.load_config()
     typer.echo(f"Created session {config.id} at {session.path}")
     if process:
@@ -195,6 +211,61 @@ def court_detect(
                 cv2.polylines(vis, [pts], False, color, thick, cv2.LINE_AA, shift=2)
         cv2.imwrite(str(out), vis)
         typer.echo(f"Overlay written to {out}")
+
+
+@models_app.command("list")
+def models_list() -> None:
+    """Show known weights, whether they are downloaded, and their licenses."""
+    from swingvision.models.registry import REGISTRY, weights_dir
+
+    typer.echo(f"# {weights_dir()}")
+    for spec in REGISTRY.values():
+        mark = "yes" if spec.available() else "no "
+        typer.echo(
+            f"{spec.name:<10} {mark}  {spec.size_mb:5.1f} MB  {spec.license}  {spec.description}"
+        )
+
+
+@models_app.command("download")
+def models_download(names: Annotated[list[str] | None, typer.Argument()] = None) -> None:
+    """Download weights (default: the person detector chosen in Settings)."""
+    from swingvision.models import registry
+
+    for name in names or [load_settings().processing.person_model]:
+        path = registry.ensure(name, lambda f, n=name: sys.stdout.write(f"\r{n}: {f:5.1%}"))
+        typer.echo(f"\r{name}: {path}")
+
+
+@profiles_app.command("list")
+def profiles_list() -> None:
+    from swingvision import services
+
+    for p in services.list_profiles(load_settings()):
+        height = f"{p.height_m * 100:.0f} cm" if p.height_m else "-"
+        typer.echo(f"{p.id}  {p.name:<20} {p.handedness:<6} {p.backhand:<11} {height}")
+
+
+@profiles_app.command("add")
+def profiles_add(
+    name: str,
+    handedness: Annotated[str, typer.Option(help="right | left")] = "right",
+    backhand: Annotated[str, typer.Option(help="two_handed | one_handed")] = "two_handed",
+    height_cm: Annotated[float | None, typer.Option(help="Height in cm")] = None,
+) -> None:
+    from pydantic import ValidationError
+
+    from swingvision import services
+
+    try:
+        p = services.save_profile(
+            load_settings(), name, handedness, backhand, height_cm / 100 if height_cm else None
+        )
+    except ValidationError as exc:
+        problems = "; ".join(f"{e['loc'][0]}: {e['msg']}" for e in exc.errors())
+        raise typer.BadParameter(problems) from None
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"Created profile {p.id} ({p.name})")
 
 
 @settings_app.command("show")

@@ -82,3 +82,10 @@ def test_job_stages_and_delete_cascade(lib):
     assert lib.job_stages(j)[1]["progress"] == 0.5
     lib.delete_session("s1")
     assert lib.get_job(j) is None
+
+
+def test_blank_output_root_means_unset():
+    from swingvision.settings import AppSettings
+
+    assert AppSettings.model_validate_json('{"output_root": ""}').output_root is None
+    assert AppSettings.model_validate_json('{"output_root": "  "}').output_root is None

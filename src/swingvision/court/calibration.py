@@ -347,6 +347,29 @@ def camera_at(cal: Calibration, t_s: float) -> Camera:
     return to_camera(cal.camera)
 
 
+def cameras_for_times(cal: Calibration, t_s: np.ndarray) -> tuple[list[Camera], np.ndarray]:
+    """Vectorized :func:`camera_at`: the distinct cameras and, per time, which one applies."""
+    cams = [to_camera(cal.camera)]
+    which = np.zeros(len(t_s), dtype=np.int64)
+    t_s = np.asarray(t_s, dtype=np.float64)
+    for win in cal.drift:
+        if win.camera is not None and (win.shift_rms_px or 0.0) > PIECEWISE_MIN_SHIFT_PX:
+            inside = (t_s >= win.t0_s) & (t_s < win.t1_s)
+            if inside.any():
+                cams.append(to_camera(win.camera))
+                which[inside] = len(cams) - 1
+    return cams, which
+
+
+def all_cameras(cal: Calibration) -> list[Camera]:
+    """The session camera plus every window's own camera (for crops that must fit all)."""
+    return [to_camera(cal.camera)] + [
+        to_camera(w.camera)
+        for w in cal.drift
+        if w.camera is not None and (w.shift_rms_px or 0.0) > PIECEWISE_MIN_SHIFT_PX
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Editor solves
 # ---------------------------------------------------------------------------

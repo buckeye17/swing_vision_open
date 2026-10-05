@@ -77,6 +77,10 @@ class Stage(ABC):
     name: ClassVar[str]
     version: ClassVar[int]
     depends_on: ClassVar[tuple[str, ...]] = ()
+    #: Stages that must run first but whose fingerprints don't feed this one's. The stage's
+    #: ``config()`` captures what it actually uses from them (e.g. ``pass1_detect`` keeps only
+    #: a coarse crop rectangle from the calibration, so recalibrating doesn't rerun the GPU).
+    after: ClassVar[tuple[str, ...]] = ()
     modes: ClassVar[frozenset[str]] = ALL_MODES
     phase: ClassVar[int] = 1
     uses_gpu: ClassVar[bool] = False

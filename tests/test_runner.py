@@ -227,3 +227,17 @@ def test_config_read_from_upstream_output_is_planned_lazily(tmp_path, settings, 
     assert [p.stage.name for p in plan(reg, s, s.load_config(), settings) if not p.fresh] == [
         "reader"
     ]
+
+
+def test_forced_rerun_reruns_dependents_but_not_order_only_followers(tmp_path, settings, rec):
+    s = make_session(tmp_path)
+    c = stage_cls("c", rec=rec)
+    c.after = ("a",)  # ordering only: runs after a, but a's reruns don't concern it
+    reg = Registry([stage_cls("a", rec=rec)(), stage_cls("b", ["a"], rec=rec)(), c()])
+    assert run(reg, s, settings).ran == ["a", "b", "c"]
+    planned = {p.stage.name: p for p in plan(reg, s, s.load_config(), settings, force=["a"])}
+    assert not planned["b"].fresh and "upstream reruns" in planned["b"].reason
+    assert planned["c"].fresh
+    assert run(reg, s, settings, force=["a"]).ran == ["a", "b"]
+    # Targeting c still pulls in (and orders) a.
+    assert [p.stage.name for p in plan(reg, s, s.load_config(), settings, ["c"])] == ["a", "c"]

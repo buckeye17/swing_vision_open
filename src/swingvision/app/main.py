@@ -14,12 +14,21 @@ from swingvision.app.components.ui import STATUS_COLORS, icon
 from swingvision.app.server_routes import register_routes
 from swingvision.app.worker_control import ensure_worker, worker_state
 
-PAGE_MODULES = ["library", "new_session", "jobs", "session_review", "calibrate", "settings_page"]
+PAGE_MODULES = [
+    "library",
+    "new_session",
+    "jobs",
+    "session_review",
+    "calibrate",
+    "profiles",
+    "settings_page",
+]
 
 NAV = [
     ("Library", "/", "tabler:books", "exact"),
     ("New session", "/new", "tabler:video-plus", "exact"),
     ("Jobs", "/jobs", "tabler:list-check", "exact"),
+    ("Profiles", "/profiles", "tabler:users", "exact"),
     ("Settings", "/settings", "tabler:settings", "exact"),
 ]
 
