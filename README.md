@@ -4,9 +4,11 @@ A personal, local-first tennis video analysis tool. Point a fixed camera at the 
 a practice or a match, and let your NVIDIA GPU break the footage down. The roadmap and
 architecture are in [PLAN.md](PLAN.md).
 
-**Status: milestone M0 (foundation) is complete.** The app ingests footage, builds a
-browser-playable proxy, detects audio onsets, and plays sessions back with a synced timeline.
-Court calibration, ball and player tracking, and practice analytics arrive in M1–M7.
+**Status: milestones M0 (foundation) and M1 (court calibration) are complete.** The app
+ingests footage, builds a browser-playable proxy, detects audio onsets, finds the court and
+fits a full camera model (sub-pixel on real footage), checks whether the camera moved during
+the recording, and lets you review and adjust the calibration. Ball and player tracking and
+practice analytics arrive in M2–M7.
 
 ## Requirements
 
@@ -38,6 +40,24 @@ Then go to **New session**, choose a video, and click **Create and process**. A 
 worker (started by the app) processes the job. You can watch it on **Jobs**, and open the
 session from the **Library** when it's done.
 
+### Court calibration
+
+Right after ingest, the worker finds the court on a median "background" of frames sampled
+across the video (players removed) and fits the camera: focal length, lens distortion, and
+position. By default the job then **pauses for your review** (status *needs action*): click
+**Review calibration** on the Jobs page (or **Calibrate** on the session page).
+
+* The projected court is drawn over the background. If it's off, drag any circle onto its
+  court corner (or the net post tops / center strap); dragged points turn yellow and the court
+  follows. Then click **Snap to lines** for a sub-pixel fit. *Line RMS* under 2 px is good.
+* **Drift check** lists the video in time windows. If the camera was bumped or re-aimed,
+  those windows get their own camera automatically; pick one under *Image* to check it.
+* **Confirm and continue** saves your calibration and resumes processing.
+
+To skip the review when the automatic fit is good, enable *Continue without review* under
+**Settings → Court calibration**. The session page's **Court overlay** switch draws the
+court over the playing video.
+
 ## CLI
 
 ```bash
@@ -47,16 +67,19 @@ uv run sv worker                       # process the queue in the foreground
 uv run sv jobs                         # queue status
 uv run sv process <session-id> --inline --force proxy   # rerun a stage in this process
 uv run sv probe D:\footage\practice.mp4
+uv run sv court detect D:\footage\practice.mp4 --out overlay.jpg  # court fit + overlay image
 ```
 
 ## Recording tips
 
 * Mount the camera **centered behind a baseline and as high as practical (≥ 2.5–3 m)**. A
   low camera squashes the far half of the court and costs precision there.
+* Make sure the camera sees as many court lines as possible, including the far baseline.
 * Frame the entire court with some margin behind the far baseline.
 * Record 4K at 60 fps, with exposure and focus locked if your phone allows it. Avoid recording
   into darkness.
-* Don't touch the camera once you start recording.
+* Don't touch the camera once you start recording. (If you do, the drift check notices and
+  calibrates those minutes separately, but it's better not to.)
 
 ## Development
 
@@ -76,7 +99,8 @@ src/swingvision/
   settings.py        app settings (user config dir)
   services.py        create/enqueue/delete sessions (shared by CLI + app)
   storage/           SQLite library + job queue, session dirs, PyArrow schemas/tables
-  io/                ffprobe, ffmpeg runner, proxy encode, audio + onsets
+  io/                ffprobe, ffmpeg runner, proxy encode, audio + onsets, frame grabs
+  court/             court model, camera model, detection, calibration (M1)
   pipeline/          stage framework, DAG runner, worker process, stages/
   app/               Dash + Mantine UI (pages/, components/, assets/)
 ```

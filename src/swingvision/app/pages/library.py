@@ -79,6 +79,11 @@ def _row(s: dict):
                         leftSection=icon("tabler:player-play", 14),
                     ),
                     dmc.MenuItem(
+                        "Calibrate court",
+                        href=f"/calibrate/{sid}",
+                        leftSection=icon("tabler:target", 14),
+                    ),
+                    dmc.MenuItem(
                         "Reprocess from scratch",
                         id={"type": "lib-reprocess", "index": sid},
                         leftSection=icon("tabler:refresh", 14),

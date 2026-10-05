@@ -63,3 +63,15 @@ def test_second_worker_exits_when_lock_held(settings):
         assert run_worker(settings, once=True, registry=Registry()) == 0
     finally:
         lock.release()
+
+
+def test_worker_resumes_job_orphaned_moments_ago(settings):
+    """A worker that died seconds ago (fresh heartbeat) must not leave a zombie job."""
+    lib = _setup(settings)
+    rec = Recorder()
+    reg = Registry([stage_cls("a", rec=rec)()])
+    job_id = lib.enqueue_job("s")
+    lib.claim_next_job("dead-worker")
+    lib.update_job(job_id, heartbeat_at=now_iso())
+    assert run_worker(settings, once=True, registry=reg) == 0
+    assert lib.get_job(job_id).status == "done" and rec.calls == ["a"]

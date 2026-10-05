@@ -60,6 +60,33 @@ class Session:
     def audio_onsets_path(self) -> Path:
         return self.path / "audio_onsets.parquet"
 
+    @property
+    def court_dir(self) -> Path:
+        return self.path / "court"
+
+    @property
+    def court_background_path(self) -> Path:
+        """Median of sampled frames (players removed), full resolution."""
+        return self.court_dir / "background.jpg"
+
+    def court_window_path(self, index: int) -> Path:
+        """Median image of one drift-check window."""
+        return self.court_dir / "windows" / f"w{index:02d}.jpg"
+
+    @property
+    def court_auto_path(self) -> Path:
+        return self.court_dir / "auto.json"
+
+    @property
+    def court_user_path(self) -> Path:
+        """Calibration confirmed in the editor. Never written by the pipeline."""
+        return self.court_dir / "user.json"
+
+    @property
+    def calibration_path(self) -> Path:
+        """The calibration downstream stages use (written by the ``camera`` stage)."""
+        return self.path / "calibration.json"
+
     def job_log_path(self, job_id: int) -> Path:
         return self.logs_dir / f"job-{job_id:05d}.log"
 

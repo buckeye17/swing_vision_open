@@ -159,6 +159,49 @@ def layout(**_):
                     ),
                     dmc.Paper(
                         [
+                            dmc.Title("Court calibration", order=4),
+                            dmc.Text(
+                                "After court detection, processing pauses until you review the "
+                                "calibration, unless it fits the painted lines this well.",
+                                size="sm",
+                                c="dimmed",
+                                mb="sm",
+                            ),
+                            dmc.Switch(
+                                id="set-cal-auto",
+                                label="Continue without review when the fit is good",
+                                checked=s.processing.calibration_auto_accept_px is not None,
+                                mb="sm",
+                            ),
+                            dmc.SimpleGrid(
+                                [
+                                    dmc.NumberInput(
+                                        id="set-cal-threshold",
+                                        label="Accept if line RMS is below (px)",
+                                        value=s.processing.calibration_auto_accept_px or 1.5,
+                                        min=0.3,
+                                        max=10,
+                                        step=0.1,
+                                        decimalScale=1,
+                                    ),
+                                    dmc.NumberInput(
+                                        id="set-cal-drift",
+                                        label="Flag camera movement above (px)",
+                                        value=s.processing.calibration_drift_px,
+                                        min=0.5,
+                                        max=50,
+                                        step=0.5,
+                                        decimalScale=1,
+                                    ),
+                                ],
+                                cols={"base": 1, "sm": 2},
+                            ),
+                        ],
+                        p="lg",
+                        withBorder=True,
+                    ),
+                    dmc.Paper(
+                        [
                             dmc.Title("System", order=4, mb="xs"),
                             dmc.Text(f"GPU: {_gpu_info()}", size="sm"),
                         ],
@@ -213,9 +256,12 @@ def _browser_start(value):
     State("set-ffprobe", "value"),
     State("set-proxy-height", "value"),
     State("set-chunk", "value"),
+    State("set-cal-auto", "checked"),
+    State("set-cal-threshold", "value"),
+    State("set-cal-drift", "value"),
     prevent_initial_call=True,
 )
-def _save(n, output_root, ffmpeg, ffprobe, proxy_height, chunk):
+def _save(n, output_root, ffmpeg, ffprobe, proxy_height, chunk, cal_auto, cal_thr, cal_drift):
     if not n:
         return no_update, no_update
     s = state.settings()
@@ -238,6 +284,8 @@ def _save(n, output_root, ffmpeg, ffprobe, proxy_height, chunk):
     s.ffprobe_path = ffprobe or "ffprobe"
     s.processing.proxy_height = int(proxy_height)
     s.processing.chunk_seconds = float(chunk or 120)
+    s.processing.calibration_auto_accept_px = float(cal_thr or 1.5) if cal_auto else None
+    s.processing.calibration_drift_px = float(cal_drift or 3.0)
     save_settings(s)
     if state.OPTIONS.start_worker:
         ensure_worker(s.output_root)

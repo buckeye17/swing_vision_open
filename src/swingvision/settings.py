@@ -35,6 +35,12 @@ class ProcessingDefaults(BaseModel):
     chunk_seconds: float = 120.0
     segment_pad_before_s: float = 2.0
     segment_pad_after_s: float = 2.0
+    #: Continue without review when the auto calibration's line RMS is below this (px).
+    #: ``None`` always pauses the job for review (status ``needs_action``).
+    calibration_auto_accept_px: float | None = None
+    calibration_window_s: float = 300.0  # drift check: one re-calibration per window
+    calibration_frames_per_window: int = 5
+    calibration_drift_px: float = 3.0  # RMS keypoint shift that flags a moved camera
 
 
 class AppSettings(BaseModel):

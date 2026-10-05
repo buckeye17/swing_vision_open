@@ -15,7 +15,14 @@ def app():
 
 def test_pages_registered(app):
     paths = {p.get("path_template") or p["path"] for p in dash.page_registry.values()}
-    assert {"/", "/new", "/jobs", "/settings", "/session/<session_id>"} <= paths
+    assert {
+        "/",
+        "/new",
+        "/jobs",
+        "/settings",
+        "/session/<session_id>",
+        "/calibrate/<session_id>",
+    } <= paths
 
 
 @pytest.mark.parametrize("url", ["/", "/new", "/jobs", "/settings", "/session/nope"])

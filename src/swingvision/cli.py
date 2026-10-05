@@ -13,6 +13,8 @@ from swingvision.settings import load_settings, save_settings, settings_path
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Swing Vision Open")
 settings_app = typer.Typer(no_args_is_help=True, help="Show or change app settings.")
 app.add_typer(settings_app, name="settings")
+court_app = typer.Typer(no_args_is_help=True, help="Court detection and calibration tools.")
+app.add_typer(court_app, name="court")
 
 
 @app.command("app")
@@ -132,6 +134,67 @@ def sessions() -> None:
 
     for s in services.open_library(load_settings()).list_sessions():
         typer.echo(f"{s['id']}  {s['status']:<12} {s['mode']:<9} {s['name']}")
+
+
+@court_app.command("detect")
+def court_detect(
+    path: Annotated[Path, typer.Argument(help="A video, or an image of the court")],
+    times: Annotated[
+        list[float] | None, typer.Option("--time", help="Video time(s) to sample (s)")
+    ] = None,
+    out: Annotated[Path | None, typer.Option(help="Write an overlay JPEG here")] = None,
+) -> None:
+    """Detect the court and fit the camera; print the fit and camera summary."""
+    import json
+
+    import cv2
+    import numpy as np
+
+    from swingvision.court import calibration as calib
+    from swingvision.court.detect import Prepared, detect_court
+
+    if path.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"):
+        bgr = cv2.imread(str(path))
+        if bgr is None:
+            raise typer.BadParameter(f"Cannot read image {path}")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    else:
+        from swingvision.io.frames import grab_frames, median_image
+        from swingvision.io.probe import probe_video
+
+        settings = load_settings()
+        info = probe_video(settings.ffprobe(), path)
+        ts = times or list(np.linspace(0.05, 0.3, 9) * info.duration_s)
+        frames = [f for f in grab_frames(settings.ffmpeg(), path, ts, info) if f is not None]
+        if not frames:
+            raise typer.BadParameter("No frames could be decoded")
+        rgb = median_image(frames) if len(frames) > 1 else frames[0]
+    prep = Prepared.from_rgb(rgb)
+    det = detect_court(prep)
+    if not det.ok or det.camera is None:
+        typer.echo(f"Not detected: {det.message}")
+        raise typer.Exit(1)
+    metrics = calib.evaluate(prep, det.camera)
+    typer.echo(
+        f"Line RMS {metrics.rms_line_px:.2f} px, lines found {metrics.coverage:.0%} "
+        f"({metrics.n_line_samples} samples, {metrics.n_net_samples} on the net)"
+    )
+    typer.echo(json.dumps(det.camera.describe(), indent=2))
+    if out is not None:
+        from swingvision.app.components.court_overlay import polylines
+        from swingvision.court import model
+
+        vis = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        thick = max(1, round(det.camera.width / 1500))
+        for color, lines in (
+            ((245, 61, 255), model.COURT_LINES),
+            ((255, 230, 46), model.NET_LINES),
+        ):
+            for poly in polylines(det.camera, lines):
+                pts = np.round(poly * 4).astype(np.int32)
+                cv2.polylines(vis, [pts], False, color, thick, cv2.LINE_AA, shift=2)
+        cv2.imwrite(str(out), vis)
+        typer.echo(f"Overlay written to {out}")
 
 
 @settings_app.command("show")

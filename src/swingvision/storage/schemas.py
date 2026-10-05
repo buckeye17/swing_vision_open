@@ -122,6 +122,82 @@ class SessionConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Court calibration (PLAN.md §7.1)
+# ---------------------------------------------------------------------------
+
+CALIBRATION_SCHEMA_VERSION = 1
+
+
+class CameraParams(BaseModel):
+    """Serialized :class:`swingvision.court.camera.Camera` (full-resolution display px)."""
+
+    width: int
+    height: int
+    f: float
+    k1: float
+    k2: float = 0.0
+    cx: float
+    cy: float
+    rvec: list[float]
+    tvec: list[float]
+
+
+class CalibrationMetrics(BaseModel):
+    rms_line_px: float | None = None  # line-center samples vs projected court lines
+    n_line_samples: int = 0
+    n_expected_samples: int = 0  # samples the visible lines would give, unoccluded
+    n_net_samples: int = 0
+    rms_points_px: float | None = None  # user-placed points vs their projections
+
+    @property
+    def coverage(self) -> float:
+        return self.n_line_samples / self.n_expected_samples if self.n_expected_samples else 0.0
+
+
+class DriftWindow(BaseModel):
+    """Calibration re-checked on one time window of the video (tripod bumped?)."""
+
+    index: int | None = None  # window number; its median image is court/windows/wNN.jpg
+    t0_s: float
+    t1_s: float
+    n_frames: int
+    luminance: float | None = None
+    status: Literal["ok", "moved", "dark", "failed"]
+    #: Keypoint displacement vs the session calibration. Windows that "moved" keep their
+    #: own pose-refined ``camera`` (piecewise calibration).
+    shift_rms_px: float | None = None
+    shift_max_px: float | None = None
+    rms_line_px: float | None = None
+    camera: CameraParams | None = None
+
+
+class Calibration(BaseModel):
+    """``court/auto.json`` (detected), ``court/user.json`` (confirmed in the editor), and
+    ``calibration.json`` (the one downstream stages use) all share this model."""
+
+    schema_version: int = CALIBRATION_SCHEMA_VERSION
+    source: Literal["auto", "user"]
+    created_at: datetime
+    ok: bool = True  # False: detection failed and ``camera`` is only a starting guess
+    message: str = ""
+    camera: CameraParams
+    #: Projected keypoints (``court.model.KEYPOINTS``), px; may lie outside the image.
+    keypoints: dict[str, list[float] | None] = Field(default_factory=dict)
+    #: Points the user placed by hand (they constrain the fit), px.
+    user_points: dict[str, list[float]] = Field(default_factory=dict)
+    metrics: CalibrationMetrics = Field(default_factory=CalibrationMetrics)
+    camera_summary: dict = Field(default_factory=dict)  # height, distance, fov (for display)
+    frame_times_s: list[float] = Field(default_factory=list)
+    drift: list[DriftWindow] = Field(default_factory=list)
+    drift_detected: bool = False
+    dark_fraction: float = 0.0
+    #: In ``calibration.json``: who accepted it ("user", or "auto" under the threshold).
+    confirmed_by: Literal["user", "auto"] | None = None
+    #: In ``court/user.json``: fingerprint of the auto calibration it started from.
+    based_on: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Parquet (PyArrow) schemas
 # ---------------------------------------------------------------------------
 

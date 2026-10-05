@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, clientside_callback, dcc, html
 
 from swingvision.app import state
+from swingvision.app.components.court_overlay import overlay_svg
 from swingvision.app.components.ui import (
     fmt_duration,
     icon,
@@ -21,12 +22,25 @@ from swingvision.app.components.ui import (
     page_header,
     status_badge,
 )
+from swingvision.court import calibration as calib
 from swingvision.pipeline.runner import plan
 from swingvision.pipeline.stages import default_registry
 from swingvision.storage import tables
-from swingvision.storage.schemas import AUDIO_ONSETS, PRACTICE_SUBMODE_LABELS, SessionConfig
+from swingvision.storage.schemas import (
+    AUDIO_ONSETS,
+    PRACTICE_SUBMODE_LABELS,
+    Calibration,
+    SessionConfig,
+)
 
 CURSOR_COLOR = "#e8590c"
+OVERLAY_STYLE = {
+    "position": "absolute",
+    "inset": 0,
+    "width": "100%",
+    "height": "100%",
+    "pointerEvents": "none",
+}
 
 
 def _tick_labels(duration: float) -> tuple[list[float], list[str]]:
@@ -125,6 +139,77 @@ def _stage_status(session, config):
     return dmc.Stack(rows, gap=4)
 
 
+def _calibration(session) -> tuple[Calibration | None, str]:
+    """The best calibration available and how it was accepted."""
+    for path, label in (
+        (session.calibration_path, None),
+        (session.court_user_path, "Confirmed by you"),
+        (session.court_auto_path, "Auto-detected, not reviewed"),
+    ):
+        cal = calib.load(path)
+        if cal is not None:
+            if label is None:
+                label = "Confirmed by you" if cal.confirmed_by == "user" else "Auto-accepted"
+            return cal, label
+    return None, "Not calibrated yet"
+
+
+def _overlays(cal: Calibration) -> dict:
+    """Court-overlay SVGs: the session camera plus windows where the view had shifted."""
+    windows = []
+    for w in cal.drift:
+        if w.camera is not None and (w.shift_rms_px or 0) > calib.PIECEWISE_MIN_SHIFT_PX:
+            windows.append(
+                {"t0": w.t0_s, "t1": w.t1_s, "src": overlay_svg(calib.to_camera(w.camera))}
+            )
+    return {"main": overlay_svg(calib.to_camera(cal.camera)), "windows": windows}
+
+
+def _calibration_card(session_id: str, cal: Calibration | None, label: str):
+    color = "gray" if cal is None else ("grape" if "not reviewed" in label else "green")
+    rows = [
+        dmc.Group(
+            [dmc.Title("Calibration", order=5), dmc.Badge(label, variant="light", color=color)],
+            justify="space-between",
+        )
+    ]
+    if cal is not None:
+        d = cal.camera_summary
+        rms = cal.metrics.rms_line_px
+        rows.append(
+            dmc.Text(
+                (f"Line RMS {rms:.2f} px · " if rms is not None else "")
+                + f"camera {d.get('height_m', 0):.1f} m high, "
+                f"{d.get('behind_baseline_m', 0):.1f} m behind the baseline",
+                size="xs",
+                c="dimmed",
+            )
+        )
+        moved = [w for w in cal.drift if w.status == "moved"]
+        if moved:
+            rows.append(
+                dmc.Text(
+                    f"The camera moved in {len(moved)} of {len(cal.drift)} time windows; "
+                    "those use their own camera.",
+                    size="xs",
+                    c="orange",
+                )
+            )
+    rows.append(
+        dmc.Anchor(
+            dmc.Button(
+                "Open calibration editor",
+                size="xs",
+                variant="light",
+                leftSection=icon("tabler:target", 14),
+                mt=4,
+            ),
+            href=f"/calibrate/{session_id}",
+        )
+    )
+    return dmc.Paper(dmc.Stack(rows, gap=6), p="md", withBorder=True)
+
+
 def layout(session_id: str | None = None, **_):
     if state.settings().output_root is None:
         return dmc.Container([page_header("Session"), no_output_root_alert()], size="xl", px=0)
@@ -155,7 +240,11 @@ def layout(session_id: str | None = None, **_):
     onsets_t = onsets.column("t_s").to_numpy()
     onsets_s = onsets.column("strength").to_numpy()
 
-    if session.proxy_path.exists():
+    cal, cal_label = _calibration(session)
+    has_proxy = session.proxy_path.exists()
+    overlays = _overlays(cal) if cal is not None and has_proxy else None
+
+    if has_proxy:
         player = html.Video(
             id="review-video",
             src=f"/media/{config.id}/proxy.mp4",
@@ -177,9 +266,35 @@ def layout(session_id: str | None = None, **_):
             icon=icon("tabler:hourglass"),
         )
 
+    # The court overlay sits on top of the video, in the video's own (letterbox-free) box.
+    player = html.Div(
+        [
+            player,
+            html.Img(
+                id="review-overlay",
+                src=overlays["main"] if overlays else "",
+                style={**OVERLAY_STYLE, "display": "block" if overlays else "none"},
+            ),
+        ],
+        style={"position": "relative"},
+    )
+
+    header_right = dmc.Group(
+        [
+            dmc.Anchor(
+                dmc.Button(
+                    "Calibrate", variant="default", size="sm", leftSection=icon("tabler:target", 16)
+                ),
+                href=f"/calibrate/{config.id}",
+            ),
+            status_badge(row["status"], "lg"),
+        ],
+        gap="sm",
+    )
     return dmc.Container(
         [
-            page_header(config.name, subtitle, right=status_badge(row["status"], "lg")),
+            page_header(config.name, subtitle, right=header_right),
+            dcc.Store(id="review-overlays", data=overlays),
             dcc.Store(id="review-time"),
             dcc.Store(id="review-fps", data=fps),
             dcc.Store(id="review-seek"),
@@ -191,7 +306,21 @@ def layout(session_id: str | None = None, **_):
                                 player,
                                 dmc.Group(
                                     [
-                                        dmc.Text(id="review-readout", ff="monospace", size="sm"),
+                                        dmc.Group(
+                                            [
+                                                dmc.Text(
+                                                    id="review-readout", ff="monospace", size="sm"
+                                                ),
+                                                dmc.Switch(
+                                                    id="review-overlay-on",
+                                                    label="Court overlay",
+                                                    size="xs",
+                                                    checked=overlays is not None,
+                                                    disabled=overlays is None,
+                                                ),
+                                            ],
+                                            gap="md",
+                                        ),
                                         dmc.Text(
                                             "Space play/pause · J/L ±5 s · ←/→ frame · "
                                             "Shift+←/→ 1 s",
@@ -236,6 +365,7 @@ def layout(session_id: str | None = None, **_):
                                     p="md",
                                     withBorder=True,
                                 ),
+                                _calibration_card(config.id, cal, cal_label),
                                 dmc.Paper(
                                     [
                                         dmc.Title("Pipeline", order=5, mb="xs"),
@@ -294,6 +424,27 @@ clientside_callback(
     Output("review-readout", "children"),
     Input("review-time", "data"),
     State("review-fps", "data"),
+)
+
+clientside_callback(
+    """
+    function(t, on, overlays) {
+        const style = {position: "absolute", inset: 0, width: "100%", height: "100%",
+                       pointerEvents: "none", display: "none"};
+        if (!overlays || !on) { return [window.dash_clientside.no_update, style]; }
+        const now = (t && t.t) || 0;
+        let src = overlays.main;
+        for (const w of overlays.windows || []) {
+            if (now >= w.t0 && now < w.t1) { src = w.src; break; }
+        }
+        return [src, Object.assign({}, style, {display: "block"})];
+    }
+    """,
+    Output("review-overlay", "src"),
+    Output("review-overlay", "style"),
+    Input("review-time", "data"),
+    Input("review-overlay-on", "checked"),
+    State("review-overlays", "data"),
 )
 
 clientside_callback(

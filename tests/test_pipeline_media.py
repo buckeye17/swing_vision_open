@@ -44,7 +44,8 @@ def test_create_session_and_run_m0_stages(settings, synthetic_video):
     assert config.video.rotation_cw == 180
     assert config.practice.submode == "serve"
 
-    result = run(default_registry(), session, settings)
+    m0 = ["proxy", "audio_onsets"]
+    result = run(default_registry(), session, settings, targets=m0)
     assert result.status == "done", result.error
     assert result.ran == ["ingest", "proxy", "audio_onsets"]
 
@@ -58,9 +59,9 @@ def test_create_session_and_run_m0_stages(settings, synthetic_video):
         assert np.min(np.abs(found - t)) < 0.003, f"click at {t}s not detected: {found}"
 
     # Everything is fresh now; changing the proxy height re-runs only the proxy.
-    assert run(default_registry(), session, settings).ran == []
+    assert run(default_registry(), session, settings, targets=m0).ran == []
     settings.processing.proxy_height = 240
-    assert run(default_registry(), session, settings).ran == ["proxy"]
+    assert run(default_registry(), session, settings, targets=m0).ran == ["proxy"]
     assert _stream_info(session.proxy_path)["height"] == 240
 
 

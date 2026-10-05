@@ -191,3 +191,39 @@ def test_chunked_stage_resumes_after_crash(tmp_path, settings):
 def test_chunk_ranges():
     assert chunk_ranges(5.0, 2.0) == [(0.0, 2.0), (2.0, 4.0), (4.0, 5.0)]
     assert chunk_ranges(0, 2.0) == []
+
+
+def test_config_read_from_upstream_output_is_planned_lazily(tmp_path, settings, rec):
+    """A stage whose config depends on a file its upstream writes must not be stale after
+    one run (the runner re-plans each stage just before running it)."""
+    s = make_session(tmp_path)
+
+    class Writer(Stage):
+        name, version = "writer", 1
+
+        def outputs(self, session):
+            return [session.path / "value.txt"]
+
+        def run(self, ctx):
+            (ctx.session.path / "value.txt").write_text("42")
+
+    class Reader(Stage):
+        name, version, depends_on = "reader", 1, ("writer",)
+
+        def config(self, session, config, settings):
+            path = session.path / "value.txt"
+            return {"value": path.read_text() if path.exists() else None}
+
+        def outputs(self, session):
+            return [session.path / "reader.txt"]
+
+        def run(self, ctx):
+            (ctx.session.path / "reader.txt").write_text("ok")
+
+    reg = Registry([Writer(), Reader()])
+    assert run(reg, s, settings).ran == ["writer", "reader"]
+    assert all(p.fresh for p in plan(reg, s, s.load_config(), settings))
+    (s.path / "value.txt").write_text("43")  # e.g. the user edited a calibration
+    assert [p.stage.name for p in plan(reg, s, s.load_config(), settings) if not p.fresh] == [
+        "reader"
+    ]

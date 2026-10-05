@@ -97,25 +97,36 @@ def plan(
     for stage in registry.for_mode(config.mode):  # registration order is topological
         if stage.name not in needed:
             continue
-        config_hash = stable_hash(stage.config(session, config, settings))
-        inputs = {dep: fingerprints[dep] for dep in stage.depends_on}
-        fingerprint = stable_hash([stage.name, stage.version, config_hash, inputs])
-        fingerprints[stage.name] = fingerprint
-
-        manifest = read_manifest(session, stage.name)
-        missing = [p for p in stage.outputs(session) if not p.exists()]
-        if stage.name in force:
-            fresh, reason = False, "forced"
-        elif manifest is None:
-            fresh, reason = False, "never run"
-        elif manifest.get("fingerprint") != fingerprint:
-            fresh, reason = False, _stale_reason(manifest, stage, config_hash, inputs)
-        elif missing:
-            fresh, reason = False, f"missing output {missing[0].name}"
-        else:
-            fresh, reason = True, "up to date"
-        result.append(PlannedStage(stage, config_hash, inputs, fingerprint, fresh, reason))
+        p = _plan_stage(stage, session, config, settings, fingerprints, force)
+        fingerprints[stage.name] = p.fingerprint
+        result.append(p)
     return result
+
+
+def _plan_stage(
+    stage: Stage,
+    session: Session,
+    config: SessionConfig,
+    settings: AppSettings,
+    fingerprints: dict[str, str],
+    force: set[str],
+) -> PlannedStage:
+    config_hash = stable_hash(stage.config(session, config, settings))
+    inputs = {dep: fingerprints[dep] for dep in stage.depends_on}
+    fingerprint = stable_hash([stage.name, stage.version, config_hash, inputs])
+    manifest = read_manifest(session, stage.name)
+    missing = [p for p in stage.outputs(session) if not p.exists()]
+    if stage.name in force:
+        fresh, reason = False, "forced"
+    elif manifest is None:
+        fresh, reason = False, "never run"
+    elif manifest.get("fingerprint") != fingerprint:
+        fresh, reason = False, _stale_reason(manifest, stage, config_hash, inputs)
+    elif missing:
+        fresh, reason = False, f"missing output {missing[0].name}"
+    else:
+        fresh, reason = True, "up to date"
+    return PlannedStage(stage, config_hash, inputs, fingerprint, fresh, reason)
 
 
 def _stale_reason(manifest: dict, stage: Stage, config_hash: str, inputs: dict) -> str:
@@ -156,9 +167,16 @@ def run(
     config = session.load_config()
     planned = plan(registry, session, config, settings, targets, force)
     hooks.on_plan(planned)
+    force = set(force)
+    fingerprints: dict[str, str] = {}
     ran: list[str] = []
-    for p in planned:
-        name = p.stage.name
+    for initial in planned:
+        name = initial.stage.name
+        # Re-plan just before running: a stage's config may depend on files that upstream
+        # stages (or the user, e.g. calibration edits) wrote after the initial plan.
+        config = session.load_config()
+        p = _plan_stage(initial.stage, session, config, settings, fingerprints, force)
+        fingerprints[name] = p.fingerprint
         if p.fresh:
             hooks.on_stage_end(name, "skipped", p.reason)
             continue
@@ -167,7 +185,6 @@ def run(
         hooks.on_stage_start(name)
         logger.info("Stage {} starting ({})", name, p.reason)
         clear_manifest(session, name)
-        config = session.load_config()  # earlier stages may have updated it
         ctx = StageContext(
             session=session,
             config=config,

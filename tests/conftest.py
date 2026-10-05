@@ -4,9 +4,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import cv2
 import pytest
 
 from swingvision.settings import AppSettings, save_settings
+from tests.synth_court import make_camera, render
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
@@ -31,6 +33,7 @@ def settings(tmp_path, monkeypatch) -> AppSettings:
 
 
 CLICK_TIMES = (0.5, 1.25, 2.0, 3.1, 4.4)
+COURT_CAMERA = make_camera(width=1280, height=720, k1=0.02, k2=-0.01)
 
 
 @pytest.fixture(scope="session")
@@ -85,3 +88,28 @@ def synthetic_video(tmp_path_factory) -> Path:
         check=True,
     )
     return rotated
+
+
+@pytest.fixture(scope="session")
+def court_video(tmp_path_factory):
+    """3 s, 1280×720 @ 30 fps of a court with a "player" walking across it."""
+    if not HAS_FFMPEG:
+        pytest.skip("ffmpeg not available")
+    path = tmp_path_factory.mktemp("court") / "court.mp4"
+    base = render(COURT_CAMERA, occluder=False)
+    proc = subprocess.Popen(
+        [
+            "ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+            "-s", "1280x720", "-r", "30", "-i", "pipe:0",
+            "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", str(path),
+        ],
+        stdin=subprocess.PIPE,
+    )  # fmt: skip
+    for i in range(90):
+        frame = base.copy()
+        x = 200 + 9 * i
+        cv2.rectangle(frame, (x, 300), (x + 60, 520), (40, 200, 60), -1)
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    assert proc.wait() == 0
+    return path

@@ -103,7 +103,7 @@ Cross-session trends (`pyarrow.dataset`), annotated proxy render, TensorRT/perfo
 | Multi-object tracking | BoT-SORT/ByteTrack via `boxmot` | Plus court-ROI filtering and singles constraints. |
 | Re-ID | OSNet embeddings (via `boxmot` weights) | Appearance profile gallery. |
 | Ball detection | **Slim** TrackNet-style heatmap U-Net (3-frame input + background, width 32, stride-2 stem), trained on own footage at ≈1280 px wide on a court-ROI crop | M0 spike: a TrackNet-size net at 1280×720 runs at only 20 fps, the slim variant at 190 fps. Optionally distil from pretrained TrackNetV3. |
-| Court keypoints | 14-keypoint court detector (TennisCourtDetector-style CNN) + line-fitting refinement | Fine-tuned from confirmed calibrations. |
+| Court keypoints | ✅ Classical line detector: white top-hat → Hough → court-model hypothesis search → sub-pixel ridge refinement + full camera fit | M1: needs no training data and handles low corner cameras, wide lenses, partly visible courts, pickleball lines and neighboring courts. A keypoint CNN fine-tuned on confirmed calibrations stays an option if a view ever defeats it. See `docs/m1-court-calibration.md`. |
 | 2D pose | ViTPose (HF `transformers` `VitPoseForPoseEstimation`) on 4K player crops | Pure torch. RTMPose via `rtmlib` is the alternative. |
 | 3D lifting | MotionBERT (vendored model code, Apache-2.0) | COCO-17 → H36M-17 joint mapping. |
 | Audio onsets | `librosa` | Racket-impact sounds help confirm hits. |
@@ -153,9 +153,10 @@ swing_vision_open/
 │  │  └─ edits.py               # user overrides layered over derived data
 │  ├─ court/
 │  │  ├─ model.py               # ITF court geometry (meters), keypoints, lines, zones
-│  │  ├─ detect.py              # keypoint CNN inference + line refinement
+│  │  ├─ detect.py              # line response, hypotheses, ridge refinement
 │  │  ├─ homography.py          # image↔court plane, uncertainty (Jacobian)
-│  │  └─ camera.py              # intrinsics/extrinsics (PnP w/ net points), lens k1
+│  │  ├─ camera.py              # pinhole + division-model distortion, PnP/line fits
+│  │  └─ calibration.py         # frame sampling, drift windows, editor solves, files
 │  ├─ players/
 │  │  ├─ detect.py  track.py    # YOLO + BoT-SORT, court-ROI filter, singles constraint
 │  │  ├─ reid.py                # OSNet embeddings, tracklet ↔ profile matching
@@ -216,7 +217,8 @@ swing_vision_open/
 │  └─ thumbs/
 ├─ sessions/<YYYY-MM-DD>_<slug>_<shortid>/
 │  ├─ session.json                    # source path + fast hash, mode, format, targets, players
-│  ├─ calibration.json                # keypoints, H, K, R|t, k1, reproj error, user_confirmed
+│  ├─ calibration.json                # camera (K, k1/k2, R|t), keypoints, metrics, drift windows, confirmed_by
+│  ├─ court/background.jpg  auto.json  user.json  windows/wNN.jpg   # detection inputs/results, user edits
 │  ├─ proxy_720p.mp4                  # browser playback (H.264, NVENC)
 │  ├─ audio_onsets.parquet
 │  ├─ manifests/<stage>.json          # stage version, config hash, input hashes, timing, status
@@ -266,8 +268,8 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 1 | `ingest` | – | 1 | probe, fast hash, audio wav, `session.json` |
 | 2 | `proxy` | NVENC | 1 | 720p H.264 proxy for browser playback |
 | 3 | `audio_onsets` | – | 1 | onset times + strength + spectral features |
-| 4 | `court_auto` | ✓ | 1 | keypoints on sampled frames (median-robust), refined lines, `calibration.json` (unconfirmed) |
-| 5 | `camera` | – | 1 | intrinsics/extrinsics/lens k1 from keypoints + net points |
+| 4 | `court_auto` | – | 1 | median background per time window, court detection on the dominant camera position, per-window drift check → `court/auto.json` |
+| 5 | `camera` | – | 1 | calibration gate: user-confirmed (`court/user.json`) or auto-accepted calibration → `calibration.json` |
 | 6 | `pass1_detect` | ✓ | 1 | **single decode pass**: person detections + ball heatmap peaks for every frame |
 | 7 | `players_track` | – | 1 (single player) / 2 (two players) | tracks filtered to court ROI, stitched tracklets. Phase 2 adds the top-2 singles constraint |
 | 8 | `identity` | ✓ (light) | 2 | tracklet ↔ profile ("me" / "opponent"), confidence. In Phase 1 the only tracked player is "me" |
@@ -284,7 +286,7 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 19 | `practice_eval` | – | 1 | practice only: per-shot target hit/miss, distance, block summaries |
 | 20 | `stats` | – | 1 (session) / 2 (match stats) | session aggregates → `stats.json` |
 
-**Calibration gating**: stages 4–5 run automatically. The job then pauses with status `needs_calibration_review` (configurable: "auto-continue if reprojection error < X px"). Stage 6 doesn't depend on calibration except for the court-ROI crop. If the user later adjusts calibration, stages 7+ rerun on CPU in minutes.
+**Calibration gating**: stages 4–5 run automatically. `court_auto` runs right after `ingest`, so the calibration can be reviewed while the proxy encodes. Unless the auto calibration passes the Settings threshold ("continue without review when line RMS < X px", off by default), `camera` stops the job with status `needs_action`; Jobs and the session page link to the Calibrate page, and confirming there re-queues the job. Stage 6 doesn't depend on calibration except for the court-ROI crop. The `camera` stage's fingerprint covers only the chosen camera, so re-confirming an unchanged calibration invalidates nothing; if the user later adjusts calibration, stages 7+ rerun on CPU in minutes. (The runner re-plans each stage just before running it, so a stage's config may read files that upstream stages or the user wrote.)
 
 **Throughput** for 1 h of 4K60 (216k frames), measured in the M0 spike (`docs/spikes/m0-video-pipeline.md`): PyNvVideoCodec decode 305 fps; YOLO11-m @1280 FP16 104 img/s (run at 30 Hz); slim ball U-Net @1280×720 190 img/s. Pass 1 is ≈75–90 fps (**≈45 min per hour**). Add the proxy (≈11 min per hour), pose windows (≈30–40% of frames), and CPU stages. Expected total is **≈1.5–2.5 h per hour of footage**, which fits overnight. NVDEC/NVENC are shared, so GPU stages run one at a time. Optimizations if needed: TensorRT, skipping dead time (ball collection) using frame differencing and audio-onset density.
 
@@ -294,16 +296,19 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 
 ### 7.1 Court calibration and camera model
 
-1. Sample ~30 frames across the video, run the keypoint CNN, and take a per-keypoint median, which is robust to players occluding lines.
-2. Refine: detect white line pixels (top-hat + threshold), fit lines near each predicted court line (RANSAC), and recompute intersections at subpixel precision.
-3. Homography `H` (image → court plane, meters, origin at court center, x across, y along) from ≥ 4 points with RANSAC. Report reprojection error.
-4. **Full camera model** (needed for 3D ball flight and pose orientation):
-   * Lens distortion `k1` (and optionally `k2`) estimated by maximizing straightness of the detected court lines.
-   * Focal length from homography constraints (square pixels, principal point at center).
-   * Extrinsics by `solvePnP` with ground keypoints **plus non-planar net points**: net post tops (1.07 m) and center strap top (0.914 m). The UI shows these as extra draggable points. They're auto-proposed by projecting with an initial estimate, then the user fixes them.
-   * Joint refinement by bundle-style least squares over all points.
-5. Per-point uncertainty: propagate ±1 px through the homography Jacobian to get σ (meters) for any court location. This feeds line-call confidence.
-6. Drift check: every N minutes, re-detect keypoints and warn if they moved more than a threshold (tripod bumped). Calibration may then be piecewise by time range.
+✅ Built in M1 (details and measurements in `docs/m1-court-calibration.md`):
+
+1. **Background images**: the video is split into ≤ 12 time windows (default 5 min). Five frames per window are decoded at full resolution, too-dark frames are skipped, and the per-pixel median removes the players and balls.
+2. **Line response**: white top-hat of `min(R, G, B)`. White paint is bright in every channel; green/red surfaces and teal pickleball lines are not. Blobs wider than any painted line (sky, water, buildings) are removed before line finding.
+3. **Hypotheses**: Hough lines merged into long lines, split into an across (baseline-like) and an along (sideline-like) family. Every pair × pair of image lines is matched to every ordered pair of model lines (batched 4-point homographies), and scored by projected line length on line pixels minus length off them. Hypotheses whose decomposed camera isn't above the court are rejected.
+4. **Refinement**: the best hypotheses are refined by sampling the response perpendicular to each projected model line (the search window adapts to the on-screen line width) and taking the sub-pixel line center, with ambiguity and outlier rejection, then fitting the camera to those samples. The window shrinks over iterations.
+5. **Full camera model** (needed for 3D ball flight and pose orientation):
+   * Pinhole with square pixels; focal length initialized from the homography's orthonormality constraints.
+   * Lens distortion with the division model (`k1`, `k2`; closed-form undistortion), fitted from line straightness.
+   * Principal point free with a prior: the user's phone footage needs it (in-camera stabilization/lens correction), dropping line RMS from 4.2 to about 1.2–1.5 px on the Oct 4 video.
+   * Non-planar evidence from the **net tape** (post tops at 1.07 m, center strap 0.914 m) fitted as a line, plus the editor's draggable net-post-top and strap points for PnP.
+6. Per-point uncertainty: `court.homography.ground_sigma` propagates ±1 px through the image→ground Jacobian to σ (meters) for any court location. This feeds line-call confidence.
+7. **Drift check**: the camera is pose-refined on every window. If windows disagree, the session is calibrated on the position held longest, and windows where the view shifted keep their own camera (`calibration.camera_at(cal, t)`, piecewise by time). Both of the user's first sessions show real camera movement in the first 10–15 minutes.
 
 Court model (`court/model.py`): ITF dimensions, 23.77 × 10.97 m (singles 8.23 m), service line 6.40 m from net, line width 5 cm. Named zones: service boxes, deuce/ad, no-man's land, alleys. Includes a helper to **mirror coordinates by hitting side**.
 
@@ -585,10 +590,15 @@ Each milestone ends with tests passing, a demo on real footage, and a short READ
   * (c) HEVC/H.264 playback in the browser
 * ✅ Exit criteria: pick a video in the UI, enqueue it, watch progress, and play the proxy with synced timestamps.
 
-#### M1 — Court calibration and camera model
-* ITF court model, keypoint detector inference, line refinement, homography + uncertainty, lens k1, PnP with net points, drift check.
-* Calibration editor page + gating (`needs_calibration_review`).
-* ✅ Exit criteria: reprojection error < 2 px on the user's footage. A projected court overlay visibly aligns, and synthetic tests recover known cameras.
+#### M1 — Court calibration and camera model ✅ (done 2026-10-05)
+* ITF court model, classical court detector (no CNN needed, see §3/§7.1), sub-pixel line refinement, homography + uncertainty, lens `k1`/`k2`, principal point, PnP with net points, net-tape fitting, drift check with piecewise per-window cameras.
+* `court_auto` + `camera` stages, calibration gating (`needs_action` → Calibrate page → confirm re-queues the job), auto-accept threshold in Settings.
+* Calibrate page (draggable keypoints and net points, live re-solve and fit metrics, snap to lines, re-detect, drift-window viewer, confirm); court overlay on the session review video; `sv court detect` CLI.
+* Framework fixes found on the way: the runner re-plans each stage just before running it (configs may read files written upstream or by the user), and a starting worker re-queues every job left `running` by a dead worker (it holds the lock, so they're orphaned), instead of only ones with a 30 s-old heartbeat.
+* ✅ Exit criteria:
+  * Reprojection (line-center) RMS on the user's footage: **0.64 px** and **1.20 px** for the two sessions (< 2 px). Every usable time window with its own pose: 0.66–1.24 px.
+  * The projected court overlay aligns on the background, on each drift window, and on the playing video.
+  * Synthetic tests recover known cameras (wide, narrow with off-center principal point, low corner camera) to < 1 px keypoint error, focal length within 1%, camera position within 10 cm, including through an H.264 encode and the full stage pipeline.
 
 #### M2 — Single player tracking, profile basics, movement
 * `pass1_detect` (players part), court-ROI filtering, single-player tracking + tracklet stitching, ball-machine detection (stationary feed source).

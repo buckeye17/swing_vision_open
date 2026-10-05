@@ -38,7 +38,6 @@ from swingvision.storage.session import Session
 
 LOCK_NAME = ".worker.lock"
 HEARTBEAT_S = 2.0
-STALE_AFTER_S = 30.0
 PROGRESS_MIN_INTERVAL_S = 0.5
 
 
@@ -210,7 +209,10 @@ def run_worker(
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     heartbeat = _Heartbeat(library, worker_id, now_iso())
     heartbeat.start()
-    requeued = library.requeue_stale_jobs(STALE_AFTER_S)
+    # We hold the output root's worker lock, so no other worker is alive: every job still
+    # marked running was orphaned (crash, or the app was closed mid-job), however
+    # recent its last heartbeat.
+    requeued = library.requeue_stale_jobs(0.0)
     if requeued:
         logger.info("Re-queued interrupted jobs {}", requeued)
     logger.info("Worker {} serving {}", worker_id, root)
