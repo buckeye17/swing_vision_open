@@ -33,6 +33,12 @@ SPEED_UNCERTAIN_OPEN_END = 0.05
 #: Spin is reported only beyond this many σ (and this magnitude, 1/m).
 SPIN_SIGMAS = 2.0
 SPIN_MIN = 0.002
+#: Speeds are not calibrated against a radar gun or a ball machine. Bound on the error shared
+#: by every speed (the camera's metric scale and the video clock, checked against gravity on
+#: two sessions: +0.6% and +1.5%; ≈1% from the drag model in the synthetic tests; rolling
+#: shutter < 1%). See docs/m4-ball-3d.md. Replace with the measured offset's uncertainty once
+#: a radar or ball-machine session exists.
+SPEED_SCALE_ERROR = 0.03
 #: Flags that mean the flight's numbers shouldn't be trusted.
 BAD_FLIGHT_FLAGS = frozenset({"poor_fit", "few_points"})
 
@@ -66,6 +72,25 @@ def spin_sign(spin: float | None, sigma: float | None) -> int | None:
     if abs(spin) < SPIN_MIN or abs(spin) < SPIN_SIGMAS * sigma:
         return 0
     return 1 if spin > 0 else -1
+
+
+def speed_error_kmh(speed_kmh: float | None, sigma_kmh: float | None) -> float | None:
+    """How far an uncalibrated speed could be off: the shared bound plus 2σ of its own fit."""
+    if speed_kmh is None:
+        return None
+    return SPEED_SCALE_ERROR * speed_kmh + 2 * (sigma_kmh or 0.0)
+
+
+def speed_error_text() -> str:
+    """One-paragraph explanation of the uncalibrated speed error, for the app and the CLI."""
+    pct = f"{SPEED_SCALE_ERROR:.0%}"
+    return (
+        "Speeds aren't calibrated against a radar gun or a ball machine yet. Every speed can "
+        f"be off by up to about {pct} in the same direction (camera scale and clock, checked "
+        "against gravity on real footage: 0.6-1.5%), plus each shot's own fit uncertainty "
+        "(typically ±2% for shots from the camera's end, ±5% or more from the far end or in "
+        f"poor light). The ± shown with a speed is {pct} plus twice its own uncertainty."
+    )
 
 
 def _num(v) -> float | None:

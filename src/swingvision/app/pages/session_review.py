@@ -206,10 +206,14 @@ def timeline_figure(
                 go.Scatter(
                     x=[shots["t0"][i] for i in k],
                     y=[shots["v"][i] for i in k],
+                    customdata=[shots["e"][i] or 0 for i in k],
                     mode="markers",
                     name="shot " + outcome,
                     marker={"color": color, "size": 6},
-                    hovertemplate="%{x:.1f}s · %{y:.0f} km/h<extra>" + outcome + "</extra>",
+                    hovertemplate="%{x:.1f}s · %{y:.0f} ± %{customdata:.0f} km/h"
+                    + "<extra>"
+                    + outcome
+                    + " (uncalibrated)</extra>",
                 ),
                 row=shots_row,
                 col=1,
@@ -225,7 +229,7 @@ def timeline_figure(
     if has_speed:
         fig.update_yaxes(title_text="km/h", rangemode="tozero", row=speed_row, col=1)
     if has_shots:
-        fig.update_yaxes(title_text="shot", rangemode="tozero", row=shots_row, col=1)
+        fig.update_yaxes(title_text="shot km/h", rangemode="tozero", row=shots_row, col=1)
     fig.update_layout(
         height=150 + 70 * (rows - 1),
         margin={"l": 44, "r": 10, "t": 10, "b": 30},
@@ -927,7 +931,8 @@ clientside_callback(
         }
         const idOut = id === prevId ? nu : id;
         if (i < 0) { return ["", hidden, "", hidden, idOut]; }
-        const label = (shots.v[i] !== null ? shots.v[i] + " km/h" : "speed ?") +
+        const label = (shots.v[i] !== null ? shots.v[i] +
+            (shots.e[i] !== null ? " ± " + shots.e[i] : "") + " km/h" : "speed ?") +
             " · " + shots.o[i].replace("_", " ");
         const labelStyle = {position: "absolute", left: "1%", top: "1.5%", padding: "2px 8px",
             borderRadius: "4px", background: "rgba(0,0,0,0.6)", color: "#fff",

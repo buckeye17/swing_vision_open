@@ -127,6 +127,12 @@ numbers and a side view of its flight, *Shot path* draws the fitted flight on th
 court map marks every landing, and the timeline has a row of shot speeds. `uv run sv shots
 <session-id>` prints the same list.
 
+Speeds are **not calibrated** against a radar gun or a ball machine yet, and the app says so:
+every speed is shown as `value ± error`, where the error is 3% (the bound on a shared scale
+error, from the gravity checks below) plus twice the shot's own fit uncertainty, e.g.
+*139 ± 10 km/h* for a serve from the camera's end. The Shots card explains this; `sv shots`
+prints the same note.
+
 Accuracy: on synthetic flights, speeds come out within 3% for shots from the camera's end
 (within 5% for a far-court hitter); on real footage, flights refitted with gravity left free
 give 9.87 and 9.96 m/s² on two sessions (0.6% and 1.5% off), so the speed scale is right to

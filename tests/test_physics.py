@@ -388,3 +388,11 @@ def test_shots_view_pieces():
     fig = sv.side_view_figure((y, paths.column("z").to_numpy(), -1))
     assert len(fig.data) == 1
     assert len(sv.landing_traces(shots)) == 1
+
+
+def test_uncalibrated_speed_error():
+    err = shots_mod.speed_error_kmh
+    assert err(100.0, 2.0) == pytest.approx(100 * shots_mod.SPEED_SCALE_ERROR + 4.0)
+    assert err(100.0, None) == pytest.approx(100 * shots_mod.SPEED_SCALE_ERROR)
+    assert err(None, 2.0) is None
+    assert f"{shots_mod.SPEED_SCALE_ERROR:.0%}" in shots_mod.speed_error_text()

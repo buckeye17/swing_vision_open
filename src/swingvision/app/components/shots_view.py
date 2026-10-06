@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 import pyarrow as pa
 from dash import dcc, html
 
+from swingvision.analysis.shots import SPEED_SCALE_ERROR, speed_error_kmh, speed_error_text
 from swingvision.court import calibration as calib
 from swingvision.court import model as court_model
 from swingvision.storage import tables
@@ -87,7 +88,7 @@ def shots_store(
             if int(u) in wanted:
                 idx = order[a:b]
                 by_flight[int(u)] = (t[idx], px[idx])
-    out: dict = {k: [] for k in ("id", "t0", "t1", "v", "o", "cx", "cy", "path")}
+    out: dict = {k: [] for k in ("id", "t0", "t1", "v", "e", "o", "cx", "cy", "path")}
     for r in rows:
         t_end = r["t_contact"] + (r["flight_time_s"] or 1.0)
         path = []
@@ -102,11 +103,41 @@ def shots_store(
         out["t0"].append(round(r["t_contact"], 3))
         out["t1"].append(round(t_end, 3))
         out["v"].append(_r(r["speed_racket_kmh"], 0))
+        out["e"].append(_r(_error(r), 0))
         out["o"].append(r["outcome"])
         out["cx"].append(_r(r["landing_x"], 2))
         out["cy"].append(_r(r["landing_y"], 2))
         out["path"].append(path)
     return out
+
+
+def _error(r: dict) -> float | None:
+    return speed_error_kmh(r["speed_racket_kmh"], r["speed_sigma_kmh"])
+
+
+def _speed_pm(r: dict) -> str:
+    """'139 ± 10' (km/h), with the uncalibrated error bound."""
+    v, e = r["speed_racket_kmh"], _error(r)
+    if v is None:
+        return "–"
+    return f"{v:.0f}" + ("" if e is None else f" ± {e:.0f}")
+
+
+def uncalibrated_badge():
+    return dmc.Tooltip(
+        dmc.Badge(
+            "Uncalibrated speeds",
+            color="yellow",
+            variant="light",
+            size="sm",
+            style={"cursor": "help"},
+        ),
+        label=speed_error_text(),
+        multiline=True,
+        w=320,
+        withArrow=True,
+        position="bottom",
+    )
 
 
 def shot_summary(shots: pa.Table | None) -> dict:
@@ -152,7 +183,7 @@ def shots_table(shots: pa.Table | None):
     for r in rows:
         v = r["speed_racket_kmh"]
         uncertain = "speed_uncertain" in r["quality_flags"]
-        speed = "–" if v is None else f"{v:.0f}" + (" ?" if uncertain else "")
+        speed = "–" if v is None else _speed_pm(r) + (" ?" if uncertain else "")
         o = r["outcome"]
         body.append(
             html.Tr(
@@ -208,9 +239,13 @@ def shots_card(shots: pa.Table | None):
                 _stat(
                     "Median speed",
                     "–" if s["median"] is None else f"{s['median']:.0f} km/h",
-                    "off the racket",
+                    f"off the racket, ± {SPEED_SCALE_ERROR:.0%}",
                 ),
-                _stat("Fastest", "–" if s["max"] is None else f"{s['max']:.0f} km/h", None),
+                _stat(
+                    "Fastest",
+                    "–" if s["max"] is None else f"{s['max']:.0f} km/h",
+                    "uncalibrated",
+                ),
             ],
             cols=4,
             spacing="xs",
@@ -235,9 +270,26 @@ def shots_card(shots: pa.Table | None):
             size="xs",
             c="dimmed",
         ),
+        dmc.Alert(
+            speed_error_text(),
+            title="Speeds are uncalibrated",
+            color="yellow",
+            variant="light",
+            p="xs",
+            styles={"message": {"fontSize": "var(--mantine-font-size-xs)"}},
+        ),
     ]
     return dmc.Paper(
-        [dmc.Group([title, dmc.Badge(str(s["n"]), variant="light")], gap="xs"), *body],
+        [
+            dmc.Group(
+                [
+                    dmc.Group([title, dmc.Badge(str(s["n"]), variant="light")], gap="xs"),
+                    uncalibrated_badge(),
+                ],
+                justify="space-between",
+            ),
+            *body,
+        ],
         p="md",
         withBorder=True,
     )
@@ -251,12 +303,17 @@ def shot_detail(r: dict | None):
         return "–" if v is None else f"{v:.0f}"
 
     o = r["outcome"]
-    sigma = r["speed_sigma_kmh"]
-    speed = kmh(r["speed_racket_kmh"]) + (f" ± {sigma:.0f}" if sigma is not None else "")
+    speed = _speed_pm(r)
     spin = {1: "topspin", -1: "slice/backspin", 0: "no clear spin"}.get(r["spin_sign"], "–")
     parts = [
         f"{_fmt_t(r['t_contact'])} · {speed} km/h off the racket",
-        f"net {kmh(r['speed_net_kmh'])} · before bounce {kmh(r['speed_bounce_kmh'])} km/h",
+        f"net {kmh(r['speed_net_kmh'])} · before bounce {kmh(r['speed_bounce_kmh'])} km/h"
+        + (
+            f" · ± is the uncalibrated error ({SPEED_SCALE_ERROR:.0%} + 2× fit σ "
+            f"{r['speed_sigma_kmh']:.0f})"
+            if r["speed_sigma_kmh"] is not None
+            else ""
+        ),
     ]
     geo = []
     if r["net_clearance_m"] is not None:
@@ -359,9 +416,12 @@ def landing_traces(shots: pa.Table | None) -> list[go.Scatter]:
                 y=[r["landing_y"] for r in sel],
                 mode="markers",
                 marker={"color": OUTCOME_COLORS[o], "size": 6, "opacity": 0.55},
-                customdata=[[r["t_contact"], r["speed_racket_kmh"] or float("nan")] for r in sel],
+                customdata=[
+                    [r["t_contact"], r["speed_racket_kmh"] or float("nan"), _error(r) or 0.0]
+                    for r in sel
+                ],
                 hovertemplate=(
-                    "%{customdata[1]:.0f} km/h · "
+                    "%{customdata[1]:.0f} ± %{customdata[2]:.0f} km/h · "
                     + OUTCOME_LABELS[o]
                     + "<br>(%{x:.2f}, %{y:.2f}) m<extra></extra>"
                 ),

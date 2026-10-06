@@ -167,6 +167,7 @@ def shots(
 ) -> None:
     """List a session's shots: speed, net clearance, landing and line call (M4)."""
     from swingvision import services
+    from swingvision.analysis.shots import speed_error_kmh, speed_error_text
     from swingvision.app.components.shots_view import over_net, shot_summary
     from swingvision.storage import tables
 
@@ -185,8 +186,9 @@ def shots(
         if not all_hits and not over_net(r):
             continue
         speed = num(r["speed_racket_kmh"], ".0f")
-        if r["speed_sigma_kmh"] is not None:
-            speed += f"±{r['speed_sigma_kmh']:.0f}"
+        err = speed_error_kmh(r["speed_racket_kmh"], r["speed_sigma_kmh"])
+        if err is not None:
+            speed += f"±{err:.0f}"
         land = "-"
         if r["landing_x"] is not None:
             land = f"({r['landing_x']:.2f}, {r['landing_y']:.2f})"
@@ -200,6 +202,7 @@ def shots(
         f"{num(s['median'], '.0f')} km/h, fastest {num(s['max'], '.0f')} km/h "
         f"({s['n_speed']} speeds certain enough)"
     )
+    typer.echo(speed_error_text())
 
 
 @court_app.command("detect")

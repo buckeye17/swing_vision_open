@@ -98,6 +98,16 @@ Its bounce → bounce flights still serve the scale check below.
   spinning ball differs from wind-tunnel values. A 0.46 would mean speeds 20% too high *if*
   C_d were really 0.55, which gravity and the direct distance / time comparison rule out.
 
+### Uncalibrated speed error shown in the app
+
+Until a radar or ball-machine session calibrates the speeds, every speed in the app and in
+`sv shots` is shown as `value ± error`, with error = `SPEED_SCALE_ERROR` (3%, in
+`analysis/shots.py`) × speed + 2 × the shot's fit σ. The 3% bounds what every speed would
+share: the gravity checks (+0.6%, +1.5%), the drag model's ≈1% bias in the synthetic tests,
+and rolling shutter (< 1%). Typical results: serves from the camera's end ± 7-15 km/h
+(5-10%), far-end shots more. The Shots card carries an *Uncalibrated speeds* badge and a note
+explaining this; the median and fastest speeds are labeled the same way.
+
 ## Pipeline
 
 | Stage | What it does | Output |
