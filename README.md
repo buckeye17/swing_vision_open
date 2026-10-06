@@ -4,13 +4,15 @@ A personal, local-first tennis video analysis tool. Point a fixed camera at the 
 a practice or a match, and let your NVIDIA GPU break the footage down. The roadmap and
 architecture are in [PLAN.md](PLAN.md).
 
-**Status: milestones M0–M3 are complete.** The app ingests footage, builds a
+**Status: milestones M0–M4 are complete.** The app ingests footage, builds a
 browser-playable proxy, detects audio onsets, finds the court and fits a full camera model
 (sub-pixel on real footage), checks whether the camera moved during the recording, and lets
 you review the calibration. It tracks you on the court (also at dusk) and reports your
 movement: distance, speeds, a live court map and a heatmap. It tracks the ball on every frame
 with a detector trained on your own labeled footage and finds hits, bounces (with their spot
-on the court) and net contacts. Shot speeds and practice analytics arrive in M4–M7.
+on the court) and net contacts. Every shot gets a 3D flight: speed off the racket, at the net
+and before the bounce, net clearance, height, landing spot and line call. Practice targets
+and accuracy, swing analysis and match scoring arrive in M5–M10.
 
 ## Requirements
 
@@ -107,6 +109,32 @@ your own footage (≈50 GPU-minutes per footage hour):
 4. In **Settings → Ball detection** pick the detector (*Automatic* uses your newest model),
    then reprocess sessions (person detections are kept).
 
+### Shots: speed, net clearance, landing
+
+From the ball track and the events, every flight between two events is fitted in 3D through
+the calibrated camera with real ball physics (gravity, air drag, spin). Where the ball is
+along the camera's line of sight comes from gravity and the flight's ends: a bounce is on the
+ground, and a hit is where the incoming ball (a feed's bounce, a serve toss) was met, near
+your tracked feet. Each shot gets its speed off the racket (± its uncertainty), at the net
+and before the bounce, its net clearance and highest point, a rough topspin/slice sign, and
+its landing spot with an in/out call against the singles court (*close call* when the
+margin is within 2σ of the landing uncertainty). Hits the 3D fit shows weren't at the player
+are dropped.
+
+On the session page, the **Shots** card lists the shots over the net (click one to play it)
+with in %, median and fastest speed; while the video plays it shows the current shot's
+numbers and a side view of its flight, *Shot path* draws the fitted flight on the video, the
+court map marks every landing, and the timeline has a row of shot speeds. `uv run sv shots
+<session-id>` prints the same list.
+
+Accuracy: on synthetic flights, speeds come out within 3% for shots from the camera's end
+(within 5% for a far-court hitter); on real footage, flights refitted with gravity left free
+give 9.87 and 9.96 m/s² on two sessions (0.6% and 1.5% off), so the speed scale is right to
+about 1-1.5%. No radar gun reading exists yet to compare with: if you have one, record a
+session with it. Leave room above the far baseline in the picture: a serve that leaves the
+top of the frame has no detected contact and gets no shot record. Details in
+[docs/m4-ball-3d.md](docs/m4-ball-3d.md).
+
 ### Profiles
 
 Create a profile for yourself on **Profiles** (name, handedness, one- or two-handed
@@ -133,6 +161,8 @@ uv run sv train ball my-model          # train the ball detector on your labels
 uv run sv train events my-events       # learned hit/bounce classifier (optional)
 uv run sv bench ball motion unet:my-model "unet:my-model,15"   # compare (HTML report)
 uv run sv eval                         # metrics on the Test clips vs the M3 targets
+uv run sv shots <session-id>           # shots: speed, net clearance, landing, line call
+uv run python scripts/m4_validate_speed.py <session-dir>   # speed-scale checks (gravity, drag)
 ```
 
 ## Recording tips
@@ -168,7 +198,9 @@ src/swingvision/
   io/                ffprobe, ffmpeg runner, proxy encode, audio + onsets, frame decoding
   court/             court model, camera model, detection, calibration (M1)
   players/           person detection, tracking, movement (M2)
-  ball/              ball detectors, frame-rate schedules, linking, events (M3)
+  ball/              ball detectors, frame-rate schedules, linking, events (M3),
+                     3D flight physics and fitting (M4)
+  analysis/          shot records (M4); segmentation, practice, stats later
   training/          labels, labeling helpers, training, benchmark, evaluation (M3)
   models/            pretrained weights registry (URLs, SHA-256, licenses)
   pipeline/          stage framework, DAG runner, worker process, stages/

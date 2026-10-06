@@ -414,6 +414,120 @@ EVENTS = table_schema(
     ],
 )
 
+# ---------------------------------------------------------------------------
+# 3D flights and shots (PLAN.md §7.6, §8)
+# ---------------------------------------------------------------------------
+
+#: One fitted 3D flight between two events (``ball_3d``).
+BALL_FLIGHTS = table_schema(
+    "ball_flights",
+    1,
+    [
+        field("flight_id", pa.int32(), None, "Flight number within the session", nullable=False),
+        field("start_kind", pa.string(), None, "hit | machine | bounce | free (run start)"),
+        field("start_event_id", pa.int32(), None, "Event the flight starts at (events.parquet)"),
+        field("end_kind", pa.string(), None, "bounce | net | hit | lost (track ended)"),
+        field("end_event_id", pa.int32(), None, "Event the flight ends at"),
+        field("hitter", pa.string(), None, "Flights from hits: me | opponent | machine | unknown"),
+        field("t0_s", pa.float64(), "s", "Start (contact) time"),
+        field("t1_s", pa.float64(), "s", "End time (end event, or the last detection)"),
+        field("n_obs", pa.int32(), None, "Detections used by the fit"),
+        field("rms_px", pa.float32(), "px", "Reprojection RMS of the detections"),
+        field("chi2", pa.float32(), None, "Normalized fit cost per degree of freedom"),
+        field("ok", pa.bool_(), None, "The fit converged"),
+        field("p0_x", pa.float64(), "m", "Position at t0"),
+        field("p0_y", pa.float64(), "m"),
+        field("p0_z", pa.float64(), "m"),
+        field("v0_x", pa.float64(), "m/s", "Velocity at t0"),
+        field("v0_y", pa.float64(), "m/s"),
+        field("v0_z", pa.float64(), "m/s"),
+        field("spin", pa.float64(), "1/m", "Magnus coefficient (+ topspin, - backspin)"),
+        field("cd", pa.float64(), None, "Drag coefficient"),
+        field("speed0", pa.float32(), "m/s", "Speed at t0 (off the racket for hits)"),
+        field("speed_net", pa.float32(), "m/s", "Speed crossing the net plane"),
+        field("speed_end", pa.float32(), "m/s", "Speed at t1 (before the bounce)"),
+        field("speed_avg", pa.float32(), "m/s", "Path length / flight time"),
+        field("net_x", pa.float32(), "m", "Where the path crosses the net plane"),
+        field("net_z", pa.float32(), "m", "Ball center height there"),
+        field("net_clearance", pa.float32(), "m", "net_z minus the net's height there"),
+        field("apex_z", pa.float32(), "m", "Highest point"),
+        field("end_x", pa.float32(), "m", "Position at t1"),
+        field("end_y", pa.float32(), "m"),
+        field("end_z", pa.float32(), "m"),
+        field("vz0", pa.float32(), "m/s", "Vertical velocity at t0"),
+        field("vz_end", pa.float32(), "m/s", "Vertical velocity at t1"),
+        field("landing_x", pa.float32(), "m", "End on the ground, or the extended path's"),
+        field("landing_y", pa.float32(), "m"),
+        field("landing_t", pa.float32(), "s"),
+        field("speed0_sigma", pa.float32(), "m/s", "1-σ of speed0 (fit covariance)"),
+        field("speed_avg_sigma", pa.float32(), "m/s"),
+        field("net_clearance_sigma", pa.float32(), "m"),
+        field("apex_sigma", pa.float32(), "m"),
+        field("landing_sigma", pa.float32(), "m", "1-σ of the fitted landing point"),
+        field("spin_sigma", pa.float32(), "1/m"),
+        field("flags", pa.list_(pa.string()), None, "Quality flags"),
+    ],
+)
+
+#: Sampled positions along each fitted flight (for drawing).
+BALL_FLIGHT_PATHS = table_schema(
+    "ball_flight_paths",
+    1,
+    [
+        field("flight_id", pa.int32(), None, nullable=False),
+        field("t_s", pa.float64(), "s", nullable=False),
+        field("x", pa.float32(), "m"),
+        field("y", pa.float32(), "m"),
+        field("z", pa.float32(), "m"),
+    ],
+)
+
+#: One row per hit (``shots``; PLAN.md §8). Stroke and swing fields arrive with M6,
+#: segments with M5.
+SHOTS = table_schema(
+    "shots",
+    1,
+    [
+        field("shot_id", pa.int32(), None, "Shot number within the session", nullable=False),
+        field("session_id", pa.string(), None, nullable=False),
+        field("segment_id", pa.int32(), None, "Practice shot / point segment (M5)"),
+        field("hitter", pa.string(), None, "me | opponent | machine | unknown"),
+        field("hit_event_id", pa.int32(), None, "The hit in events.parquet"),
+        field("flight_id", pa.int32(), None, "The fitted flight (ball/flights.parquet)"),
+        field("frame_contact", pa.int64(), None, "Frame nearest to the contact"),
+        field("t_contact", pa.float64(), "s", "Contact time"),
+        field("stroke_type", pa.string(), None, "serve | forehand | backhand | ... (M6)"),
+        field("stroke_conf", pa.float32(), None),
+        field("is_serve", pa.bool_(), None, "(M6/M9)"),
+        field("serve_number", pa.int8(), None, "1 or 2 (match mode)"),
+        field("contact_x", pa.float32(), "m", "Contact point (fit; hitter's feet without one)"),
+        field("contact_y", pa.float32(), "m"),
+        field("contact_height", pa.float32(), "m"),
+        field("side", pa.int8(), None, "Hitter's half: -1 near (camera side), +1 far"),
+        field("end_kind", pa.string(), None, "bounce | net | hit | lost | none"),
+        field("landing_x", pa.float32(), "m", "Where the ball first came down"),
+        field("landing_y", pa.float32(), "m"),
+        field("landing_sigma_m", pa.float32(), "m", "1-σ landing position (major axis)"),
+        field("landing_source", pa.string(), None, "bounce (detected) | fit (extended path)"),
+        field("landing_in", pa.bool_(), None, "Inside the opponent's singles court"),
+        field("landing_margin_m", pa.float32(), "m", "Distance inside (+) / outside (-) the lines"),
+        field("landing_zone", pa.string(), None, "Zone on the opponent's half (own half: near:)"),
+        field("speed_racket_kmh", pa.float32(), "km/h", "Speed off the racket"),
+        field("speed_net_kmh", pa.float32(), "km/h", "Speed crossing the net"),
+        field("speed_avg_kmh", pa.float32(), "km/h", "Path length / flight time"),
+        field("speed_bounce_kmh", pa.float32(), "km/h", "Speed just before the bounce"),
+        field("speed_sigma_kmh", pa.float32(), "km/h", "1-σ of the speed off the racket"),
+        field("net_clearance_m", pa.float32(), "m", "Ball center above the net"),
+        field("apex_m", pa.float32(), "m", "Highest point of the flight"),
+        field("spin_sign", pa.int8(), None, "+1 topspin, -1 backspin/slice, 0 unclear"),
+        field("flight_time_s", pa.float32(), "s", "Contact to landing (or end)"),
+        field("outcome", pa.string(), None, "in | out_long | out_wide | net | own_side | unknown"),
+        field("swing_id", pa.int32(), None, "(M6)"),
+        field("fit_rms_px", pa.float32(), "px"),
+        field("quality_flags", pa.list_(pa.string()), None),
+    ],
+)
+
 SCHEMAS: dict[str, pa.Schema] = {
     "audio_onsets": AUDIO_ONSETS,
     "pass1_frames": PASS1_FRAMES,
@@ -424,4 +538,7 @@ SCHEMAS: dict[str, pa.Schema] = {
     "ball_frames": BALL_FRAMES,
     "ball_track": BALL_TRACK,
     "events": EVENTS,
+    "ball_flights": BALL_FLIGHTS,
+    "ball_flight_paths": BALL_FLIGHT_PATHS,
+    "shots": SHOTS,
 }

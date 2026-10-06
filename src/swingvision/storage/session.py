@@ -149,6 +149,24 @@ class Session:
     def events_path(self) -> Path:
         return self.path / "events.parquet"
 
+    @property
+    def ball_flights_path(self) -> Path:
+        """Fitted 3D flights between events (``ball_3d``)."""
+        return self.ball_dir / "flights.parquet"
+
+    @property
+    def ball_flights_summary_path(self) -> Path:
+        """Hits the 3D fits rejected (not at the hitter)."""
+        return self.ball_dir / "flights.json"
+
+    @property
+    def ball_flight_paths_path(self) -> Path:
+        return self.ball_dir / "flight_paths.parquet"
+
+    @property
+    def shots_path(self) -> Path:
+        return self.path / "shots.parquet"
+
     def job_log_path(self, job_id: int) -> Path:
         return self.logs_dir / f"job-{job_id:05d}.log"
 

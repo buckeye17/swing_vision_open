@@ -113,3 +113,44 @@ def draw_ball(img: np.ndarray, x: float, y: float, r: float = 4.0, color=(225, 2
     """Anti-aliased ball (RGB image, in place) at sub-pixel (x, y)."""
     s = 16
     cv2.circle(img, (round(x * s), round(y * s)), round(r * s), color, -1, cv2.LINE_AA, shift=4)
+
+
+def flight_3d(
+    p0, v0, t0: float, t: np.ndarray, spin: float = 0.0, cd: float = 0.55, follow_spin=False
+) -> tuple[np.ndarray, np.ndarray, float | None]:
+    """Reference flight with drag and Magnus by ``scipy.integrate.solve_ivp`` (independent of
+    :func:`swingvision.ball.physics.simulate`), until the ball comes down to ball height.
+
+    ``follow_spin`` turns the spin axis with the horizontal velocity (the fit keeps it fixed).
+    Returns positions and velocities at ``t`` (NaN outside the flight) and the landing time.
+    """
+    from scipy.integrate import solve_ivp
+
+    from swingvision.ball import physics
+
+    k = 0.5 * physics.AIR_DENSITY * cd * np.pi * physics.BALL_RADIUS**2 / physics.BALL_MASS
+    e0 = physics.spin_axis(np.asarray(v0, float)[None])[0]
+
+    def rhs(_t, y):
+        v = y[3:]
+        e = physics.spin_axis(v[None])[0] if follow_spin else e0
+        sp = np.linalg.norm(v)
+        a = -k * sp * v + spin * sp * np.cross(e, v) - np.array([0, 0, G])
+        return np.r_[v, a]
+
+    def ground(_t, y):
+        return y[2] - RADIUS
+
+    ground.terminal, ground.direction = True, -1
+    sol = solve_ivp(
+        rhs, (t0, t0 + 6), np.r_[p0, v0], events=ground, dense_output=True, rtol=1e-10, atol=1e-10
+    )
+    t_land = float(sol.t_events[0][0]) if len(sol.t_events[0]) else None
+    end = t_land if t_land is not None else sol.t[-1]
+    pos = np.full((len(t), 3), np.nan)
+    vel = np.full((len(t), 3), np.nan)
+    m = (t >= t0) & (t <= end)
+    if m.any():
+        y = sol.sol(t[m])
+        pos[m], vel[m] = y[:3].T, y[3:].T
+    return pos, vel, t_land

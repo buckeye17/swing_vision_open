@@ -224,7 +224,7 @@ swing_vision_open/
 │  ├─ manifests/<stage>.json          # stage version, config hash, input hashes, timing, status
 │  ├─ pass1/frames.parquet             # sampled frames: time, brightness, view check
 │  ├─ players/detections.parquet  tracks.parquet  identity.json  movement.parquet
-│  ├─ ball/raw/part-*.parquet  track.parquet
+│  ├─ ball/sweep.parquet  track.parquet  flights.parquet  flight_paths.parquet
 │  ├─ events.parquet                  # hits, bounces, net, serve_toss (frame, xy, conf, source)
 │  ├─ shots.parquet                   # one row per shot (see §8)
 │  ├─ pose/pose2d.parquet  pose3d.parquet  swings.parquet
@@ -278,11 +278,11 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 10a | `ball_refine` | ✓ | 1 | ✅ with a sweep rate: full-rate detection in windows around moments found from the sweep (events, strong audio onsets, track gaps) |
 | 10 | `ball_track` | – | 1 | ✅ linked trajectory (tracklets + Viterbi selection of the ball in play), outliers dropped, short gaps filled |
 | 11 | `events` | – | 1 | ✅ hits (hitter = me / machine), bounces with court position, net contacts, sub-frame contact time, audio match (serve candidates: M6) |
-| 12 | `ball_3d` | – | 1 | per-shot 3D flight fit: speeds, net clearance, apex, landing |
+| 12 | `ball_3d` | – | 1 | ✅ 3D fit of every flight between events (hit/bounce → bounce/net/hit): speeds, net clearance, apex, landing, spin sign, uncertainties; contact chained from the incoming flight; rejects hits not at the hitter → `ball/flights.parquet` |
 | 13 | `pass2_pose` | ✓ | 1 | 2D pose on 4K crops in windows around hits (± 1.5 s) at full fps, plus sparse pose elsewhere (e.g. 5 fps) |
 | 14 | `pose3d` | ✓ | 1 | MotionBERT lifting, world placement, scale from profile height |
 | 15 | `swings` | – | 1 | kinematics, phases, stroke class per hit |
-| 16 | `shots` | – | 1 | join events + ball_3d + swings → `shots.parquet` |
+| 16 | `shots` | – | 1 | join events + ball_3d + swings → `shots.parquet` (✅ M4: events + ball_3d, line calls; swings join in M6) |
 | 17 | `segments` | – | 1 (practice) / 2 (match) | Practice: shots grouped into blocks. Match: points (+ warm-up) |
 | 18 | `outcomes` + `scoring` | – | 2 | match only: point winner, reason, confidence, score log |
 | 19 | `practice_eval` | – | 1 | practice only: per-shot target hit/miss, distance, block summaries |
@@ -420,6 +420,8 @@ The homography alone only gives positions on the ground. For speed:
 * Each output has an uncertainty from the fit covariance.
 * **Validation**: compare with known ball-machine speed settings and/or a radar gun on a few sessions.
 
+✅ Built in M4 (details and measurements in `docs/m4-ball-3d.md`): every flight between two events is fitted (not just shots), in time order, so a hit's contact prior is where its incoming flight (a feed's bounce, a serve toss) ended, with that fit's covariance, plus the tracked feet (± 1 m) until pose arrives in M6. Drag C_d is fitted with a 0.55 ± 0.05 prior, Magnus with one coefficient around a horizontal axis. A linear drag-free solve (ray constraints are linear in p₀, v₀) starts each fit; the Jacobian and the uncertainty samples are integrated as one batch. Hits whose well-fitted flight starts > 2.5 m from the hitter are rejected (M3 false hits) and the flights re-planned. Without a radar, the speed scale is validated by refitting ground-to-ground flights with g free (9.87 m/s² on real footage, +0.6%).
+
 ### 7.7 Pose: 2D, 3D, kinematics, phases, strokes
 
 * **2D pose**: ViTPose on **4K crops** of each player (the far player is still ~150–250 px tall). Run at full fps in windows of ± 1.5 s around each hit, and sparsely otherwise.
@@ -486,16 +488,22 @@ The homography alone only gives positions on the ground. For speed:
 
 ## 8. Key data records
 
-`shots.parquet` (one row per hit):
+`shots.parquet` (one row per hit; ✅ M4, schema `SHOTS` in `storage/schemas.py`):
 
 ```
-shot_id, session_id, segment_id, hitter (me|opponent|machine), frame_contact, t_contact,
-stroke_type, stroke_conf, is_serve, serve_number,
-contact_court_xy, contact_height, landing_xy, landing_sigma_m, landing_in, landing_zone,
-speed_racket_kmh, speed_avg_kmh, speed_bounce_kmh, speed_sigma, net_clearance_m, apex_m,
-spin_sign, flight_time_s, outcome (in|out_long|out_wide|net|winner|…),
-swing_id, quality_flags
+shot_id, session_id, segment_id, hitter (me|opponent|machine|unknown), hit_event_id,
+flight_id, frame_contact, t_contact, stroke_type, stroke_conf, is_serve, serve_number,
+contact_x, contact_y, contact_height, side (-1 near | +1 far), end_kind,
+landing_x, landing_y, landing_sigma_m, landing_source (bounce|fit), landing_in,
+landing_margin_m, landing_zone, speed_racket_kmh, speed_net_kmh, speed_avg_kmh,
+speed_bounce_kmh, speed_sigma_kmh, net_clearance_m, apex_m, spin_sign, flight_time_s,
+outcome (in|out_long|out_wide|net|own_side|unknown; winner etc. with match mode),
+swing_id, fit_rms_px, quality_flags
 ```
+
+`ball/flights.parquet` (M4): one fitted flight per event-to-event stretch: start/end kind and
+event, t0/t1, fitted state (p0, v0, spin, C_d), speeds, net crossing, apex, landing, σ of the
+key outputs, fit RMS and flags.
 
 `swings.parquet`: `swing_id, shot_id, phase_{name}_start/end frames, durations, contact metrics, peak angular velocities and timings, joint angle summary (min/max/at-contact), pose_quality`.
 
@@ -627,10 +635,14 @@ Each milestone ends with tests passing, a demo on real footage, and a short READ
   * Bounce event F1 **0.941** (≥ 0.85)
   * Median bounce position error **2.4 cm** near (≤ 15 cm) / **4.3 cm** far (≤ 35 cm), vs label-derived bounces; calibration adds ≈2 cm near, 4–7 cm far
 
-#### M4 — Shots, landings, 3D flight, speed
-* `ball_3d` physics fit with priors/uncertainties, `shots` assembly (initially without stroke type).
-* Review page shows per-shot landing + speed.
-* ✅ Exit criteria: synthetic tests recover speeds within 3%, and real-world speeds are within ~10% of ball-machine/radar references.
+#### M4 — Shots, landings, 3D flight, speed ✅ (done 2026-10-05; radar comparison pending footage)
+* `ball_3d` (`ball/physics.py`, `ball/flights.py`): every flight between events fitted in 3D through the calibrated camera (gravity, drag with a C_d prior, one-parameter Magnus), linear drag-free initialization from rays, batched RK4 Jacobians, sampled output uncertainties; flights fitted in time order so a hit's contact comes from where its incoming flight (feed bounce, serve toss) ended, plus the tracked feet; quality checks (`poor_fit`, `end_mismatch`, `implausible`); hits whose fitted contact isn't at the hitter are rejected and the flights re-planned.
+* `shots` (`analysis/shots.py`): one row per hit (§8) with speeds off the racket / at the net / before the bounce, contact point, net clearance, apex, spin sign, landing (detected bounce, else the extended fit) with σ, singles-court line call with margin and close-call flag, quality flags. No stroke type yet (M6).
+* Session page: Shots card (KPIs, current shot's numbers and side view, clickable shot list), fitted flight drawn on the video, landings on the court map, shot-speed timeline row; `sv shots`; `scripts/m4_validate_speed.py`.
+* ✅ Exit criteria (details in `docs/m4-ball-3d.md`):
+  * Synthetic flights (independent integrator, mismatched drag and spin axis, 1 px noise): speed off the racket within **3%** for every shot from the camera's end (typically 0.5-1%, serves ≤ 2% with the toss) and for far-end ball-machine feeds; a far-court hitter with only feet tracking within 5%.
+  * Real-world radar/ball-machine comparison: **not possible yet**, no such footage exists. Substitute physical references on the user's footage: g refitted from ground-to-ground flights is 9.87 / 9.96 m/s² (+0.6% / +1.5%, two sessions), so the speed scale is right to ≈1-1.5%; bounce restitution 0.80 (hard court); fitted vs feet→bounce horizontal speed 0.98. Oct 1 serves: 139 km/h median ± 2.8 km/h per shot, contact 2.76 m high. **Open item: record one session with a radar gun or a ball machine and compare.**
+  * Oct 4's framing cuts the serves' flights at the top of the frame, so it yields no shots over the net (recording guide: leave sky above the far baseline).
 
 #### M5 — Practice mode: segmentation, targets, accuracy
 * Practice segmentation (one segment per shot, blocks, auto hitting-side detection, ball-machine feeds, serve-practice sub-mode).

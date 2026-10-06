@@ -13,7 +13,17 @@ import dash
 import dash_mantine_components as dmc
 import numpy as np
 import plotly.graph_objects as go
-from dash import Input, Output, State, callback, clientside_callback, dcc, html, no_update
+from dash import (
+    ALL,
+    Input,
+    Output,
+    State,
+    callback,
+    clientside_callback,
+    dcc,
+    html,
+    no_update,
+)
 from plotly.subplots import make_subplots
 
 from swingvision import services
@@ -36,6 +46,18 @@ from swingvision.app.components.players_view import (
     profile_facts,
     speed_series,
     track_store,
+)
+from swingvision.app.components.shots_view import (
+    LINGER_S,
+    OUTCOME_COLORS,
+    PATH_COLOR,
+    landing_traces,
+    load_shots,
+    over_net,
+    shot_detail,
+    shots_card,
+    shots_store,
+    side_view_figure,
 )
 from swingvision.app.components.ui import (
     fmt_duration,
@@ -84,20 +106,26 @@ def timeline_figure(
     speed_t: np.ndarray | None = None,
     speed_v: np.ndarray | None = None,
     events: dict | None = None,
+    shots: dict | None = None,
 ) -> go.Figure:
-    """Audio onsets on top and, once tracked, the player's speed in its own row below.
+    """Audio onsets and ball events on top; once tracked, the player's speed and the shots'
+    speeds in their own rows below.
 
-    Both rows share the time axis (zooming one zooms both); the cursor spans both.
+    The rows share the time axis (zooming one zooms all); the cursor spans all.
     """
     duration = config.video.duration_s if config.video else 1.0
     has_speed = speed_t is not None and len(speed_t) > 0
-    rows = 2 if has_speed else 1
+    has_shots = bool(shots and any(v is not None for v in shots["v"]))
+    heights = [0.5] + ([0.25] if has_speed else []) + ([0.25] if has_shots else [])
+    rows = len(heights)
+    speed_row = 2 if has_speed else None
+    shots_row = rows if has_shots else None
     fig = make_subplots(
         rows=rows,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.08,
-        row_heights=[0.55, 0.45] if has_speed else [1.0],
+        vertical_spacing=0.06,
+        row_heights=[h / sum(heights) for h in heights],
     )
     # Invisible click-catcher so a click anywhere on the strip seeks.
     grid = np.arange(0, duration, 0.25)
@@ -165,21 +193,41 @@ def timeline_figure(
                 connectgaps=False,
                 hovertemplate="%{x:.1f}s · %{y:.1f} km/h<extra>player speed</extra>",
             ),
-            row=2,
+            row=speed_row,
             col=1,
         )
+    if has_shots:
+        assert shots is not None
+        for outcome, color in OUTCOME_COLORS.items():
+            k = [i for i, o in enumerate(shots["o"]) if o == outcome and shots["v"][i] is not None]
+            if not k:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=[shots["t0"][i] for i in k],
+                    y=[shots["v"][i] for i in k],
+                    mode="markers",
+                    name="shot " + outcome,
+                    marker={"color": color, "size": 6},
+                    hovertemplate="%{x:.1f}s · %{y:.0f} km/h<extra>" + outcome + "</extra>",
+                ),
+                row=shots_row,
+                col=1,
+            )
     ticks, labels = _tick_labels(duration)
     axis = {"range": [0, duration], "showgrid": False, "fixedrange": False}
     fig.update_xaxes(**axis)
     fig.update_xaxes(tickvals=ticks, ticktext=labels, row=rows, col=1)
-    if rows > 1:
-        fig.update_xaxes(showticklabels=False, row=1, col=1)
+    for r in range(1, rows):
+        fig.update_xaxes(showticklabels=False, row=r, col=1)
     fig.update_yaxes(fixedrange=True, showgrid=False, zeroline=False)
     fig.update_yaxes(title_text="onset", row=1, col=1)
     if has_speed:
-        fig.update_yaxes(title_text="km/h", rangemode="tozero", row=2, col=1)
+        fig.update_yaxes(title_text="km/h", rangemode="tozero", row=speed_row, col=1)
+    if has_shots:
+        fig.update_yaxes(title_text="shot", rangemode="tozero", row=shots_row, col=1)
     fig.update_layout(
-        height=220 if has_speed else 150,
+        height=150 + 70 * (rows - 1),
         margin={"l": 44, "r": 10, "t": 10, "b": 30},
         hovermode="closest",
         dragmode="zoom",
@@ -295,7 +343,7 @@ def _calibration_card(session_id: str, cal: Calibration | None, label: str):
     return dmc.Paper(dmc.Stack(rows, gap=6), p="md", withBorder=True)
 
 
-def _minimap_card(track: dict | None, machine, is_machine: bool):
+def _minimap_card(track: dict | None, machine, is_machine: bool, extra_traces=None):
     if is_machine:
         if machine is None:
             machine_text = "Ball machine not found yet. Turn on placing and click its spot."
@@ -316,7 +364,9 @@ def _minimap_card(track: dict | None, machine, is_machine: bool):
             dcc.Graph(
                 id="review-minimap",
                 figure=minimap_figure(
-                    (machine.x, machine.y) if machine else None, clickable=is_machine
+                    (machine.x, machine.y) if machine else None,
+                    clickable=is_machine,
+                    extra_traces=extra_traces,
                 ),
                 config={"displayModeBar": False},
             ),
@@ -391,6 +441,12 @@ def layout(session_id: str | None = None, **_):
         else None
     )
     evs = events_store(ball_events)
+    shots, flight_paths = load_shots(session)
+    shot_data = (
+        shots_store(shots, flight_paths, cal, video.display_width, video.display_height)
+        if video
+        else None
+    )
     summary = load_players_summary(session)
     machine = summary.machine if summary else None
     is_machine = bool(config.practice and config.practice.submode == "ball_machine")
@@ -429,6 +485,8 @@ def layout(session_id: str | None = None, **_):
             ),
             html.Div(id="review-box", style={"display": "none"}),
             html.Img(id="review-ball", src="", style={"display": "none"}),
+            html.Img(id="review-shotpath", src="", style={"display": "none"}),
+            html.Div(id="review-shot-label", style={"display": "none"}),
         ],
         style={"position": "relative"},
     )
@@ -455,6 +513,8 @@ def layout(session_id: str | None = None, **_):
             dcc.Store(id="review-track", data=track),
             dcc.Store(id="review-ball-store", data=ball),
             dcc.Store(id="review-events", data=evs),
+            dcc.Store(id="review-shots", data=shot_data),
+            dcc.Store(id="review-shot-id"),
             dcc.Store(id="review-session-id", data=config.id),
             dmc.Grid(
                 [
@@ -490,6 +550,13 @@ def layout(session_id: str | None = None, **_):
                                                     checked=ball is not None,
                                                     disabled=ball is None,
                                                 ),
+                                                dmc.Switch(
+                                                    id="review-shot-on",
+                                                    label="Shot path",
+                                                    size="xs",
+                                                    checked=shot_data is not None,
+                                                    disabled=shot_data is None,
+                                                ),
                                             ],
                                             gap="md",
                                         ),
@@ -506,7 +573,13 @@ def layout(session_id: str | None = None, **_):
                                     dcc.Graph(
                                         id="review-timeline",
                                         figure=timeline_figure(
-                                            config, onsets_t, onsets_s, speed_t, speed_v, evs
+                                            config,
+                                            onsets_t,
+                                            onsets_s,
+                                            speed_t,
+                                            speed_v,
+                                            evs,
+                                            shot_data,
                                         ),
                                         config={"displayModeBar": False, "scrollZoom": True},
                                     ),
@@ -538,7 +611,8 @@ def layout(session_id: str | None = None, **_):
                     dmc.GridCol(
                         dmc.Stack(
                             [
-                                _minimap_card(track, machine, is_machine),
+                                _minimap_card(track, machine, is_machine, landing_traces(shots)),
+                                shots_card(shots),
                                 ball_card(
                                     ball_track, ball_events, video.duration_s if video else 0.0, fps
                                 ),
@@ -823,3 +897,111 @@ def _place_machine(click, placing, session_id):
     except ValueError as exc:
         msg = f"Ball machine placed. {exc} Process the session again afterwards."
     return f"Ball machine at ({x:.1f}, {y:.1f}) m, placed by you.", False, notification(msg)
+
+
+clientside_callback(
+    """
+    function(t, on, shots, prevId) {
+        const hidden = {display: "none"};
+        const nu = window.dash_clientside.no_update;
+        const now = (t && t.t) || 0;
+        let i = -1;
+        if (shots) {
+            for (let k = shots.t0.length - 1; k >= 0; k--) {
+                if (shots.t0[k] <= now + 0.05) {
+                    if (now <= shots.t1[k] + LINGER) { i = k; }
+                    break;
+                }
+            }
+        }
+        const host = document.getElementById("review-minimap");
+        const gd = host ? host.querySelector(".js-plotly-plot") : null;
+        const id = i >= 0 ? shots.id[i] : null;
+        if (gd && window.Plotly && gd.data && gd.data.length >= 4 && id !== prevId) {
+            const lx = [], ly = [], txt = [];
+            if (i >= 0 && shots.cx[i] !== null) {
+                lx.push(shots.cx[i]); ly.push(shots.cy[i]);
+                txt.push(shots.v[i] !== null ? shots.v[i] + " km/h" : "");
+            }
+            window.Plotly.restyle(gd, {x: [lx], y: [ly], text: [txt]}, [3]);
+        }
+        const idOut = id === prevId ? nu : id;
+        if (i < 0) { return ["", hidden, "", hidden, idOut]; }
+        const label = (shots.v[i] !== null ? shots.v[i] + " km/h" : "speed ?") +
+            " · " + shots.o[i].replace("_", " ");
+        const labelStyle = {position: "absolute", left: "1%", top: "1.5%", padding: "2px 8px",
+            borderRadius: "4px", background: "rgba(0,0,0,0.6)", color: "#fff",
+            font: "600 14px system-ui, sans-serif", pointerEvents: "none"};
+        const path = shots.path[i];
+        if (!on || !path.length) { return ["", hidden, label, labelStyle, idOut]; }
+        const pts = path.map(p => p[0] + "," + p[1]).join(" ");
+        const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" ' +
+            'preserveAspectRatio="none"><polyline points="' + pts + '" fill="none" ' +
+            'stroke="PATH" stroke-opacity="0.9" stroke-width="2" stroke-dasharray="6 3" ' +
+            'vector-effect="non-scaling-stroke"/></svg>';
+        return ["data:image/svg+xml;utf8," + encodeURIComponent(svg),
+                {position: "absolute", inset: 0, width: "100%", height: "100%",
+                 pointerEvents: "none", display: "block"}, label, labelStyle, idOut];
+    }
+    """.replace("LINGER", str(LINGER_S)).replace("PATH", PATH_COLOR),
+    Output("review-shotpath", "src"),
+    Output("review-shotpath", "style"),
+    Output("review-shot-label", "children"),
+    Output("review-shot-label", "style"),
+    Output("review-shot-id", "data"),
+    Input("review-time", "data"),
+    Input("review-shot-on", "checked"),
+    State("review-shots", "data"),
+    State("review-shot-id", "data"),
+)
+
+
+clientside_callback(
+    """
+    function(clicks, shots) {
+        const ctx = window.dash_clientside.callback_context;
+        const nu = window.dash_clientside.no_update;
+        if (!shots || !ctx.triggered.length || !ctx.triggered[0].value) { return nu; }
+        const id = JSON.parse(ctx.triggered[0].prop_id.split(".")[0]).index;
+        const k = shots.id.indexOf(id);
+        const v = document.getElementById("review-video");
+        if (k < 0 || !v) { return nu; }
+        v.currentTime = Math.max(0, shots.t0[k] - 0.8);
+        v.play();
+        return shots.t0[k];
+    }
+    """,
+    Output("review-seek", "data", allow_duplicate=True),
+    Input({"type": "review-shot-row", "index": ALL}, "n_clicks"),
+    State("review-shots", "data"),
+    prevent_initial_call=True,
+)
+
+
+@callback(
+    Output("review-shot-detail", "children"),
+    Output("review-shot-side", "figure"),
+    Input("review-shot-id", "data"),
+    State("review-session-id", "data"),
+    prevent_initial_call=True,
+)
+def _show_shot(shot_id, session_id):
+    found = state.session_for(session_id or "")
+    if found is None:
+        return no_update, no_update
+    shots, paths = load_shots(found[2])
+    if shot_id is None or shots is None:
+        return shot_detail(None), side_view_figure(None)
+    rows = [r for r in shots.to_pylist() if r["shot_id"] == shot_id and over_net(r)]
+    if not rows:
+        return shot_detail(None), side_view_figure(None)
+    r = rows[0]
+    path = None
+    if paths is not None and r["flight_id"] is not None and r["side"] is not None:
+        fid = paths.column("flight_id").to_numpy()
+        m = fid == r["flight_id"]
+        if m.any():
+            y = paths.column("y").to_numpy()[m].astype(np.float64)
+            z = paths.column("z").to_numpy()[m].astype(np.float64)
+            path = (y, z, r["side"])
+    return shot_detail(r), side_view_figure(path)

@@ -1,4 +1,5 @@
-"""pass1_detect (ball sweep) → ball_refine → ball_track → events on a rendered video."""
+"""pass1_detect (ball sweep) → ball_refine → ball_track → events → ball_3d → shots on a
+rendered video."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from swingvision import services
 from swingvision.pipeline.runner import plan, run
 from swingvision.pipeline.stages import default_registry
 from swingvision.storage import tables
-from swingvision.storage.schemas import BALL_TRACK, EVENTS
+from swingvision.storage.schemas import BALL_FLIGHTS, BALL_TRACK, EVENTS, SHOTS
 from tests.conftest import BALL_FPS
 from tests.test_players_stages import players_settings  # noqa: F401  (fixture)
 
@@ -37,9 +38,11 @@ def test_ball_pipeline(players_settings, ball_video, sweep_hz):  # noqa: F811
     s.processing.ball_sweep_hz = sweep_hz
     session = services.create_session(s, path)
     reg = default_registry()
-    result = run(reg, session, s, targets=["events"])
+    result = run(reg, session, s, targets=["shots"])
     assert result.status == "done", result.message
-    assert {"pass1_detect", "ball_refine", "ball_track", "events"} <= set(result.ran)
+    assert {"pass1_detect", "ball_refine", "ball_track", "events", "ball_3d", "shots"} <= set(
+        result.ran
+    )
 
     track = tables.read_table(session.ball_track_path)
     assert track.schema.equals(BALL_TRACK, check_metadata=False)
@@ -53,6 +56,14 @@ def test_ball_pipeline(players_settings, ball_video, sweep_hz):  # noqa: F811
     assert b.num_rows >= 1
     assert np.min(np.abs(b.column("t_s").to_numpy() - bounces[0])) < 2 / BALL_FPS
 
+    # The ball appears in flight (no hit): flights from its bounces, no shots.
+    flights = tables.read_table(session.ball_flights_path)
+    assert flights.schema.equals(BALL_FLIGHTS, check_metadata=False)
+    assert flights.num_rows >= 1
+    assert set(flights.column("start_kind").to_pylist()) <= {"bounce", "free"}
+    shots = tables.read_table(session.shots_path)
+    assert shots.schema.equals(SHOTS, check_metadata=False)
+
     if sweep_hz:
         refine = tables.read_table(session.ball_refine_frames_path)
         sweep = tables.read_table(session.ball_sweep_frames_path)
@@ -62,4 +73,4 @@ def test_ball_pipeline(players_settings, ball_video, sweep_hz):  # noqa: F811
 
     # Everything is fresh now; changing only the ball detector keeps the person boxes.
     config = session.load_config()
-    assert all(p.fresh for p in plan(reg, session, config, s, ["events"]))
+    assert all(p.fresh for p in plan(reg, session, config, s, ["shots"]))

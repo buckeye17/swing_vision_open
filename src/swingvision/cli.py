@@ -158,6 +158,50 @@ def sessions() -> None:
         typer.echo(f"{s['id']}  {s['status']:<12} {s['mode']:<9} {s['name']}")
 
 
+@app.command()
+def shots(
+    session_id: str,
+    all_hits: Annotated[
+        bool, typer.Option("--all", help="Also hits that stayed on the hitter's side")
+    ] = False,
+) -> None:
+    """List a session's shots: speed, net clearance, landing and line call (M4)."""
+    from swingvision import services
+    from swingvision.app.components.shots_view import over_net, shot_summary
+    from swingvision.storage import tables
+
+    session = services.session_by_id(load_settings(), session_id)
+    if session is None:
+        raise typer.BadParameter(f"Unknown session {session_id}")
+    if not session.shots_path.exists():
+        raise typer.BadParameter("No shots yet: process the session up to the 'shots' stage")
+    table = tables.read_table(session.shots_path)
+
+    def num(v, fmt: str) -> str:
+        return "-" if v is None else format(v, fmt)
+
+    typer.echo(f"{'time':>8} {'hitter':<8} {'km/h':>9} {'net m':>6} {'landing (x, y) m':>17} call")
+    for r in table.to_pylist():
+        if not all_hits and not over_net(r):
+            continue
+        speed = num(r["speed_racket_kmh"], ".0f")
+        if r["speed_sigma_kmh"] is not None:
+            speed += f"±{r['speed_sigma_kmh']:.0f}"
+        land = "-"
+        if r["landing_x"] is not None:
+            land = f"({r['landing_x']:.2f}, {r['landing_y']:.2f})"
+        typer.echo(
+            f"{r['t_contact']:8.2f} {r['hitter'] or '-':<8} {speed:>9} "
+            f"{num(r['net_clearance_m'], '+.2f'):>6} {land:>17} {r['outcome']}"
+        )
+    s = shot_summary(table)
+    typer.echo(
+        f"{s['n']} shots over the net, {s['in']}/{s['called']} in; racket speed median "
+        f"{num(s['median'], '.0f')} km/h, fastest {num(s['max'], '.0f')} km/h "
+        f"({s['n_speed']} speeds certain enough)"
+    )
+
+
 @court_app.command("detect")
 def court_detect(
     path: Annotated[Path, typer.Argument(help="A video, or an image of the court")],
