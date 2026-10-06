@@ -19,6 +19,7 @@ import psutil
 from filelock import FileLock, Timeout
 from loguru import logger
 
+from swingvision.pipeline.keepawake import keep_awake
 from swingvision.pipeline.runner import PlannedStage, Registry, RunHooks, run
 from swingvision.pipeline.stages import default_registry
 from swingvision.settings import AppSettings, load_settings
@@ -252,7 +253,8 @@ def run_worker(
                 continue
             heartbeat.state, heartbeat.job_id = "busy", job.id
             try:
-                process_job(library, settings, job, registry)
+                with keep_awake():
+                    process_job(library, settings, job, registry)
             finally:
                 heartbeat.state, heartbeat.job_id = "idle", None
     except KeyboardInterrupt:
