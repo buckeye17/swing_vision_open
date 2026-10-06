@@ -366,7 +366,7 @@ def _show_step(step, video):
 
 
 #: Processing time per footage time on an RTX A5000 laptop (M7 overnight run).
-PROCESSING_X_REALTIME = 2.0
+PROCESSING_X_REALTIME = 1.8
 
 
 @callback(

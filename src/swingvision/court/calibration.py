@@ -373,15 +373,44 @@ def auto_calibrate(
 PIECEWISE_MIN_SHIFT_PX = 1.0
 
 
+def _window_cameras(cal: Calibration) -> list[tuple[float, float, CameraParams | None]]:
+    """(t0, t1, camera) per drift window, ``None`` meaning the session camera.
+
+    A window too dark (or failed) to calibrate keeps the camera of the nearest earlier
+    window that had one (else the nearest later one): a camera doesn't move in the dark,
+    and the session camera may be from a part of the video where it sat elsewhere.
+    """
+    own: list[CameraParams | bool | None] = []  # False: no measurement in this window
+    for win in cal.drift:
+        if win.camera is None:
+            own.append(False)
+        else:
+            moved = (win.shift_rms_px or 0.0) > PIECEWISE_MIN_SHIFT_PX
+            own.append(win.camera if moved else None)
+    filled = list(own)
+    last: CameraParams | bool | None = False
+    for i, c in enumerate(own):
+        if c is False:
+            filled[i] = last
+        else:
+            last = c
+    nxt: CameraParams | bool | None = False
+    for i in range(len(filled) - 1, -1, -1):
+        if own[i] is not False:
+            nxt = own[i]
+        elif filled[i] is False:
+            filled[i] = nxt
+    return [
+        (w.t0_s, w.t1_s, None if c is False else c)  # type: ignore[misc]
+        for w, c in zip(cal.drift, filled, strict=True)
+    ]
+
+
 def camera_at(cal: Calibration, t_s: float) -> Camera:
     """The camera for time ``t_s``: the window's own camera where the view had shifted."""
-    for win in cal.drift:
-        if (
-            win.t0_s <= t_s < win.t1_s
-            and win.camera is not None
-            and (win.shift_rms_px or 0.0) > PIECEWISE_MIN_SHIFT_PX
-        ):
-            return to_camera(win.camera)
+    for t0, t1, cam in _window_cameras(cal):
+        if t0 <= t_s < t1 and cam is not None:
+            return to_camera(cam)
     return to_camera(cal.camera)
 
 
@@ -390,12 +419,16 @@ def cameras_for_times(cal: Calibration, t_s: np.ndarray) -> tuple[list[Camera], 
     cams = [to_camera(cal.camera)]
     which = np.zeros(len(t_s), dtype=np.int64)
     t_s = np.asarray(t_s, dtype=np.float64)
-    for win in cal.drift:
-        if win.camera is not None and (win.shift_rms_px or 0.0) > PIECEWISE_MIN_SHIFT_PX:
-            inside = (t_s >= win.t0_s) & (t_s < win.t1_s)
-            if inside.any():
-                cams.append(to_camera(win.camera))
-                which[inside] = len(cams) - 1
+    seen: dict[int, int] = {}
+    for t0, t1, cam in _window_cameras(cal):
+        if cam is None:
+            continue
+        inside = (t_s >= t0) & (t_s < t1)
+        if inside.any():
+            if id(cam) not in seen:
+                cams.append(to_camera(cam))
+                seen[id(cam)] = len(cams) - 1
+            which[inside] = seen[id(cam)]
     return cams, which
 
 

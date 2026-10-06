@@ -179,3 +179,10 @@ def test_frames_without_the_court_view_are_ignored():
     me_roles = np.array(_roles_by_entity(table, ent, det)["me"])
     me_t = det.column("t_s").to_numpy()[ent["me"]]
     assert (me_roles[me_t >= 10.0] == "me").mean() > 0.99
+
+
+def test_fill_nearest():
+    from swingvision.pipeline.stages.players import fill_nearest
+
+    assert fill_nearest([None, 1, None, None, 2, None]) == [1, 1, 1, 1, 2, 2]
+    assert fill_nearest([None, None]) == [None, None]

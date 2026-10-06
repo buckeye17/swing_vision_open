@@ -173,3 +173,31 @@ def test_window_drift_refits_a_remounted_camera():
     assert out[0].status == "ok"
     assert out[1].status == "moved" and out[1].rms_line_px < calib.POOR_WINDOW_PX
     assert keypoint_error(calib.to_camera(out[1].camera), remounted) < 2.0
+
+
+def test_dark_windows_keep_the_last_known_camera():
+    """A camera that moved and then went dark stays where it was last seen."""
+    main = make_camera(**CAMERAS["wide"])
+    moved = make_camera(**{**CAMERAS["wide"], "offset_x": 1.0})
+    m, mv = calib.to_params(main), calib.to_params(moved)
+    cal = Calibration(
+        source="auto",
+        created_at=datetime.now(UTC),
+        camera=m,
+        drift=[
+            DriftWindow(t0_s=0, t1_s=10, n_frames=0, status="dark"),  # before any light
+            DriftWindow(t0_s=10, t1_s=20, n_frames=5, status="ok", shift_rms_px=0.3, camera=m),
+            DriftWindow(t0_s=20, t1_s=30, n_frames=5, status="moved", shift_rms_px=40, camera=mv),
+            DriftWindow(t0_s=30, t1_s=40, n_frames=0, status="dark"),
+            DriftWindow(t0_s=40, t1_s=50, n_frames=0, status="failed"),
+        ],
+    )
+
+    def x_of(cam):
+        return cam.project(np.array([[0.0, 0.0, 0.0]]))[0, 0]
+
+    assert x_of(calib.camera_at(cal, 5)) == pytest.approx(x_of(main))  # next known: main
+    assert x_of(calib.camera_at(cal, 25)) == pytest.approx(x_of(moved))
+    assert x_of(calib.camera_at(cal, 35)) == pytest.approx(x_of(moved))  # dark: stays moved
+    cams, which = calib.cameras_for_times(cal, np.array([5.0, 15.0, 25.0, 35.0, 45.0, 60.0]))
+    assert len(cams) == 2 and which.tolist() == [0, 0, 1, 1, 1, 0]

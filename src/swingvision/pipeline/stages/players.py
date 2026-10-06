@@ -38,11 +38,32 @@ LUMA_WEIGHTS = (0.299, 0.587, 0.114)
 VIEW_STRIDE = 16
 
 
+def fill_nearest(items: list) -> list:
+    """``None`` entries take the nearest earlier non-``None`` item, else the nearest later one
+    (all ``None``: unchanged)."""
+    out = list(items)
+    last = None
+    for i, v in enumerate(items):
+        if v is None:
+            out[i] = last
+        else:
+            last = v
+    nxt = None
+    for i in range(len(items) - 1, -1, -1):
+        if items[i] is not None:
+            nxt = items[i]
+        elif out[i] is None:
+            out[i] = nxt
+    return out
+
+
 class ViewCheck:
     """Correlates each frame (strided, gray) with the court background of its time window.
 
-    The per-window median images from ``court_auto`` follow a camera that was re-aimed; dark
-    windows have none, so they fall back to the session background.
+    The per-window median images from ``court_auto`` follow a camera that was re-aimed. Dark
+    windows have none and use the nearest window's image (the camera doesn't move in the
+    dark, and the session background may show it somewhere else); without any, the session
+    background.
     """
 
     def __init__(self, session, cal, width: int, height: int, device: str):
@@ -60,12 +81,14 @@ class ViewCheck:
             return self._normalize(t.permute(2, 0, 1)[None].float().to(device))[0]
 
         self.main = vec(read_rgb(session.court_background_path))
-        self.windows = []
-        for w in cal.drift if cal is not None else []:
-            if w.index is not None:
-                v = vec(read_rgb(session.court_window_path(w.index)))
-                if v is not None:
-                    self.windows.append((w.t0_s, w.t1_s, v))
+        drift = cal.drift if cal is not None else []
+        images = [
+            vec(read_rgb(session.court_window_path(w.index))) if w.index is not None else None
+            for w in drift
+        ]
+        self.windows = [
+            (w.t0_s, w.t1_s, v) for w, v in zip(drift, fill_nearest(images), strict=True)
+        ]
 
     @staticmethod
     def _normalize(small):
@@ -82,7 +105,9 @@ class ViewCheck:
 
         refs = []
         for t in times:
-            ref = next((v for t0, t1, v in self.windows if t0 <= t < t1), self.main)
+            ref = next(
+                (v for t0, t1, v in self.windows if t0 <= t < t1 and v is not None), self.main
+            )
             refs.append(ref)
         if any(r is None for r in refs):
             return np.full(len(times), np.nan, dtype=np.float32)
