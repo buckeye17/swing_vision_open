@@ -37,6 +37,29 @@ def register_routes(server: Flask) -> None:
         # conditional=True → HTTP Range support, which <video> seeking needs.
         return send_file(path, mimetype=mimetype, conditional=True, max_age=0)
 
+    @server.route("/export/<session_id>/<what>.<fmt>")
+    def export(session_id: str, what: str, fmt: str):
+        """A session table as a CSV or Parquet download (``analysis.export``)."""
+        from swingvision.analysis import export as ex
+
+        if what not in ex.EXPORTS or fmt not in ex.FORMATS:
+            abort(404)
+        found = state.session_for(session_id)
+        if found is None:
+            abort(404)
+        session = found[2]
+        try:
+            data = ex.export_bytes(session, what, fmt)
+        except ex.ExportError as exc:
+            return str(exc), 409, {"Content-Type": "text/plain; charset=utf-8"}
+        return send_file(
+            io.BytesIO(data),
+            mimetype="text/csv" if fmt == "csv" else "application/vnd.apache.parquet",
+            as_attachment=True,
+            download_name=ex.filename(session, what, fmt),
+            max_age=0,
+        )
+
     @server.route("/labeling/frame/<session_id>/<clip_id>/<int:frame>.jpg")
     def labeling_frame(session_id: str, clip_id: str, frame: int):
         """A region of a cached labeling frame at full resolution (query: x0, y0, w, h)."""

@@ -98,6 +98,15 @@ def layout(session_id: str | None = None, **_):
             )
             if session.swings_path.exists()
             else None,
+            dmc.Anchor(
+                dmc.Button(
+                    "Stats",
+                    variant="default",
+                    size="sm",
+                    leftSection=icon("tabler:chart-bar", 16),
+                ),
+                href=f"/stats/{config.id}",
+            ),
             dmc.Select(
                 id="pr-submode",
                 value=config.practice.submode,

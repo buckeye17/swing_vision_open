@@ -17,13 +17,14 @@ from swingvision.pose.strokes import STROKE_LABELS
 from swingvision.storage import tables
 from swingvision.storage.fsutil import read_json
 
+#: Fixed order, checked for color-vision-deficiency separation between neighbors.
 STROKE_COLORS = {
-    "serve": "#7048e8",
+    "serve": "#c2255c",
     "forehand": "#1c7ed6",
-    "backhand": "#f08c00",
+    "backhand": "#e8590c",
     "forehand_volley": "#0ca678",
-    "backhand_volley": "#e8590c",
-    "overhead": "#ae3ec9",
+    "backhand_volley": "#e67700",
+    "overhead": "#7048e8",
     "other": "#868e96",
 }
 PHASES = (

@@ -548,11 +548,22 @@ def layout(session_id: str | None = None, **_):
         if session.swings_path.exists()
         else None
     )
+    stats_button = (
+        dmc.Anchor(
+            dmc.Button(
+                "Stats", variant="light", size="sm", leftSection=icon("tabler:chart-bar", 16)
+            ),
+            href=f"/stats/{config.id}",
+        )
+        if session.shots_path.exists() or session.movement_path.exists()
+        else None
+    )
     has_pose = session.pose2d_path.exists() and video is not None and has_proxy
     header_right = dmc.Group(
         [
             practice_button,
             swings_button,
+            stats_button,
             dmc.Anchor(
                 dmc.Button(
                     "Calibrate", variant="default", size="sm", leftSection=icon("tabler:target", 16)

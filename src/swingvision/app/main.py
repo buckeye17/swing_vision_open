@@ -21,6 +21,7 @@ PAGE_MODULES = [
     "session_review",
     "practice",
     "swings",
+    "stats",
     "calibrate",
     "profiles",
     "labeling",

@@ -178,6 +178,11 @@ class Session:
         return self.path / "practice.parquet"
 
     @property
+    def stats_path(self) -> Path:
+        """Session aggregates (``stats``)."""
+        return self.path / "stats.json"
+
+    @property
     def pose_dir(self) -> Path:
         return self.path / "pose"
 

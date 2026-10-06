@@ -105,6 +105,14 @@ def layout(session_id: str | None = None, **_):
                 href=f"/practice/{config.id}",
             )
         )
+    links.append(
+        dmc.Anchor(
+            dmc.Button(
+                "Stats", variant="default", size="sm", leftSection=icon("tabler:chart-bar", 16)
+            ),
+            href=f"/stats/{config.id}",
+        )
+    )
     header = page_header(config.name, "Swings", right=dmc.Group(links, gap="sm"))
     if data is None:
         return dmc.Container([header, _missing(config.id)], size="xl", px=0)

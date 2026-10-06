@@ -217,7 +217,7 @@ def set_session_player(settings: AppSettings, session_id: str, profile_id: str |
 # ---------------------------------------------------------------------------
 
 #: Stages cheap enough for the app to run itself after an edit (seconds, CPU).
-CHEAP_STAGES = frozenset({"swings", "shots", "segments", "practice_eval"})
+CHEAP_STAGES = frozenset({"swings", "shots", "segments", "practice_eval", "stats"})
 
 
 def set_practice(
@@ -244,8 +244,8 @@ def set_practice(
 
 
 def refresh_practice(settings: AppSettings, session_id: str) -> tuple[str, int | None]:
-    """Bring ``segments`` and ``practice_eval`` (and the swings and shots they read) up to
-    date after an edit.
+    """Bring ``segments``, ``practice_eval`` and ``stats`` (and the swings and shots they
+    read) up to date after an edit.
 
     Runs them right here when nothing heavier is stale (``"ran"``); otherwise queues a job
     (``"queued"``, job id). ``"busy"``: the session is being processed, and the change is
@@ -264,7 +264,7 @@ def refresh_practice(settings: AppSettings, session_id: str) -> tuple[str, int |
         raise ValueError(f"Unknown session {session_id}")
     registry = default_registry()
     config = session.load_config()
-    target = "practice_eval" if config.mode == "practice" else "shots"
+    target = "stats" if config.mode == "practice" else "shots"
     planned = plan(registry, session, config, settings, [target])
     stale = {p.stage.name for p in planned if not p.fresh}
     if not stale:

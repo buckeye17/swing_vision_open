@@ -109,6 +109,17 @@ def _row(root, s: dict):
                         disabled=s["mode"] != "practice",
                     ),
                     dmc.MenuItem(
+                        "Stats",
+                        href=f"/stats/{sid}",
+                        leftSection=icon("tabler:chart-bar", 14),
+                    ),
+                    dmc.MenuItem(
+                        "Export shots (CSV)",
+                        href=f"/export/{sid}/shots.csv",
+                        refresh=True,
+                        leftSection=icon("tabler:download", 14),
+                    ),
+                    dmc.MenuItem(
                         "Calibrate court",
                         href=f"/calibrate/{sid}",
                         leftSection=icon("tabler:target", 14),
