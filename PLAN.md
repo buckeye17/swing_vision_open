@@ -286,7 +286,7 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 17 | `segments` | – | 1 (practice) / 2 (match) | ✅ Practice (M5): one segment per shot (seen hits, unseen contacts from landing + impact sound, toss + sound), feeds, serve/groundstroke, deuce/ad, blocks. Match: points (+ warm-up) |
 | 18 | `outcomes` + `scoring` | – | 2 | match only: point winner, reason, confidence, score log |
 | 19 | `practice_eval` | – | 1 | ✅ practice only: line calls (service box for serves), per-shot target hit/miss, distance, depth/width error, with the user's edits; rerun in-app after target/shot edits |
-| 20 | `stats` | – | 1 (session) / 2 (match stats) | session aggregates → `stats.json` |
+| 20 | `stats` | – | 1 (session) / 2 (match stats) | ✅ session aggregates → `stats.json` (M7: shots and calls by stroke, speeds, depth, swings, movement); rerun in-app after edits |
 
 **Calibration gating**: stages 4–5 run automatically. `court_auto` runs right after `ingest`, so the calibration can be reviewed while the proxy encodes. Unless the auto calibration passes the Settings threshold ("continue without review when line RMS < X px", off by default), `camera` stops the job with status `needs_action`; Jobs and the session page link to the Calibrate page, and confirming there re-queues the job. Stage 6 doesn't depend on calibration except for the court-ROI crop. The `camera` stage's fingerprint covers only the chosen camera, so re-confirming an unchanged calibration invalidates nothing; if the user later adjusts calibration, stages 7+ rerun on CPU in minutes. (The runner re-plans each stage just before running it, so a stage's config may read files that upstream stages or the user wrote.)
 
@@ -681,10 +681,12 @@ Each milestone ends with tests passing, a demo on real footage, and a short READ
   * Phase timings consistent across repeated swings: phases in order on 100% of serves; preparation CV 5–8%, forward swing 0.17–0.18 s (±2 frames), follow-through CV 16–20% (Oct 1); Oct 4's above-the-frame serves are less consistent.
   * **Open items**: record a self-fed groundstroke session (and a far-end session with tracked hits) and label it; move the audio/video offset into `events` (Oct 4's sound-based contacts are ≈0.1 s late).
 
-#### M7 — MVP hardening and release
-* Per-session Stats page (speed distributions by stroke, landing heatmaps, depth, movement), CSV/Parquet export of shots.
-* Error handling, relink-missing-video flow, README + recording guide.
-* ✅ Exit criteria: a 2-hour practice session processes unattended overnight. Tag the **v0.1 (MVP)** release.
+#### M7 — MVP hardening and release ✅ (done 2026-10-06; tagged v0.1)
+* `stats` stage (`analysis/stats.py` → `stats.json`) and the per-session Stats page: KPIs, speed by stroke, depth, landing heatmap / dots by stroke (hitter's frame), strokes table, movement heatmap and distance per 5 min; stroke/end filters. CSV/Parquet export of shots (with practice results), practice shots and swings (`analysis/export.py`, `/export` route, `sv export`).
+* Error handling: plain-language failure messages, one retry after GPU out-of-memory, a 5 GB free-space preflight, keep-awake while a job runs, needs-action reasons on jobs (library v3: `jobs.action`), error pages instead of blank ones. Relink-missing-video flow (Library badge + dialog, folder search by content, job resumes; `sv relink`). README: overnight processing, Stats/export, troubleshooting, recording guide.
+* Calibration fixes found by the overnight test: auto-accept with camera movement when every moved window fits on its own; drift windows stay 5 min long up to 3 h; full re-fit for windows the pose-only refit can't fit; dark windows keep the nearest known camera and view reference.
+* ✅ Exit criteria (details in `docs/m7-release.md`): a **2:10 h** practice video (the two real sessions joined: Oct 4 + Oct 1 + Oct 4, two camera mounts) processed unattended in **3 h 53 min** (1.79× realtime; pass 1 2 h 42 min, pose 26 min, proxy 24 min), calibration auto-accepted, GPU memory ≤ 6.4 GB; every part matches the same footage processed on its own (Oct 1 100/100 shots, Oct 4 136/137 and 135/137). Tagged **v0.1 (MVP)**.
+  * **Open item**: confirm on a real single-mount 2-hour recording (with groundstrokes).
 
 ### Phase 2 — Match mode
 

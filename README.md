@@ -4,7 +4,7 @@ A personal, local-first tennis video analysis tool. Point a fixed camera at the 
 a practice or a match, and let your NVIDIA GPU break the footage down. The roadmap and
 architecture are in [PLAN.md](PLAN.md).
 
-**Status: milestones M0–M6 are complete: practice mode is usable, with swing analysis.** The app ingests footage, builds a
+**Status: v0.1, the practice-mode MVP (milestones M0–M7).** The app ingests footage, builds a
 browser-playable proxy, detects audio onsets, finds the court and fits a full camera model
 (sub-pixel on real footage), checks whether the camera moved during the recording, and lets
 you review the calibration. It tracks you on the court (also at dusk) and reports your
@@ -14,8 +14,9 @@ on the court) and net contacts. Every shot gets a 3D flight: speed off the racke
 and before the bounce, net clearance, height, landing spot and line call. Practice sessions
 are cut into one clip per shot (feed, hit, landing), grouped into blocks, and scored against
 targets you draw on the court. Every swing gets a 2D and 3D pose, its phases (preparation,
-forward swing, follow-through), body kinematics and a stroke type. Match scoring arrives in
-M8–M10.
+forward swing, follow-through), body kinematics and a stroke type. A Stats page sums up each
+session (speeds by stroke, landing heatmaps, depth, movement) and exports the shots as CSV or
+Parquet. A 2-hour session processes unattended overnight. Match scoring arrives in M8–M10.
 
 ## Requirements
 
@@ -46,6 +47,25 @@ there. Raw footage is never copied.
 Then go to **New session**, choose a video, and click **Create and process**. A background
 worker (started by the app) processes the job. You can watch it on **Jobs**, and open the
 session from the **Library** when it's done.
+
+### Processing overnight
+
+Processing takes about 1.8 hours per hour of footage on an RTX A5000 laptop (a 2-hour session
+took 3 h 53 min), so long sessions are best left to run overnight:
+
+1. In **Settings → Court calibration**, turn on *Continue without review when the fit is
+   good*. Otherwise every job pauses after court detection until you confirm the calibration
+   (you can also confirm it in the first minutes, then leave). With it on, a calibration is
+   used unattended when it fits the painted lines within the threshold, including the
+   stretches where the camera moved (a mount sagging or a bumped tripod), each of which must
+   fit just as well with its own camera.
+2. Create the session and leave the app running (or run `uv run sv worker`). The worker keeps
+   Windows from going to sleep while it works; the screen may still turn off.
+3. In the morning the session is *ready*. If anything stopped it, the Jobs page says why and
+   what to do (see [When something goes wrong](#when-something-goes-wrong)).
+
+Jobs survive interruptions: if the app or the computer stops mid-job, the worker picks the job
+up where it was the next time it starts (long stages resume from 2-minute checkpoints).
 
 ### Court calibration
 
@@ -210,12 +230,63 @@ hit on every seen hit (39 near, only 3 far). Depth along the camera's line of si
 pose, especially for the far player: compare swings with your own rather than with absolute
 norms. Details in [docs/m6-swings.md](docs/m6-swings.md).
 
+### Stats and export
+
+The **Stats** page (button on the session, Practice and Swings pages; *Stats* in the Library
+row menu) sums up one session:
+
+* **Headline numbers**: shots, in %, net %, median and fastest speed, distance moved, top
+  running speed.
+* **Speed by stroke**: every shot's speed off the racket as a dot, with a box for the middle
+  half and the median (uncalibrated, see above).
+* **Depth**: where shots came down, measured from the net, per stroke, with the service line
+  and baseline marked.
+* **Landings**: a heatmap (or dots colored by stroke, hollow when out) of where your shots
+  landed, drawn as seen from your end so both ends add up.
+* **Strokes**: calls, speed, depth (short of the service line for serves, of the baseline
+  for the rest), share of deep groundstrokes, swing count and wrist speed per stroke.
+* **Movement**: where you spent your time and the distance you covered every 5 minutes.
+
+Filter by stroke and end. In practice sessions the numbers use your corrections from the
+Practice page (shots marked *not a practice shot* are left out unless you include them).
+
+**Export** (top right) downloads the session's shots (every shot record with its practice
+result: call after your corrections, target, excluded), practice shots or swings, as CSV or
+Parquet (Parquet keeps the units). `uv run sv export <session-id> --format parquet` does the
+same from the command line.
+
 ### Profiles
 
 Create a profile for yourself on **Profiles** (name, handedness, one- or two-handed
 backhand, height) and pick it when creating a session (or on the session page). Height
 places you correctly when your feet are out of frame and scales the 3D swing analysis;
 handedness is the fallback when the footage doesn't show which hand holds the racket.
+
+## When something goes wrong
+
+The **Jobs** page shows each job's stages; *Show logs* adds the end of the job's log (the full
+log is in the session folder under `logs/`). A job that stops says why:
+
+* **Needs action: review the court calibration.** Click *Review calibration*, check the court
+  overlay, adjust if needed and confirm; the job continues. To skip this step, see
+  [Processing overnight](#processing-overnight).
+* **Needs action: source video not found.** You moved or renamed the footage. Click *Relink
+  video* (or *Relink video…* in the Library row menu, or the red *video missing* badge),
+  pick the file where it is now, and the job resumes. The file must be the same video (its
+  size and content are checked). If you moved a whole folder, relinking one session finds
+  the others' videos in it too. Results and playback don't need the original video, only
+  reprocessing does. Command line: `uv run sv relink <session-id> <new path>`.
+* **Needs action: low disk space.** A job doesn't start with less than 5 GB free in the
+  output folder. Free some space and click *Retry*.
+* **Failed: the GPU ran out of memory.** Another program was using the GPU. GPU stages retry
+  once on their own; if it happens again, close the other program and click *Retry*.
+* **Failed: a GPU error / ffmpeg failed / permission denied.** *Retry* resumes where the job
+  stopped. Permission errors usually mean another program (a video player, a spreadsheet)
+  has one of the session's files open.
+
+If a page shows *This page couldn't be shown*, one of the session's files is missing or
+damaged (for example while it is being reprocessed): wait for the job, or reprocess the
+session from the Library (*Process (stale stages)* or *Reprocess from scratch*).
 
 ## CLI
 
@@ -244,24 +315,49 @@ uv run python scripts/m5_check_targets.py <session-id> --sets builtin  # target 
 uv run sv swings show <session-id>     # strokes, phases, wrist speed (--all: also non-strokes)
 uv run sv swings eval                  # strokes, contact timing, phase spread vs labels (M6)
 uv run sv train strokes my-strokes     # learned stroke classifier from labels + corrections
+uv run sv export <session-id> --what shots --format csv   # shots | practice | swings, csv | parquet
+uv run sv relink <session-id> E:\footage\practice.mp4     # the video moved
 ```
 
-## Recording tips
+## Recording guide
 
-* Mount the camera **centered behind a baseline and as high as practical (≥ 2.5–3 m)**. A
-  low camera squashes the far half of the court and costs precision there.
-* Make sure the camera sees as many court lines as possible, including the far baseline.
-* Frame the entire court with some margin behind the far baseline. If the far baseline sits
-  at the top edge of the picture, you can't be tracked while standing behind it.
-* Record 4K at 60 fps, with exposure and focus locked if your phone allows it. Avoid recording
-  into darkness.
-* Leave room at the top of the picture (some sky above the far baseline): a serve's toss and
-  contact that go out of the top of the frame can only be found from where the ball lands
-  and the sound of the hit, and get no speed.
-* Keep yourself in the picture, head to toe, at both ends: swing analysis needs to see you
-  (a serve whose arm leaves the top of the frame is still recognized, but less reliably).
-* Don't touch the camera once you start recording. (If you do, the drift check notices and
-  calibrates those minutes separately, but it's better not to.)
+How you record matters more than any setting in the app. In order of importance:
+
+**Camera position**
+
+* Mount the camera **centered behind a baseline and as high as practical (2.5–3 m or more)**:
+  a fence clamp or a light stand on the fence. Height is the biggest single factor in how
+  well the far half of the court is measured; a low camera squashes it.
+* Frame the **whole court**: all lines including the far baseline, some room behind the far
+  baseline (you can't be tracked while standing behind a baseline at the edge of the
+  picture), and **some sky above the far baseline**: a serve's toss and contact that leave
+  the top of the frame get no speed and are found only from the landing and the sound.
+* Keep yourself in the picture head to toe at both ends: swing analysis needs to see you.
+* Make it rigid. A phone on a pole that sags or sways is handled (the drift check calibrates
+  the minutes where it moved separately), but a steady camera is better.
+
+**Phone settings**
+
+* **4K at 60 fps.** The app reads the frame rate and resolution from the file; 4K60 is what
+  it is tuned for.
+* Lock exposure and focus if your camera app allows it, and use a fast shutter (1/1000 s or
+  faster) in good light to keep the ball sharp.
+* Keep the microphone uncovered: racket-impact sounds find hits the camera can't see.
+* Storage: 4K60 HEVC takes about **25 GB per hour** (a 2-hour session ≈ 50 GB). Battery:
+  plug the phone into a power bank for long sessions, and keep it out of direct sun so it
+  doesn't overheat and stop recording.
+
+**Light**
+
+* Footage that gets too dark (dusk) is detected and skipped for tracking, so it costs nothing
+  but processing time; stop recording when you can no longer see the ball.
+
+**During the session**
+
+* Start recording before you start hitting and don't touch the camera once it runs. If you
+  do, the drift check notices and calibrates those minutes separately.
+* One long recording is fine: a 2-hour file processes unattended overnight. Split recordings
+  are fine too (one session each).
 
 ## Development
 
@@ -286,7 +382,8 @@ src/swingvision/
   players/           person detection, tracking, movement (M2)
   ball/              ball detectors, frame-rate schedules, linking, events (M3),
                      3D flight physics and fitting (M4)
-  analysis/          shot records (M4); practice segmentation, targets, accuracy (M5)
+  analysis/          shot records (M4); practice segmentation, targets, accuracy (M5);
+                     session statistics and exports (M7)
   pose/              2D pose, 3D lifting and placement, kinematics, swings, strokes (M6)
   training/          labels, labeling helpers, training, benchmark, evaluation (M3, M6)
   models/            pretrained weights registry (URLs, SHA-256, licenses)
