@@ -97,11 +97,20 @@ class PracticeShotEdit(BaseModel):
     confirmed: bool = False
 
 
+class SwingEdit(BaseModel):
+    """The user's stroke for the swing whose contact is at ``t`` (M6). Also a training label
+    for the stroke classifier."""
+
+    t: float
+    stroke: str
+
+
 class SessionEdits(BaseModel):
     """``edits.json``: user overrides layered over derived data (PLAN.md §9.3)."""
 
     version: int = 0
     practice_shots: list[PracticeShotEdit] = Field(default_factory=list)
+    swings: list[SwingEdit] = Field(default_factory=list)
 
 
 class PracticeConfig(BaseModel):
@@ -565,7 +574,7 @@ SHOTS = table_schema(
 #: warm-ups arrive with Phase 2 in the same file.
 SEGMENTS = table_schema(
     "segments",
-    1,
+    2,
     [
         field("segment_id", pa.int32(), None, "Segment number within the session", nullable=False),
         field("kind", pa.string(), None, "practice_shot | block (point | warmup: Phase 2)"),
@@ -590,6 +599,9 @@ SEGMENTS = table_schema(
         field("side", pa.int8(), None, "Hitter's half: -1 near (camera side), +1 far"),
         field("shot_kind", pa.string(), None, "serve | groundstroke | unknown"),
         field("serve_side", pa.string(), None, "Serves: deuce | ad (server's half)"),
+        field("swing_id", pa.int32(), None, "The player's swing at the contact (M6)"),
+        field("stroke_type", pa.string(), None, "serve | forehand | backhand | ... (M6)"),
+        field("stroke_conf", pa.float32(), None),
         field("n_shots", pa.int32(), None, "Blocks: practice shots in the block"),
         field("conf", pa.float32(), None, "Confidence 0-1 that this is a practice shot"),
         field("flags", pa.list_(pa.string()), None),
@@ -643,6 +655,140 @@ PRACTICE = table_schema(
     ],
 )
 
+# ---------------------------------------------------------------------------
+# Pose and swings (PLAN.md §7.7, §8)
+# ---------------------------------------------------------------------------
+
+#: 2D pose of the player on every frame of the swing windows (``pass2_pose``).
+POSE2D = table_schema(
+    "pose2d",
+    1,
+    [
+        field("frame", pa.int64(), None, "Presentation-order frame number", nullable=False),
+        field("t_s", pa.float64(), "s", "Time on the video timeline", nullable=False),
+        field("player", pa.string(), None, "me | opponent", nullable=False),
+        field("window", pa.int32(), None, "Pose window (merged around hits and impact sounds)"),
+        field(
+            "kp",
+            pa.list_(pa.float32(), 51),
+            "px",
+            "COCO-17 keypoints: x, y (full-resolution display pixels), confidence",
+        ),
+        field("x0", pa.float32(), "px", "Crop the pose network saw"),
+        field("y0", pa.float32(), "px"),
+        field("x1", pa.float32(), "px"),
+        field("y1", pa.float32(), "px"),
+        field("score", pa.float32(), None, "Mean keypoint confidence"),
+    ],
+)
+
+#: 3D joints on the court (``pose3d``).
+POSE3D = table_schema(
+    "pose3d",
+    1,
+    [
+        field("frame", pa.int64(), None, "Presentation-order frame number", nullable=False),
+        field("t_s", pa.float64(), "s", "Time on the video timeline", nullable=False),
+        field("player", pa.string(), None, "me | opponent", nullable=False),
+        field("clip", pa.int32(), None, "Lifted clip (consecutive frames of one window)"),
+        field(
+            "joints",
+            pa.list_(pa.float32(), 51),
+            "m",
+            "Human3.6M-17 joints x, y, z in court coordinates (z up)",
+        ),
+        field("conf", pa.float32(), None, "Mean 2D keypoint confidence"),
+        field("reproj_px", pa.float32(), "px", "Joint reprojection RMS after placement"),
+        field("scale", pa.float32(), "m", "Meters per normalized unit (from the player's height)"),
+    ],
+)
+
+#: One row per swing (``swings``; PLAN.md §8).
+SWINGS = table_schema(
+    "swings",
+    1,
+    [
+        field("swing_id", pa.int32(), None, "Swing number within the session", nullable=False),
+        field("player", pa.string(), None, "me | opponent"),
+        field("t_contact", pa.float64(), "s", "Contact time"),
+        field("frame_contact", pa.int64(), None, "Frame nearest to the contact"),
+        field("contact_source", pa.string(), None, "hit (ball event) | audio | pose"),
+        field("t_contact_pose", pa.float64(), "s", "Contact estimated from the pose alone"),
+        field("hit_event_id", pa.int32(), None, "The hit in events.parquet"),
+        field("side", pa.int8(), None, "Player's half: -1 near (camera side), +1 far"),
+        field("racket_hand", pa.string(), None, "left | right"),
+        field(
+            "stroke_type",
+            pa.string(),
+            None,
+            "serve | forehand | backhand | forehand_volley | backhand_volley | overhead | other",
+        ),
+        field("stroke_conf", pa.float32(), None, "Confidence 0-1"),
+        field("stroke_source", pa.string(), None, "rules | model | user"),
+        field("stroke_rules", pa.string(), None, "What the rules said (before model/user)"),
+        field("t_start", pa.float64(), "s", "Preparation (unit turn / toss) starts"),
+        field("t_split", pa.float64(), "s", "Split step (vertical hop) before the preparation"),
+        field(
+            "t_backswing_end", pa.float64(), "s", "Racket hand furthest back: forward swing starts"
+        ),
+        field("t_follow_end", pa.float64(), "s", "Hand slowed down after the contact"),
+        field("t_recovery_end", pa.float64(), "s", "Back to a ready position"),
+        field("prep_s", pa.float32(), "s", "Preparation start to backswing end"),
+        field("forward_s", pa.float32(), "s", "Forward swing: backswing end to contact"),
+        field("follow_s", pa.float32(), "s", "Contact to follow-through end"),
+        field("recovery_s", pa.float32(), "s", "Follow-through end to ready"),
+        field("tempo", pa.float32(), None, "Preparation / forward swing duration"),
+        field("contact_height_m", pa.float32(), "m", "Racket wrist height at contact"),
+        field(
+            "contact_front_m",
+            pa.float32(),
+            "m",
+            "Racket wrist ahead (+) of the pelvis, toward the net",
+        ),
+        field(
+            "contact_side_m", pa.float32(), "m", "Racket wrist to the racket side (+) of the pelvis"
+        ),
+        field("contact_dist_m", pa.float32(), "m", "Horizontal racket wrist to pelvis distance"),
+        field(
+            "wrist_speed_peak", pa.float32(), "m/s", "Peak racket wrist speed (racket speed proxy)"
+        ),
+        field(
+            "wrist_speed_avg",
+            pa.float32(),
+            "m/s",
+            "Racket wrist distance covered in the last 0.3 s before contact, per second",
+        ),
+        field("pelvis_av_peak", pa.float32(), "deg/s", "Peak hip rotation speed"),
+        field("trunk_av_peak", pa.float32(), "deg/s", "Peak shoulder rotation speed"),
+        field("elbow_av_peak", pa.float32(), "deg/s", "Peak elbow extension speed"),
+        field("t_pelvis_peak", pa.float32(), "s", "Peak hip rotation speed, relative to contact"),
+        field(
+            "t_trunk_peak", pa.float32(), "s", "Peak shoulder rotation speed, relative to contact"
+        ),
+        field("t_elbow_peak", pa.float32(), "s", "Peak elbow extension speed, relative to contact"),
+        field("t_wrist_peak", pa.float32(), "s", "Peak wrist speed, relative to contact"),
+        field("chain_in_order", pa.bool_(), None, "Hips → trunk → elbow → wrist peaks in order"),
+        field("shoulder_turn_max", pa.float32(), "deg", "Largest shoulder turn away from the net"),
+        field("hip_turn_max", pa.float32(), "deg", "Largest hip turn away from the net"),
+        field("separation_max", pa.float32(), "deg", "Largest hip-shoulder separation"),
+        field("shoulder_turn_contact", pa.float32(), "deg", "Shoulder turn at contact"),
+        field("hip_turn_contact", pa.float32(), "deg", "Hip turn at contact"),
+        field("knee_flex_max", pa.float32(), "deg", "Deepest knee bend in the preparation"),
+        field("knee_flex_contact", pa.float32(), "deg", "Knee bend at contact"),
+        field(
+            "elbow_contact", pa.float32(), "deg", "Racket elbow angle at contact (180 = straight)"
+        ),
+        field("trunk_lean_contact", pa.float32(), "deg", "Trunk lean from vertical at contact"),
+        field("stance_width_m", pa.float32(), "m", "Feet apart at contact"),
+        field("com_drop_m", pa.float32(), "m", "Pelvis lowered in the preparation"),
+        field("jump_m", pa.float32(), "m", "Pelvis raised at contact vs standing"),
+        field("toss_height_m", pa.float32(), "m", "Serves: tossing hand's highest point"),
+        field("pose_quality", pa.float32(), None, "0-1: keypoint confidence and coverage"),
+        field("n_frames", pa.int32(), None, "Pose frames in the swing window"),
+        field("flags", pa.list_(pa.string()), None, "Quality flags"),
+    ],
+)
+
 SCHEMAS: dict[str, pa.Schema] = {
     "audio_onsets": AUDIO_ONSETS,
     "pass1_frames": PASS1_FRAMES,
@@ -658,4 +804,7 @@ SCHEMAS: dict[str, pa.Schema] = {
     "shots": SHOTS,
     "segments": SEGMENTS,
     "practice": PRACTICE,
+    "pose2d": POSE2D,
+    "pose3d": POSE3D,
+    "swings": SWINGS,
 }

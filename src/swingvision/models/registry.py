@@ -20,6 +20,9 @@ ULTRALYTICS_RELEASES = (
     "https://github.com/ultralytics/assets/releases/download/v8.3.0",
     "https://github.com/ultralytics/assets/releases/download/v0.0.0",
 )
+HF = "https://huggingface.co"
+VITPOSE_REV = "a93ac0c67e0b7e2c55287d21d4c460c8f3c54d45"
+MOTIONBERT_REV = "370a9196aa3c89198b134c82476143b01c0fb32c"
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,31 @@ REGISTRY: dict[str, ModelSpec] = {
             "9ebd0e09d59811db4b1d61e2bc6730649608b1ac47f8dd01e2da6bca7c20023f",
             51.4,
             "Slower; slightly better on small, distant players",
+        ),
+        ModelSpec(
+            name="vitpose-base-simple",
+            filename="vitpose-base-simple.safetensors",
+            urls=(
+                f"{HF}/usyd-community/vitpose-base-simple/resolve/{VITPOSE_REV}/model.safetensors",
+            ),
+            sha256="85375373893ddd3641f3912821073e53f5435f9e966e1dca59d004454bfe4fdf",
+            license="Apache-2.0 (ViTPose, usyd-community on Hugging Face)",
+            task="pose2d (COCO-17, top-down)",
+            description="2D pose on player crops (ViTPose-B, simple decoder, 256×192)",
+            size_mb=343.7,
+        ),
+        ModelSpec(
+            name="motionbert-lite",
+            filename="motionbert-lite-h36m.bin",
+            urls=(
+                f"{HF}/walterzhu/MotionBERT/resolve/{MOTIONBERT_REV}/checkpoint/pose3d/"
+                "FT_MB_lite_MB_ft_h36m_global_lite/best_epoch.bin",
+            ),
+            sha256="9811155371db4ca5d20f31a36a232d41012e12e1333882888a564d741861148f",
+            license="Apache-2.0 (MotionBERT, Zhu et al.)",
+            task="pose3d lifting (H36M-17)",
+            description="2D keypoint sequences to 3D (MotionBERT-Lite, in-the-wild checkpoint)",
+            size_mb=64.1,
         ),
     )
 }

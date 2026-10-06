@@ -1,7 +1,8 @@
 """User overrides layered over derived data (``edits.json``, PLAN.md §9.3).
 
-Derived files are never mutated: stages that honor edits (``practice_eval`` for now) read
-this file and fold its hash into their fingerprint, so an edit reruns just them.
+Derived files are never mutated: stages that honor edits (``swings`` for strokes,
+``practice_eval`` for practice shots) read this file and fold the part they use into their
+fingerprint, so an edit reruns just them (and what depends on them).
 
 Writes use optimistic versioning: :func:`update` takes the version the caller last read
 and refuses to overwrite a newer file (two browser tabs editing the same session).
@@ -12,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from swingvision.storage.fsutil import atomic_write_text
-from swingvision.storage.schemas import PracticeShotEdit, SessionEdits
+from swingvision.storage.schemas import PracticeShotEdit, SessionEdits, SwingEdit
 from swingvision.storage.session import Session
 
 #: An edit applies to the practice shot whose anchor time is within this of its ``t``.
@@ -85,3 +86,27 @@ def set_practice_shot(
     if not e.exclude and e.landing is None and not e.confirmed:
         edits.practice_shots.remove(e)
     edits.practice_shots.sort(key=lambda x: x.t)
+
+
+def swing_edit(edits: SessionEdits, t: float) -> SwingEdit | None:
+    """The stroke correction for the swing whose contact is at ``t``."""
+    best, best_d = None, MATCH_TOL_S
+    for e in edits.swings:
+        d = abs(e.t - t)
+        if d <= best_d:
+            best, best_d = e, d
+    return best
+
+
+def set_swing_stroke(edits: SessionEdits, t: float, stroke: str | None) -> None:
+    """Set (or with ``None`` clear) the user's stroke for the swing at ``t``."""
+    e = swing_edit(edits, t)
+    if stroke is None:
+        if e is not None:
+            edits.swings.remove(e)
+        return
+    if e is None:
+        edits.swings.append(SwingEdit(t=round(t, 3), stroke=stroke))
+    else:
+        e.stroke = stroke
+    edits.swings.sort(key=lambda x: x.t)

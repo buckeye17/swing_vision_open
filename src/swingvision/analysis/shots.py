@@ -6,7 +6,8 @@ calls are against the opponent's singles court, measured to the ball center: a c
 to the line's outer edge is in. Calls closer than ``CLOSE_CALL_SIGMAS`` landing σ are
 flagged ``close_call``.
 
-Stroke type, serve and swing fields stay empty until M6; segments until M5.
+Stroke type, serve and swing fields come from the ``swings`` stage (M6), when the hit has
+the player's pose around it.
 """
 
 from __future__ import annotations
@@ -103,10 +104,16 @@ def assemble_shots(
     flights: pa.Table,
     camera_at: Callable[[float], Camera],
     rejected_hits: set[int] | None = None,
+    swings: pa.Table | None = None,
 ) -> pa.Table:
     """Shots from hit events (minus ``rejected_hits``, which the 3D fits showed weren't the
-    hitter's contact)."""
+    hitter's contact), with the stroke of the player's swing at the hit (M6)."""
     rejected_hits = rejected_hits or set()
+    swing_by_hit = {
+        r["hit_event_id"]: r
+        for r in (swings.to_pylist() if swings is not None else [])
+        if r["hit_event_id"] is not None
+    }
     ev = events.sort_by("t_s").to_pylist()
     by_id = {e["event_id"]: e for e in ev}
     fl_by_start = {
@@ -163,6 +170,8 @@ def assemble_shots(
         if v0 is not None and (v0s is None or v0s > share * v0):
             flags.append("speed_uncertain")
         t_end = land_t if land_t is not None else (f["t1_s"] if f is not None else None)
+        sw = swing_by_hit.get(e["event_id"])
+        stroke = sw["stroke_type"] if sw else None
         rows.append(
             {
                 "shot_id": len(rows),
@@ -197,6 +206,10 @@ def assemble_shots(
                 "flight_time_s": None if t_end is None else float(t_end - e["t_s"]),
                 "outcome": outcome,
                 "fit_rms_px": _num(f["rms_px"]) if f is not None else None,
+                "stroke_type": stroke,
+                "stroke_conf": sw["stroke_conf"] if sw else None,
+                "is_serve": None if stroke is None else stroke == "serve",
+                "swing_id": sw["swing_id"] if sw else None,
                 "quality_flags": flags,
             }
         )

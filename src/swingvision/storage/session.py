@@ -178,6 +178,30 @@ class Session:
         return self.path / "practice.parquet"
 
     @property
+    def pose_dir(self) -> Path:
+        return self.path / "pose"
+
+    @property
+    def pose2d_path(self) -> Path:
+        """2D keypoints in the swing windows (``pass2_pose``), image coordinates."""
+        return self.pose_dir / "pose2d.parquet"
+
+    @property
+    def pose3d_path(self) -> Path:
+        """3D joints on the court (``pose3d``)."""
+        return self.pose_dir / "pose3d.parquet"
+
+    @property
+    def swings_path(self) -> Path:
+        """One row per swing: phases, kinematics, stroke (``swings``)."""
+        return self.pose_dir / "swings.parquet"
+
+    @property
+    def swings_summary_path(self) -> Path:
+        """Racket hand, A/V offset and other session-level swing facts."""
+        return self.pose_dir / "swings.json"
+
+    @property
     def edits_path(self) -> Path:
         """User overrides (PLAN.md §9.3). Never written by the pipeline."""
         return self.path / "edits.json"

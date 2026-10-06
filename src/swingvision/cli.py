@@ -29,6 +29,8 @@ practice_app = typer.Typer(
     no_args_is_help=True, help="Practice sessions: shots, targets, accuracy."
 )
 app.add_typer(practice_app, name="practice")
+swings_app = typer.Typer(no_args_is_help=True, help="Swings: strokes, phases, kinematics.")
+app.add_typer(swings_app, name="swings")
 
 
 @app.command("app")
@@ -395,7 +397,7 @@ def models_list() -> None:
     for spec in REGISTRY.values():
         mark = "yes" if spec.available() else "no "
         typer.echo(
-            f"{spec.name:<10} {mark}  {spec.size_mb:5.1f} MB  {spec.license}  {spec.description}"
+            f"{spec.name:<20} {mark}  {spec.size_mb:5.1f} MB  {spec.license}  {spec.description}"
         )
 
 
@@ -539,6 +541,48 @@ def train_ball_cmd(
     typer.echo(f"Trained {card['name']} on {card['train_frames']} frames")
 
 
+@train_app.command("strokes")
+def train_strokes_cmd(
+    name: Annotated[str, typer.Argument(help="Name of the new stroke model")],
+    epochs: Annotated[int, typer.Option(help="Training epochs")] = 60,
+) -> None:
+    """Train the stroke classifier on labeled swings (training/strokes + Swings-page edits)."""
+    from swingvision import services
+    from swingvision.storage import edits as ed
+    from swingvision.training.stroke_labels import load_labels
+    from swingvision.training.train_strokes import Examples, collect, train_and_save
+
+    settings = load_settings()
+    root = settings.require_output_root()
+    ex = Examples()
+    for row in services.open_library(settings).list_sessions():
+        session = services.session_by_id(settings, row["id"])
+        if session is None or not session.swings_path.exists():
+            continue
+        labels = load_labels(root, row["id"])
+        edits = [(e.t, e.stroke) for e in ed.load(session).swings]
+        if labels is None and not edits:
+            continue
+        n = collect(session, labels, edits, ex)
+        typer.echo(f"{row['id']}: {n} labeled swings")
+    if not len(ex):
+        raise typer.BadParameter("No labeled swings (training/strokes/<id>.json or edits)")
+    path, card = train_and_save(root, name, ex, epochs)
+    cv = card["cross_validation"]
+    for f in cv.get("folds", []):
+        typer.echo(
+            f"  held out {f['session']}: model {f['model_acc']:.1%}, rules {f['rules_acc']:.1%} "
+            f"({f['n']} swings)"
+        )
+    typer.echo(f"Saved {path}: {card['counts']}")
+    typer.echo(
+        "Validated: the swings stage uses it (stroke model 'auto')."
+        if card["validated"]
+        else "Not validated (too few labels or classes, or it doesn't beat the rules on "
+        "held-out sessions): the rules stay in use."
+    )
+
+
 @train_app.command("events")
 def train_events_cmd(
     name: Annotated[str, typer.Argument(help="Name of the new event model")],
@@ -573,6 +617,140 @@ def train_events_cmd(
             f"Not activated: fewer than {MIN_TRAIN_KINKS} kinks; the rules stay in use. "
             "Label hits and bounces on more clips."
         )
+
+
+@swings_app.command("show")
+def swings_show(
+    session_id: str,
+    all_swings: Annotated[bool, typer.Option("--all", help="Also non-strokes (other)")] = False,
+) -> None:
+    """A session's swings: contact, stroke, phases and the main kinematics (M6)."""
+    from swingvision import services
+    from swingvision.pose.strokes import STROKE_LABELS
+    from swingvision.storage import tables
+    from swingvision.storage.fsutil import read_json
+
+    settings = load_settings()
+    session = services.session_by_id(settings, session_id)
+    if session is None or not session.swings_path.exists():
+        raise typer.BadParameter("No swings yet: process the session first")
+    summary = read_json(session.swings_summary_path)
+    typer.echo(
+        f"{summary['swings']} swings, racket hand {summary['racket_hand']} "
+        f"({summary['hand']['source']}), strokes {summary['strokes']}"
+    )
+
+    def num(v, fmt: str) -> str:
+        return "-" if v is None else format(v, fmt)
+
+    for r in tables.read_table(session.swings_path).to_pylist():
+        if r["stroke_type"] in (None, "other") and not all_swings:
+            continue
+        end = {-1: "near", 1: "far"}.get(r["side"], "?")
+        stroke = STROKE_LABELS.get(r["stroke_type"] or "", r["stroke_type"] or "-")
+        typer.echo(
+            f"#{r['swing_id']:<4} {r['t_contact']:8.2f} s  {end:<4} {stroke:<16} "
+            f"{num(r['stroke_conf'], '.2f'):>4} ({r['stroke_source'] or '-'}, contact "
+            f"{r['contact_source']})  prep {num(r['prep_s'], '.2f')} fwd "
+            f"{num(r['forward_s'], '.2f')} follow {num(r['follow_s'], '.2f')} s  wrist "
+            f"{num(r['wrist_speed_peak'], '.1f')} m/s  contact {num(r['contact_height_m'], '.2f')} m"
+            f"  {' '.join(r['flags'] or [])}"
+        )
+
+
+@swings_app.command("eval")
+def swings_eval(
+    session_ids: Annotated[
+        list[str] | None, typer.Argument(help="Sessions (default: every labeled one)")
+    ] = None,
+    include_dark: Annotated[
+        bool, typer.Option(help="Also score swings flagged dark (dusk)")
+    ] = False,
+) -> None:
+    """Score strokes, contact timing and phase consistency against labeled strokes
+    (training/strokes/<id>.json; M6 exit criteria)."""
+    import numpy as np
+
+    from swingvision import services
+    from swingvision.storage import tables
+    from swingvision.training.stroke_labels import STROKE_DIR, SideReport, evaluate, load_labels
+
+    settings = load_settings()
+    root = settings.require_output_root()
+    if not session_ids:
+        d = root / "training" / STROKE_DIR
+        session_ids = sorted(p.stem for p in d.glob("*.json")) if d.exists() else []
+    if not session_ids:
+        raise typer.BadParameter("No labeled sessions (training/strokes/<id>.json)")
+    total = {"near": SideReport(), "far": SideReport()}
+    exclude = frozenset() if include_dark else frozenset({"dark"})
+    for sid in session_ids:
+        labels = load_labels(root, sid)
+        session = services.session_by_id(settings, sid)
+        if labels is None or session is None or not session.swings_path.exists():
+            typer.echo(f"{sid}: no labels, session or swings")
+            continue
+        config = session.load_config()
+        events = tables.read_table(session.events_path).to_pylist()
+        rep = evaluate(
+            tables.read_table(session.swings_path),
+            labels,
+            config.video.fps_avg if config.video else 60.0,
+            hit_times={e["event_id"]: e["t_s"] for e in events},
+            exclude_flags=exclude,
+        )
+        for side in ("near", "far"):
+            r, t = rep[side], total[side]
+            t.strokes += r.strokes
+            t.strokes_correct += r.strokes_correct
+            t.others += r.others
+            t.others_correct += r.others_correct
+            t.contact_errors += r.contact_errors
+            t.contact_errors_audio += r.contact_errors_audio
+            for truth, row in r.confusion.items():
+                for pred, n in row.items():
+                    t.confusion.setdefault(truth, {})
+                    t.confusion[truth][pred] = t.confusion[truth].get(pred, 0) + n
+            if r.total:
+                typer.echo(
+                    f"{sid} {side}: strokes {r.strokes_correct}/{r.strokes}, other "
+                    f"{r.others_correct}/{r.others} -> {r.accuracy:.1%}"
+                )
+        for key, g in rep["phases"].items():
+            parts = [
+                f"{ph} {g[ph]['median_s']:.2f} s (CV {g[ph]['cv']:.0%}, n={g[ph]['n']})"
+                for ph in ("prep_s", "forward_s", "follow_s")
+                if ph in g and g[ph]["cv"] is not None
+            ]
+            order = "-" if g["in_order"] is None else f"{g['in_order']:.0%}"
+            typer.echo(f"  phases {key} (n={g['n']}, in order {order}): " + "; ".join(parts))
+    targets = {"near": 0.90, "far": 0.80}
+    for side, r in total.items():
+        if not r.total:
+            continue
+        ok = r.accuracy >= targets[side]
+        typer.echo(
+            f"{'PASS' if ok else 'FAIL'}  {side}: {r.accuracy:.1%} (>= {targets[side]:.0%}) "
+            f"over {r.strokes} strokes and {r.others} other swings"
+        )
+        for truth, row in sorted(r.confusion.items()):
+            typer.echo(
+                f"    {truth:<8} -> " + ", ".join(f"{k} {v}" for k, v in sorted(row.items()))
+            )
+        e = np.abs(np.array(r.contact_errors))
+        if len(e):
+            within = float(np.mean(e <= 2))
+            typer.echo(
+                f"{'PASS' if within >= 0.9 else 'FAIL'}  {side} contact from the pose: "
+                f"{within:.0%} within ±2 frames of the hit (median {np.median(e):.0f}, "
+                f"n={len(e)})"
+            )
+        a = np.abs(np.array(r.contact_errors_audio))
+        if len(a):
+            typer.echo(
+                f"      {side} contact from the pose vs the impact sound (unseen contacts): "
+                f"{np.mean(a <= 2):.0%} within ±2 frames (median {np.median(a):.0f}, n={len(a)})"
+            )
 
 
 @app.command("eval")

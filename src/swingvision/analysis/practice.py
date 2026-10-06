@@ -7,8 +7,8 @@ from both ends.
 
 **Targets** are drawn on the court diagram. ``relative`` targets (the default) are drawn in
 the hitter's frame and follow the player when they change ends; ``absolute`` targets stay
-where they were drawn. A target with a stroke list only applies to those strokes: until M6
-classifies strokes, only ``serve`` is known (from the shot's kind).
+where they were drawn. A target with a stroke list only applies to those strokes: the stroke
+of the shot's swing (classified from the pose, M6), or ``serve`` for a serve without one.
 
 **Calls**: serves against the service box diagonal from the server's side (deuce/ad), other
 shots against the opponent's singles court, both with the ball center allowed up to the
@@ -40,8 +40,6 @@ STROKE_LABELS: dict[str, str] = {
     "backhand_volley": "Backhand volley",
     "overhead": "Overhead",
 }
-#: Strokes a target filter can use before stroke classification (M6).
-KNOWN_STROKES = frozenset({"serve"})
 KIND_LABELS = {"serve": "Serve", "groundstroke": "Groundstroke", "unknown": "Shot"}
 CALLED = ("in", "out_long", "out_wide", "net")
 CLOSE_CALL_SIGMAS = 2.0
@@ -188,7 +186,7 @@ def evaluate(
         ed = practice_shot_edit(edits, anchor_time(seg))
         flags = list(seg["flags"] or [])
         side, kind = seg["side"], seg["shot_kind"]
-        stroke = shot["stroke_type"] if shot else None
+        stroke = seg.get("stroke_type") or (shot["stroke_type"] if shot else None)
         lx, ly = _num(seg["landing_x"]), _num(seg["landing_y"])
         sigma, source = _num(seg["landing_sigma_m"]), seg["landing_source"]
         confirmed = bool(ed and ed.confirmed)
@@ -386,7 +384,8 @@ def breakdown(rows: list[dict]) -> list[tuple[str, dict]]:
             k += f" ({r['serve_side']})"
         groups.setdefault(k, []).append(r)
         if r["stroke_type"]:
-            groups.setdefault(STROKE_LABELS.get(r["stroke_type"], r["stroke_type"]), []).append(r)
+            label = STROKE_LABELS.get(r["stroke_type"], r["stroke_type"].capitalize())
+            groups.setdefault(f"Stroke: {label}", []).append(r)
         band = speed_band(r["speed_kmh"])
         if band and "speed_uncertain" not in (r["flags"] or []):
             groups.setdefault(f"{band} km/h", []).append(r)

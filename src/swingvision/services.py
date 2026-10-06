@@ -217,7 +217,7 @@ def set_session_player(settings: AppSettings, session_id: str, profile_id: str |
 # ---------------------------------------------------------------------------
 
 #: Stages cheap enough for the app to run itself after an edit (seconds, CPU).
-CHEAP_STAGES = frozenset({"segments", "practice_eval"})
+CHEAP_STAGES = frozenset({"swings", "shots", "segments", "practice_eval"})
 
 
 def set_practice(
@@ -244,7 +244,8 @@ def set_practice(
 
 
 def refresh_practice(settings: AppSettings, session_id: str) -> tuple[str, int | None]:
-    """Bring ``segments`` and ``practice_eval`` up to date after an edit.
+    """Bring ``segments`` and ``practice_eval`` (and the swings and shots they read) up to
+    date after an edit.
 
     Runs them right here when nothing heavier is stale (``"ran"``); otherwise queues a job
     (``"queued"``, job id). ``"busy"``: the session is being processed, and the change is
@@ -262,16 +263,18 @@ def refresh_practice(settings: AppSettings, session_id: str) -> tuple[str, int |
     if session is None:
         raise ValueError(f"Unknown session {session_id}")
     registry = default_registry()
-    planned = plan(registry, session, session.load_config(), settings, ["practice_eval"])
+    config = session.load_config()
+    target = "practice_eval" if config.mode == "practice" else "shots"
+    planned = plan(registry, session, config, settings, [target])
     stale = {p.stage.name for p in planned if not p.fresh}
     if not stale:
         return "ran", None
     if stale <= CHEAP_STAGES:
-        result = run(registry, session, settings, targets=["practice_eval"])
+        result = run(registry, session, settings, targets=[target])
         if result.status != "done":
-            raise RuntimeError(result.message or "Practice evaluation failed")
+            raise RuntimeError(result.message or "Updating the session failed")
         return "ran", None
-    return "queued", enqueue(settings, session_id, targets=["practice_eval"])
+    return "queued", enqueue(settings, session_id, targets=[target])
 
 
 def edit_practice_shot(
@@ -297,6 +300,22 @@ def edit_practice_shot(
         ),
         expected_version,
     )
+
+
+def edit_swing_stroke(
+    settings: AppSettings,
+    session_id: str,
+    t: float,
+    stroke: str | None,
+    expected_version: int | None = None,
+) -> SessionEdits:
+    """Set (``None``: clear) the user's stroke for the swing whose contact is at ``t``."""
+    from swingvision.storage import edits
+
+    session = session_by_id(settings, session_id)
+    if session is None:
+        raise ValueError(f"Unknown session {session_id}")
+    return edits.update(session, lambda e: edits.set_swing_stroke(e, t, stroke), expected_version)
 
 
 def _target_set(row: dict) -> TargetSet:

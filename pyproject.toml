@@ -29,6 +29,8 @@ dependencies = [
     "ultralytics>=8.3",
     "av>=14.0",
     "opencv-python>=4.10",
+    "transformers>=4.48",
+    "safetensors>=0.4",
 ]
 
 [project.optional-dependencies]

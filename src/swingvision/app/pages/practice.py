@@ -87,6 +87,17 @@ def layout(session_id: str | None = None, **_):
                 ),
                 href=f"/session/{config.id}",
             ),
+            dmc.Anchor(
+                dmc.Button(
+                    "Swings",
+                    variant="default",
+                    size="sm",
+                    leftSection=icon("tabler:ball-tennis", 16),
+                ),
+                href=f"/swings/{config.id}",
+            )
+            if session.swings_path.exists()
+            else None,
             dmc.Select(
                 id="pr-submode",
                 value=config.practice.submode,

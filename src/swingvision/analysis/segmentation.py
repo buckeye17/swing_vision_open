@@ -134,6 +134,10 @@ class SegParams:
     av_offset_max_s: float = 0.2
     av_offset_min_hits: int = 8
     av_offset_isolation_s: float = 0.35
+    #: A shot without a swing at its hit takes the nearest swing this close (s), and a
+    #: swing stroke this confident decides an unclear shot kind (M6).
+    swing_match_s: float = 0.3
+    pose_kind_conf: float = 0.75
 
     def as_config(self) -> dict:
         return asdict(self)
@@ -163,6 +167,9 @@ class SegInputs:
     camera_xyz: np.ndarray | None = None
     #: σ (m) of a landing at (x, y, t); ``None`` leaves it empty.
     landing_sigma: Callable[[float, float, float], float | None] | None = None
+    #: The player's swings (``swings``, M6): each shot gets the stroke of its swing, and a
+    #: confident pose-based serve or groundstroke decides an unclear shot kind.
+    swings: pa.Table | None = None
 
 
 @dataclass
@@ -187,6 +194,9 @@ class _Shot:
     feed_event_id: int | None = None
     kind: str = "unknown"
     serve_side: str | None = None
+    swing_id: int | None = None
+    stroke: str | None = None
+    stroke_conf: float | None = None
     block_id: int = 0
     start_t: float = 0.0
     end_t: float = 0.0
@@ -253,16 +263,35 @@ def av_offset(
 ) -> float:
     """Audio minus video lag (s): the most common gap between a hit's (delay-compensated)
     time and the loudest onset within ``max_s`` of it. 0 with too few hits."""
+    gaps = av_gaps(hit_t, hit_delay, onsets_t, onsets_s, -max_s, max_s, min_strength)
+    if len(gaps) < min_hits:
+        return 0.0
+    return offset_from_gaps(gaps, max_s)
+
+
+def av_gaps(
+    t_video: np.ndarray,
+    delay: np.ndarray,
+    onsets_t: np.ndarray,
+    onsets_s: np.ndarray,
+    lo_s: float,
+    hi_s: float,
+    min_strength: float = 10.0,
+) -> np.ndarray:
+    """For each contact seen at ``t_video`` (plus the sound's travel ``delay``): the gap to the
+    loudest onset from ``lo_s`` to ``hi_s`` after it, when that onset is strong enough."""
     gaps = []
-    for t, dl in zip(hit_t, hit_delay, strict=True):
-        lo, hi = np.searchsorted(onsets_t, [t + dl - max_s, t + dl + max_s])
+    for t, dl in zip(t_video, delay, strict=True):
+        lo, hi = np.searchsorted(onsets_t, [t + dl + lo_s, t + dl + hi_s])
         if hi > lo:
             k = lo + int(np.argmax(onsets_s[lo:hi]))
             if onsets_s[k] >= min_strength:
                 gaps.append(onsets_t[k] - t - dl)
-    if len(gaps) < min_hits:
-        return 0.0
-    g = np.asarray(gaps)
+    return np.asarray(gaps, dtype=np.float64)
+
+
+def offset_from_gaps(g: np.ndarray, max_s: float) -> float:
+    """The mode of audio/video gaps (10 ms bins), refined by the median of those near it."""
     h, edges = np.histogram(g, bins=np.arange(-max_s, max_s + 1e-9, 0.01))
     mode = edges[int(np.argmax(h))] + 0.005
     near = g[np.abs(g - mode) <= 0.03]
@@ -544,6 +573,7 @@ def segment_practice(inp: SegInputs, p: SegParams | None = None) -> tuple[pa.Tab
     if use_audio:
         shots += _audio_only(shots, events, my_hits, player, on_t, on_s, offset, toss, inp, p)
     shots.sort(key=lambda s: s.t_contact)
+    _attach_swings(shots, _rows(inp.swings), p)
     _feeds_and_kinds(shots, events, player, inp.submode, p)
     blocks = _blocks(shots, p)
     _fill_kinds(blocks, player, p)
@@ -685,16 +715,21 @@ def _feeds_and_kinds(
         xy = player.at(t)
         behind = None if xy is None else abs(xy[1]) >= p.serve_behind_m
         high = _finite(s.contact_height) and s.contact_height >= p.serve_height_m  # type: ignore[operator]
+        posed = _pose_kind(s, p)
         if submode == "serve":
             s.kind = "serve"
         elif submode == "ball_machine":
-            s.kind = "groundstroke" if bounced else "unknown"
+            s.kind = "groundstroke" if bounced or posed == "groundstroke" else "unknown"
         elif bounced:
             s.kind = "groundstroke"
-        elif behind is not False and (high or n_dribble >= 2 or "toss" in s.flags):
-            s.kind = "serve"  # a toss, a high contact, or pre-serve dribbling
+        elif behind is not False and (
+            high or n_dribble >= 2 or "toss" in s.flags or posed == "serve"
+        ):
+            s.kind = "serve"  # a toss, a high contact, pre-serve dribbling, a serve's pose
         elif behind is not False and _fast_into_box(s, p):
             s.kind = "serve"  # unseen hitter, but a fast ball into a service box
+        elif posed is not None:
+            s.kind = posed
         if feeds:
             s.feed_kind = "machine"
             s.feed_event_id = feeds[-1]["event_id"]
@@ -705,6 +740,29 @@ def _feeds_and_kinds(
         else:
             s.feed_kind = "none"
         prev_end = s.t_end if s.t_end is not None else t + 0.3
+
+
+def _attach_swings(shots: list[_Shot], swings: list[dict], p: SegParams) -> None:
+    """Each shot's swing: the one at its hit, else the nearest within ``swing_match_s``."""
+    by_hit = {w["hit_event_id"]: w for w in swings if w["hit_event_id"] is not None}
+    for s in shots:
+        w = by_hit.get(s.hit_event_id) if s.hit_event_id is not None else None
+        if w is None:
+            near = [x for x in swings if abs(x["t_contact"] - s.t_contact) <= p.swing_match_s]
+            w = min(near, key=lambda x: abs(x["t_contact"] - s.t_contact)) if near else None
+        if w is not None:
+            s.swing_id, s.stroke, s.stroke_conf = w["swing_id"], w["stroke_type"], w["stroke_conf"]
+
+
+def _pose_kind(s: _Shot, p: SegParams) -> str | None:
+    """``serve`` / ``groundstroke`` from a confident stroke of the shot's swing."""
+    if s.stroke is None or (s.stroke_conf or 0.0) < p.pose_kind_conf:
+        return None
+    if s.stroke == "serve":
+        return "serve"
+    if s.stroke in ("forehand", "backhand"):
+        return "groundstroke"
+    return None
 
 
 def _fill_kinds(blocks: list[list[_Shot]], player: _Player, p: SegParams) -> None:
@@ -820,6 +878,9 @@ def _table(shots: list[_Shot], blocks: list[list[_Shot]]) -> pa.Table:
                 "side": s.side,
                 "shot_kind": s.kind,
                 "serve_side": s.serve_side,
+                "swing_id": s.swing_id,
+                "stroke_type": s.stroke,
+                "stroke_conf": s.stroke_conf,
                 "conf": s.conf,
                 "flags": s.flags,
             }

@@ -43,14 +43,7 @@ PRESETS: dict[str, dict] = {
     "Deep left corner": {"x0": -_HS, "y0": _HL - 3.0, "x1": -_HS + 2.5, "y1": _HL},
     "Deep right corner": {"x0": _HS - 2.5, "y0": _HL - 3.0, "x1": _HS, "y1": _HL},
 }
-STROKE_OPTIONS = [
-    {
-        "value": k,
-        "label": v + ("" if k in pr.KNOWN_STROKES else " (M6)"),
-        "disabled": k not in pr.KNOWN_STROKES,
-    }
-    for k, v in pr.STROKE_LABELS.items()
-]
+STROKE_OPTIONS = [{"value": k, "label": v} for k, v in pr.STROKE_LABELS.items()]
 #: Shapes the court itself draws before any target (court_figure's surface and lines).
 N_COURT_SHAPES = len(court_figure().layout.shapes)
 

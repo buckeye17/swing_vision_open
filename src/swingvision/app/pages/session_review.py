@@ -29,6 +29,7 @@ from plotly.subplots import make_subplots
 from swingvision import services
 from swingvision.app import state
 from swingvision.app.components import practice_view as pv
+from swingvision.app.components import swings_view as sw_view
 from swingvision.app.components.ball_view import (
     BOUNCE_COLOR,
     HIT_COLOR,
@@ -520,6 +521,7 @@ def layout(session_id: str | None = None, **_):
             ),
             html.Div(id="review-box", style={"display": "none"}),
             html.Img(id="review-ball", src="", style={"display": "none"}),
+            html.Img(id="review-skel-img", src="", style={"display": "none"}),
             html.Img(id="review-shotpath", src="", style={"display": "none"}),
             html.Div(id="review-shot-label", style={"display": "none"}),
         ],
@@ -536,9 +538,21 @@ def layout(session_id: str | None = None, **_):
         if config.practice
         else None
     )
+    swings_button = (
+        dmc.Anchor(
+            dmc.Button(
+                "Swings", variant="light", size="sm", leftSection=icon("tabler:ball-tennis", 16)
+            ),
+            href=f"/swings/{config.id}",
+        )
+        if session.swings_path.exists()
+        else None
+    )
+    has_pose = session.pose2d_path.exists() and video is not None and has_proxy
     header_right = dmc.Group(
         [
             practice_button,
+            swings_button,
             dmc.Anchor(
                 dmc.Button(
                     "Calibrate", variant="default", size="sm", leftSection=icon("tabler:target", 16)
@@ -565,6 +579,8 @@ def layout(session_id: str | None = None, **_):
             dcc.Store(id="review-seg-starts", data=seg_starts),
             dcc.Store(id="review-seg-times", data=seg_times),
             dcc.Store(id="review-sink"),
+            dcc.Store(id="review-skel-key"),
+            dcc.Store(id="review-skel"),
             dmc.Grid(
                 [
                     dmc.GridCol(
@@ -598,6 +614,13 @@ def layout(session_id: str | None = None, **_):
                                                     size="xs",
                                                     checked=ball is not None,
                                                     disabled=ball is None,
+                                                ),
+                                                dmc.Switch(
+                                                    id="review-skel-on",
+                                                    label="Skeleton",
+                                                    size="xs",
+                                                    checked=False,
+                                                    disabled=not has_pose,
                                                 ),
                                                 dmc.Switch(
                                                     id="review-shot-on",
@@ -1079,4 +1102,52 @@ clientside_callback(
     Input({"type": "review-seg-row", "index": ALL}, "n_clicks"),
     State("review-seg-times", "data"),
     prevent_initial_call=True,
+)
+
+
+# Skeleton overlay: the browser asks for the pose of the 8 s block it's playing in (a block
+# key changes only when playback leaves the block), the server sends that block's keypoints.
+clientside_callback(
+    """
+    function(t, on) {
+        if (!on) { return null; }
+        const k = Math.floor(((t && t.t) || 0) / SKEL_BLOCK_S);
+        return k;
+    }
+    """.replace("SKEL_BLOCK_S", "8"),
+    Output("review-skel-key", "data"),
+    Input("review-time", "data"),
+    Input("review-skel-on", "checked"),
+)
+
+
+@callback(
+    Output("review-skel", "data"),
+    Input("review-skel-key", "data"),
+    State("review-session-id", "data"),
+    prevent_initial_call=True,
+)
+def _skeleton_block(key, session_id):
+    if key is None:
+        return None
+    found = state.session_for(session_id or "")
+    if found is None:
+        return no_update
+    session = found[2]
+    video = session.load_config().video
+    if video is None:
+        return no_update
+    t0 = key * 8.0
+    return sw_view.skeleton_store(
+        session, t0 - 0.5, t0 + 8.5, video.display_width, video.display_height
+    )
+
+
+clientside_callback(
+    sw_view.SKELETON_JS,
+    Output("review-skel-img", "src"),
+    Output("review-skel-img", "style"),
+    Input("review-time", "data"),
+    Input("review-skel", "data"),
+    Input("review-skel-on", "checked"),
 )

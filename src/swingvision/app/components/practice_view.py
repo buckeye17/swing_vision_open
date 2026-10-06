@@ -126,8 +126,16 @@ def result_label(r: dict) -> str:
     return o
 
 
+def kind_label(r: dict) -> str:
+    """The shot's kind, or its stroke when the pose says more (forehand, backhand, …)."""
+    stroke = r.get("stroke_type")
+    if stroke in pr.STROKE_LABELS and stroke != "serve":
+        return pr.STROKE_LABELS[stroke]
+    return pr.KIND_LABELS.get(r["shot_kind"], "Shot")
+
+
 def shot_title(r: dict) -> str:
-    kind = pr.KIND_LABELS.get(r["shot_kind"], "Shot")
+    kind = kind_label(r)
     if r["serve_side"]:
         kind += f" ({r['serve_side']})"
     end = {-1: "near", 1: "far"}.get(r["side"], "?")
@@ -462,10 +470,7 @@ def shots_table(rows: list[dict], selected: int | None, has_targets: bool):
                     html.Td(str(i + 1)),
                     html.Td(fmt_t(r["t_contact"])),
                     html.Td(str(r["block_id"] + 1)),
-                    html.Td(
-                        pr.KIND_LABELS.get(r["shot_kind"], "Shot")
-                        + (f" ({r['serve_side']})" if r["serve_side"] else "")
-                    ),
+                    html.Td(kind_label(r) + (f" ({r['serve_side']})" if r["serve_side"] else "")),
                     html.Td(
                         dmc.Badge(
                             result_label(r),

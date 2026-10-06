@@ -84,8 +84,8 @@ class Ball3DStage(Stage):
 class ShotsStage(Stage):
     name = "shots"
     title = "Shots"
-    version = 1
-    depends_on = ("ball_3d", "events", "camera")
+    version = 2
+    depends_on = ("ball_3d", "events", "camera", "swings")
     weight = 0.2
 
     def config(self, session, config, settings):
@@ -113,6 +113,7 @@ class ShotsStage(Stage):
             tables.read_table(session.ball_flights_path),
             _camera_at(cal),
             rejected_hits=set(summary.get("rejected_hits", [])),
+            swings=tables.read_table(session.swings_path) if session.swings_path.exists() else None,
         )
         tables.write_table(shots, session.shots_path, SHOTS)
         speeds = [v for v in shots.column("speed_racket_kmh").to_pylist() if v is not None]

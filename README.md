@@ -4,7 +4,7 @@ A personal, local-first tennis video analysis tool. Point a fixed camera at the 
 a practice or a match, and let your NVIDIA GPU break the footage down. The roadmap and
 architecture are in [PLAN.md](PLAN.md).
 
-**Status: milestones M0–M5 are complete: practice mode is usable.** The app ingests footage, builds a
+**Status: milestones M0–M6 are complete: practice mode is usable, with swing analysis.** The app ingests footage, builds a
 browser-playable proxy, detects audio onsets, finds the court and fits a full camera model
 (sub-pixel on real footage), checks whether the camera moved during the recording, and lets
 you review the calibration. It tracks you on the court (also at dusk) and reports your
@@ -13,7 +13,9 @@ with a detector trained on your own labeled footage and finds hits, bounces (wit
 on the court) and net contacts. Every shot gets a 3D flight: speed off the racket, at the net
 and before the bounce, net clearance, height, landing spot and line call. Practice sessions
 are cut into one clip per shot (feed, hit, landing), grouped into blocks, and scored against
-targets you draw on the court. Swing analysis and match scoring arrive in M6–M10.
+targets you draw on the court. Every swing gets a 2D and 3D pose, its phases (preparation,
+forward swing, follow-through), body kinematics and a stroke type. Match scoring arrives in
+M8–M10.
 
 ## Requirements
 
@@ -157,8 +159,8 @@ box; pick *Serve practice* to treat every shot as a serve.
 the Practice page), or add presets (service boxes, T and wide corners, deep zones), and save
 them as named target sets. Targets are *relative* by default: you draw them as if hitting
 from the near end, and they follow you when you play from the other end. *Absolute* targets
-stay where they are drawn. A target can be limited to serves (other stroke types arrive with
-stroke classification in M6).
+stay where they are drawn. A target can be limited to some strokes (serves, forehands, …:
+the stroke recognized from your pose, see below).
 
 The **Practice** page (button on the session page, link in the Library) shows the video with
 the targets drawn in, where every ball landed ("as you hit" or on the court; click one to
@@ -174,12 +176,46 @@ found and clipped correctly (98.1%) with no false clips, and every target hit/mi
 with the targets projected into the video. Details in
 [docs/m5-practice.md](docs/m5-practice.md).
 
+### Swings: pose, phases, strokes
+
+Around every hit and every impact sound, the worker runs a pose network on the full-resolution
+crop of you (ViTPose, ≈15 GPU-minutes per footage hour), lifts the 2D skeleton to 3D
+(MotionBERT), scales it to your height and places it on the court. From that it finds your
+swings — also those whose ball the tracker missed — and measures them:
+
+* **Racket hand** from the pose (the hand that swings up fast over your head; your profile's
+  handedness only decides when the footage shows too little).
+* **Stroke**: serve, forehand, backhand, forehand/backhand volley, overhead, or *other*
+  (dribbling the ball on the racket, the toss, picking up balls, shadow swings).
+* **Phases**: preparation (unit turn, or the toss for a serve), split step, backswing end
+  (racket drop for a serve), contact, follow-through and recovery, with their durations.
+* **Kinematics**: contact height and position relative to your body, racket-wrist speed,
+  shoulder and hip turn, hip-shoulder separation, knee bend, elbow angle, trunk lean, stance,
+  jump, toss height, and whether hips → trunk → elbow → wrist peaked in order.
+
+The **Swings** page (button on the session and Practice pages) lists the swings (filter by
+stroke and end), plays the selected one with the skeleton drawn over the video, shows it as
+an animated 3D skeleton on the court with a phase slider, plots the joint angles and the
+wrist speed around the contact with the phases shaded, and compares it with another swing or
+your average for that stroke. If a stroke is wrong, pick the right one there: shots and
+practice results update, and the correction becomes a training example for
+`uv run sv train strokes my-model` (the learned classifier replaces the rules only once it
+beats them on sessions it didn't learn from). The session page has a *Skeleton* switch and
+the stroke of each shot.
+
+Accuracy, on the two serve-practice sessions (serves vs. everything else; no groundstroke
+footage yet): 97.1% of swings right for the near player, 86.6% for the far one in daylight
+(80.4% including dusk); the contact found from the pose alone was within 2 frames of the ball
+hit on every seen hit (39 near, only 3 far). Depth along the camera's line of sight is the least certain part of a single-camera 3D
+pose, especially for the far player: compare swings with your own rather than with absolute
+norms. Details in [docs/m6-swings.md](docs/m6-swings.md).
+
 ### Profiles
 
 Create a profile for yourself on **Profiles** (name, handedness, one- or two-handed
-backhand, height) and pick it when creating a session (or on the session page). Handedness
-and backhand drive stroke classification later; height places you correctly when your feet
-are out of frame and scales the 3D swing analysis.
+backhand, height) and pick it when creating a session (or on the session page). Height
+places you correctly when your feet are out of frame and scales the 3D swing analysis;
+handedness is the fallback when the footage doesn't show which hand holds the racket.
 
 ## CLI
 
@@ -205,6 +241,9 @@ uv run python scripts/m4_validate_speed.py <session-dir>   # speed-scale checks 
 uv run sv practice show <session-id>   # practice blocks and shots: call, target, speed
 uv run sv practice eval                # segmentation vs shots labeled by eye (M5 target: 95%)
 uv run python scripts/m5_check_targets.py <session-id> --sets builtin  # target check in the image
+uv run sv swings show <session-id>     # strokes, phases, wrist speed (--all: also non-strokes)
+uv run sv swings eval                  # strokes, contact timing, phase spread vs labels (M6)
+uv run sv train strokes my-strokes     # learned stroke classifier from labels + corrections
 ```
 
 ## Recording tips
@@ -219,6 +258,8 @@ uv run python scripts/m5_check_targets.py <session-id> --sets builtin  # target 
 * Leave room at the top of the picture (some sky above the far baseline): a serve's toss and
   contact that go out of the top of the frame can only be found from where the ball lands
   and the sound of the hit, and get no speed.
+* Keep yourself in the picture, head to toe, at both ends: swing analysis needs to see you
+  (a serve whose arm leaves the top of the frame is still recognized, but less reliably).
 * Don't touch the camera once you start recording. (If you do, the drift check notices and
   calibrates those minutes separately, but it's better not to.)
 
@@ -246,7 +287,8 @@ src/swingvision/
   ball/              ball detectors, frame-rate schedules, linking, events (M3),
                      3D flight physics and fitting (M4)
   analysis/          shot records (M4); practice segmentation, targets, accuracy (M5)
-  training/          labels, labeling helpers, training, benchmark, evaluation (M3)
+  pose/              2D pose, 3D lifting and placement, kinematics, swings, strokes (M6)
+  training/          labels, labeling helpers, training, benchmark, evaluation (M3, M6)
   models/            pretrained weights registry (URLs, SHA-256, licenses)
   pipeline/          stage framework, DAG runner, worker process, stages/
   app/               Dash + Mantine UI (pages/, components/, assets/)

@@ -16,6 +16,7 @@ from dash import dcc, html
 from swingvision.analysis.shots import SPEED_SCALE_ERROR, speed_error_kmh, speed_error_text
 from swingvision.court import calibration as calib
 from swingvision.court import model as court_model
+from swingvision.pose.strokes import STROKE_LABELS
 from swingvision.storage import tables
 from swingvision.storage.schemas import Calibration
 
@@ -38,6 +39,16 @@ OUTCOME_LABELS = {
 #: A shot stays "current" this long after it lands (or its flight ends).
 LINGER_S = 1.5
 PATH_COLOR = "#ff922b"
+
+STROKE_SHORT = {
+    "serve": "Serve",
+    "forehand": "FH",
+    "backhand": "BH",
+    "forehand_volley": "FH volley",
+    "backhand_volley": "BH volley",
+    "overhead": "Overhead",
+    "other": "–",
+}
 
 
 def load_shots(session) -> tuple[pa.Table | None, pa.Table | None]:
@@ -189,6 +200,7 @@ def shots_table(shots: pa.Table | None):
             html.Tr(
                 [
                     html.Td(_fmt_t(r["t_contact"])),
+                    html.Td(STROKE_SHORT.get(r.get("stroke_type") or "", "–")),
                     html.Td(speed, style={"textAlign": "right"}),
                     html.Td(
                         dmc.Badge(
@@ -212,6 +224,7 @@ def shots_table(shots: pa.Table | None):
         html.Tr(
             [
                 html.Th("Time"),
+                html.Th("Stroke"),
                 html.Th("km/h", style={"textAlign": "right"}),
                 html.Th("Landing"),
                 html.Th("Net m", style={"textAlign": "right"}),
@@ -305,8 +318,11 @@ def shot_detail(r: dict | None):
     o = r["outcome"]
     speed = _speed_pm(r)
     spin = {1: "topspin", -1: "slice/backspin", 0: "no clear spin"}.get(r["spin_sign"], "–")
+    stroke = STROKE_LABELS.get(r.get("stroke_type") or "")
     parts = [
-        f"{_fmt_t(r['t_contact'])} · {speed} km/h off the racket",
+        f"{_fmt_t(r['t_contact'])} · "
+        + (f"{stroke} · " if stroke else "")
+        + f"{speed} km/h off the racket",
         f"net {kmh(r['speed_net_kmh'])} · before bounce {kmh(r['speed_bounce_kmh'])} km/h"
         + (
             f" · ± is the uncalibrated error ({SPEED_SCALE_ERROR:.0%} + 2× fit σ "

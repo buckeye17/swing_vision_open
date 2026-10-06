@@ -20,6 +20,7 @@ PAGE_MODULES = [
     "jobs",
     "session_review",
     "practice",
+    "swings",
     "calibrate",
     "profiles",
     "labeling",

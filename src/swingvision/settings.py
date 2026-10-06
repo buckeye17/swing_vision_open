@@ -73,6 +73,17 @@ class ProcessingDefaults(BaseModel):
     ball_sweep_hz: float | None = None
     ball_refine_before_s: float = 0.25
     ball_refine_after_s: float = 0.35
+    #: 2D pose (``pass2_pose``): every frame from ``pose_before_s`` before to
+    #: ``pose_after_s`` after each of the player's hits and each impact sound at least
+    #: ``pose_onset_z`` strong (unseen contacts), on the player's box.
+    pose_model: str = "vitpose-base-simple"
+    pose_before_s: float = 1.8
+    pose_after_s: float = 1.2
+    pose_onset_z: float = 15.0
+    pose_flip_test: bool = True
+    #: Stroke classifier: ``auto`` (the newest trained model that beat the rules on held-out
+    #: swings, else the rules), ``rules``, or a model name (``sv train strokes``).
+    stroke_model: str = "auto"
 
 
 class AppSettings(BaseModel):

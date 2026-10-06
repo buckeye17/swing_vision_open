@@ -104,8 +104,8 @@ Cross-session trends (`pyarrow.dataset`), annotated proxy render, TensorRT/perfo
 | Re-ID | OSNet embeddings (via `boxmot` weights) | Appearance profile gallery. |
 | Ball detection | ✅ **Slim** TrackNet-style heatmap U-Net (frames t−2, t, t+2; width 32; heatmap at ½ input), trained on own labels at 1920 px wide (half of 4K); a classical motion detector (no training) and a COCO YOLO's sports-ball class as alternatives | M0 spike: a TrackNet-size net at 1280×720 runs at only 20 fps, the slim variant at 190. M3: 1920 px is needed for the far ball; see `docs/m3-ball-tracking.md` for the benchmark. |
 | Court keypoints | ✅ Classical line detector: white top-hat → Hough → court-model hypothesis search → sub-pixel ridge refinement + full camera fit | M1: needs no training data and handles low corner cameras, wide lenses, partly visible courts, pickleball lines and neighboring courts. A keypoint CNN fine-tuned on confirmed calibrations stays an option if a view ever defeats it. See `docs/m1-court-calibration.md`. |
-| 2D pose | ViTPose (HF `transformers` `VitPoseForPoseEstimation`) on 4K player crops | Pure torch. RTMPose via `rtmlib` is the alternative. |
-| 3D lifting | MotionBERT (vendored model code, Apache-2.0) | COCO-17 → H36M-17 joint mapping. |
+| 2D pose | ✅ ViTPose-B (HF `transformers` `VitPoseForPoseEstimation`, simple decoder) on 4K player crops, FP16 + flip test | M6: ≈110–150 crops/s with decode; weights pinned by SHA-256 in the registry. RTMPose via `rtmlib` stays the alternative. |
+| 3D lifting | ✅ MotionBERT-Lite (vendored DSTformer, Apache-2.0, in-the-wild checkpoint) | COCO-17 → H36M-17 joint mapping; confident joints snapped back onto their 2D rays (M6, see `docs/m6-swings.md`). |
 | Audio onsets | `librosa` | Racket-impact sounds help confirm hits. |
 | Classical ML | `scikit-learn`, `lightgbm` | Bounce classifier, stroke classifier baseline. |
 | Optimization | `scipy.optimize.least_squares` | Camera calibration, 3D ball trajectory fits. |
@@ -277,12 +277,12 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 9 | `movement` | – | 1 | ✅ smoothed position/velocity per player (Kalman/RTS with per-point ground σ), short gaps bridged |
 | 10a | `ball_refine` | ✓ | 1 | ✅ with a sweep rate: full-rate detection in windows around moments found from the sweep (events, strong audio onsets, track gaps) |
 | 10 | `ball_track` | – | 1 | ✅ linked trajectory (tracklets + Viterbi selection of the ball in play), outliers dropped, short gaps filled |
-| 11 | `events` | – | 1 | ✅ hits (hitter = me / machine), bounces with court position, net contacts, sub-frame contact time, audio match (serve candidates: M6) |
+| 11 | `events` | – | 1 | ✅ hits (hitter = me / machine), bounces with court position, net contacts, sub-frame contact time, audio match (serves are recognized from the pose in `swings`, M6) |
 | 12 | `ball_3d` | – | 1 | ✅ 3D fit of every flight between events (hit/bounce → bounce/net/hit): speeds, net clearance, apex, landing, spin sign, uncertainties; contact chained from the incoming flight; rejects hits not at the hitter → `ball/flights.parquet` |
-| 13 | `pass2_pose` | ✓ | 1 | 2D pose on 4K crops in windows around hits (± 1.5 s) at full fps, plus sparse pose elsewhere (e.g. 5 fps) |
-| 14 | `pose3d` | ✓ | 1 | MotionBERT lifting, world placement, scale from profile height |
-| 15 | `swings` | – | 1 | kinematics, phases, stroke class per hit |
-| 16 | `shots` | – | 1 | join events + ball_3d + swings → `shots.parquet` (✅ M4: events + ball_3d, line calls; swings join in M6) |
+| 13 | `pass2_pose` | ✓ | 1 | ✅ 2D pose on 4K crops at full fps from 1.8 s before to 1.2 s after each of the player's hits and strong impact sounds (unseen contacts); sparse pose elsewhere not yet (nothing uses it) |
+| 14 | `pose3d` | ✓ | 1 | ✅ MotionBERT lifting, height scaling, court placement (rays + ground + tracked feet), joints snapped to their 2D rays |
+| 15 | `swings` | – | 1 | ✅ racket hand from the pose, swings at hits / speed peaks / impact sounds, contact from the pose, phases, kinematics, stroke (rules; learned model when validated), user corrections |
+| 16 | `shots` | – | 1 | ✅ join events + ball_3d + swings → `shots.parquet` (M4: events + ball_3d, line calls; M6: stroke, `is_serve`, `swing_id`). Runs after `swings` |
 | 17 | `segments` | – | 1 (practice) / 2 (match) | ✅ Practice (M5): one segment per shot (seen hits, unseen contacts from landing + impact sound, toss + sound), feeds, serve/groundstroke, deuce/ad, blocks. Match: points (+ warm-up) |
 | 18 | `outcomes` + `scoring` | – | 2 | match only: point winner, reason, confidence, score log |
 | 19 | `practice_eval` | – | 1 | ✅ practice only: line calls (service box for serves), per-shot target hit/miss, distance, depth/width error, with the user's edits; rerun in-app after target/shot edits |
@@ -442,9 +442,18 @@ The homography alone only gives positions on the ground. For speed:
   6. Recovery: until the player resumes ready position or moves toward center
 
   Phase durations, tempo ratios, and contact timing are stored.
+
+  ✅ Built in M6 (details and measurements in `docs/m6-swings.md`): pose in windows around
+  hits and impact sounds; MotionBERT depth with the 2D detector's image-plane motion (joints
+  snapped onto their rays), since MotionBERT alone smooths a serve's wrist to a third of its
+  speed; placement held to the tracked feet (the far player otherwise drifts meters toward the
+  camera); racket hand from the pose (a fast hand peaking over the head swings, a still one
+  tosses); swings also from wrist-speed peaks and impact sounds; serve phases from the toss,
+  the racket drop (tightest elbow bend) and the wrist coming down.
 * **Stroke classification**: classes are serve, forehand, backhand, forehand volley, backhand volley, overhead (plus `other`).
   * Rules bootstrap: contact side relative to the dominant hand from 3D pose; volley = no bounce since the previous hit and the player inside the service line; serve = the point-start hit by the server; overhead = contact above the head mid-rally.
   * Learned model: a small temporal network (GRU or ST-GCN) over a ±0.6 s pose window + ball features, trained on rule labels + user corrections. The model replaces the rules once validated.
+  * ✅ M6: rules in the hitter's frame (a serve needs a toss, or an overhead behind the baseline with no ball coming in; *other* for no ball contact, slow or short wrist travel, or a toss windup; strokes at least 1 s apart); a bidirectional GRU (`sv train strokes`) validated by leaving one session out and used only for the classes it learned. On the serve-practice sessions the GRU doesn't beat the rules yet.
   * Handedness and 1H/2H backhand come from the profile.
 
 ### 7.8 Segmentation
@@ -486,7 +495,7 @@ The homography alone only gives positions on the ground. For speed:
 * Per shot: in-court, in-target, distance to target center, depth/width error, net.
 * Per block/session: target hit %, in % and net %, mean/median distance, depth consistency (std), and a rolling accuracy curve over the session (fatigue/learning). Breakdowns by stroke type and speed bands.
 
-✅ Built in M5: landings in the hitter's frame (`rel_x/rel_y`), serves called against the diagonal service box, other shots against the singles court, close calls within 2σ; targets with a stroke filter (only *serve* is known until M6); user edits (exclude, confirm, place landing) applied by `practice_eval`. Every target hit/miss on both sessions agrees with the target outline projected into the image (`scripts/m5_check_targets.py`).
+✅ Built in M5: landings in the hitter's frame (`rel_x/rel_y`), serves called against the diagonal service box, other shots against the singles court, close calls within 2σ; targets with a stroke filter (every stroke since M6, from the shot's swing); user edits (exclude, confirm, place landing) applied by `practice_eval`. Every target hit/miss on both sessions agrees with the target outline projected into the image (`scripts/m5_check_targets.py`).
 
 ---
 
@@ -509,7 +518,7 @@ swing_id, fit_rms_px, quality_flags
 event, t0/t1, fitted state (p0, v0, spin, C_d), speeds, net crossing, apex, landing, σ of the
 key outputs, fit RMS and flags.
 
-`swings.parquet`: `swing_id, shot_id, phase_{name}_start/end frames, durations, contact metrics, peak angular velocities and timings, joint angle summary (min/max/at-contact), pose_quality`.
+`swings.parquet` (✅ M6, schema `SWINGS`): `swing_id, t_contact, contact_source (hit|audio|pose), t_contact_pose, hit_event_id, side, racket_hand, stroke_type/conf/source, stroke_rules, phase times (t_start, t_split, t_backswing_end, t_follow_end, t_recovery_end) and durations, tempo, contact metrics, wrist speeds, peak angular velocities and timings, chain_in_order, joint angle summary (max/at-contact), stance, CoM drop, jump, toss height, pose_quality, flags`. Shots and segments point to their swing (`swing_id`). Also `pose/pose2d.parquet` (COCO-17 keypoints per frame) and `pose/pose3d.parquet` (H36M-17 court joints per frame).
 
 `segments.parquet` (✅ M5, schema `SEGMENTS`): `segment_id, kind (point|warmup|practice_shot|block), start_t, end_t, block_id, shot_id, hit_event_id, feed_event_id, feed_kind, t_feed, t_contact, contact_source (hit|audio|estimate), t_end, end_reason, landing_*, hitter, side, shot_kind, serve_side, n_shots, conf, flags, point_index, server, first_serve_in, rally_length`.
 
@@ -660,16 +669,17 @@ Each milestone ends with tests passing, a demo on real footage, and a short READ
   * Target accuracy: **158 of 158** landings with a detected bounce agree with the targets projected into the image, for every target battery (relative/absolute, rectangles/circles, stroke filters); bounce pixels checked frame by frame against the court lines.
 * 🎯 **First usable milestone**: practice sessions with landings, speed, movement, and accuracy.
 
-#### M6 — Pose, swings, strokes
-* `pass2_pose` (windowed 4K crops), MotionBERT lifting, world placement and scaling.
-* Kinematics, swing phases, kinetic-chain timing, stroke rules → learned classifier (`sv train strokes`).
+#### M6 — Pose, swings, strokes ✅ (done 2026-10-06; groundstroke footage pending)
+* `pass2_pose` (ViTPose-B on windowed 4K crops), `pose3d` (MotionBERT-Lite lifting, height scaling, court placement with ray snapping), `swings` (racket hand, detection, contact, phases, kinematics, strokes); `shots`/`segments`/`practice_eval` carry each shot's stroke.
+* Kinematics, swing phases, kinetic-chain timing, stroke rules → learned classifier (`sv train strokes`, validated by leaving one session out, used only once it beats the rules).
   * Serve detection here is pose-based (toss + overhead contact behind the baseline). It doesn't depend on match state.
-* Swings page with 3D viewer, phase-annotated angle curves, compare mode.
+* Swings page with 3D viewer, phase-annotated angle curves, compare mode (another swing or "my average"), stroke corrections; skeleton on the session video; `sv swings show|eval`; stroke ground truth `training/strokes/<id>.json`.
 * Target stroke filters and per-stroke accuracy breakdowns are enabled on the Practice page.
-* ✅ Exit criteria:
-  * Stroke classification ≥ 90% (near player) / ≥ 80% (far player)
-  * Contact frame within ±2 frames of hit events
-  * Phase timings consistent across repeated swings
+* ✅ Exit criteria (details in `docs/m6-swings.md`; both sessions are serve practice, so strokes are scored as serve vs. not a stroke, and the other stroke classes are tested on synthetic swings only):
+  * Stroke classification ≥ 90% (near player) / ≥ 80% (far player): **97.1%** / **86.6%** in daylight (97.1% / 80.4% including dusk), over 101 labeled serves and 592 non-stroke swings.
+  * Contact frame within ±2 frames of hit events: near **39/39**; far **3/3** seen hits plus 8/12 within ±2 frames of the impact sound. The far sample is too small to call measured.
+  * Phase timings consistent across repeated swings: phases in order on 100% of serves; preparation CV 5–8%, forward swing 0.17–0.18 s (±2 frames), follow-through CV 16–20% (Oct 1); Oct 4's above-the-frame serves are less consistent.
+  * **Open items**: record a self-fed groundstroke session (and a far-end session with tracked hits) and label it; move the audio/video offset into `events` (Oct 4's sound-based contacts are ≈0.1 s late).
 
 #### M7 — MVP hardening and release
 * Per-session Stats page (speed distributions by stroke, landing heatmaps, depth, movement), CSV/Parquet export of shots.

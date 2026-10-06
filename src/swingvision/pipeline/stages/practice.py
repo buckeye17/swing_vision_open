@@ -51,6 +51,7 @@ def seg_inputs(session, config) -> sg.SegInputs:
         return v if np.isfinite(v) else None
 
     inp = sg.SegInputs(
+        swings=_opt(session.swings_path),
         events=tables.read_table(session.events_path),
         shots=tables.read_table(session.shots_path),
         flights=_opt(session.ball_flights_path),
@@ -87,8 +88,17 @@ def seg_inputs(session, config) -> sg.SegInputs:
 class SegmentsStage(Stage):
     name = "segments"
     title = "Segments"
-    version = 1
-    depends_on = ("shots", "events", "ball_3d", "ball_track", "movement", "audio_onsets", "camera")
+    version = 2
+    depends_on = (
+        "shots",
+        "events",
+        "ball_3d",
+        "ball_track",
+        "movement",
+        "audio_onsets",
+        "camera",
+        "swings",
+    )
     modes = PRACTICE_MODES
     weight = 0.1
 
@@ -111,7 +121,7 @@ class SegmentsStage(Stage):
 class PracticeEvalStage(Stage):
     name = "practice_eval"
     title = "Practice accuracy"
-    version = 1
+    version = 2
     depends_on = ("segments", "shots", "ball_3d")
     modes = PRACTICE_MODES
     weight = 0.05
