@@ -87,3 +87,18 @@ def test_breadcrumbs(tmp_path):
     crumbs = _breadcrumb_paths(str(tmp_path))
     assert crumbs[-1][1] == tmp_path.name
     assert crumbs[0][0] == tmp_path.anchor
+
+
+@pytest.mark.parametrize("mode", ["file", "folder"])
+def test_file_browser_listing_renders(tmp_path, mode):
+    """The modal's listing builds for a folder (it once failed on every render, so the
+    modal stayed empty and typed paths or "Go to" did nothing)."""
+    from swingvision.app.components.file_browser import render_listing
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "clip.mp4").write_bytes(b"x")
+    selected = str(tmp_path / "clip.mp4") if mode == "file" else None
+    out = render_listing("t", mode, (".mp4",), str(tmp_path), selected)
+    names = [e["name"] for e in out[1]]
+    assert "sub" in names and ("clip.mp4" in names) == (mode == "file")
+    assert out[3] == str(tmp_path) and out[4] == "" and out[6] is False

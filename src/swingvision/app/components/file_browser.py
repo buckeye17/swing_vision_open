@@ -230,6 +230,40 @@ def _render_list(entries: list[Entry], selected: str | None, prefix: str):
     return dmc.Stack(rows, gap=0)
 
 
+def render_listing(prefix: str, mode: str, exts: tuple[str, ...], cwd: str, selected: str | None):
+    """The modal's contents for folder ``cwd``: list, entries, breadcrumbs, path box, error,
+    selection label, select-button disabled, places reset."""
+    entries, error = list_dir(cwd, mode, exts)
+    crumbs = dmc.Breadcrumbs(
+        [
+            # A plain span: dmc.Anchor requires an href (and would navigate).
+            html.Span(
+                label,
+                id={"type": f"{prefix}-crumb", "index": i},
+                style={
+                    "cursor": "pointer",
+                    "fontSize": "var(--mantine-font-size-sm)",
+                    "color": "var(--mantine-color-anchor)",
+                },
+            )
+            for i, (_, label) in enumerate(_breadcrumb_paths(cwd))
+        ],
+        separator="›",
+    )
+    label = selected if mode == "file" else cwd
+    can_select = bool(selected) if mode == "file" else error is None
+    return (
+        _render_list(entries, selected, prefix),
+        [e.__dict__ for e in entries],
+        crumbs,
+        cwd,
+        error or "",
+        label or "No file selected",
+        not can_select,
+        None,
+    )
+
+
 def _register(prefix: str, mode: str, extensions: tuple[str, ...]) -> None:
     exts = tuple(e.lower() for e in extensions)
 
@@ -311,32 +345,7 @@ def _register(prefix: str, mode: str, extensions: tuple[str, ...]) -> None:
     def _render(cwd, selected):
         if not cwd:
             return (no_update,) * 8
-        entries, error = list_dir(cwd, mode, exts)
-        crumbs = dmc.Breadcrumbs(
-            [
-                dmc.Anchor(
-                    label,
-                    id={"type": f"{prefix}-crumb", "index": i},
-                    size="sm",
-                    underline="hover",
-                    style={"cursor": "pointer"},
-                )
-                for i, (_, label) in enumerate(_breadcrumb_paths(cwd))
-            ],
-            separator="›",
-        )
-        label = selected if mode == "file" else cwd
-        can_select = bool(selected) if mode == "file" else error is None
-        return (
-            _render_list(entries, selected, prefix),
-            [e.__dict__ for e in entries],
-            crumbs,
-            cwd,
-            error or "",
-            label or "No file selected",
-            not can_select,
-            None,
-        )
+        return render_listing(prefix, mode, exts, cwd, selected)
 
     @callback(
         Output(f"{prefix}-result", "data"),
