@@ -292,7 +292,9 @@ def layout(**_):
                             dmc.Title("Court calibration", order=4),
                             dmc.Text(
                                 "After court detection, processing pauses until you review the "
-                                "calibration, unless it fits the painted lines this well.",
+                                "calibration, unless it fits the painted lines this well (where "
+                                "the camera moved, every moved stretch must fit this well with "
+                                "its own camera). Turn this on to process overnight unattended.",
                                 size="sm",
                                 c="dimmed",
                                 mb="sm",

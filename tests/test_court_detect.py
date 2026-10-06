@@ -85,8 +85,17 @@ def test_solve_from_points_follows_user_points():
     assert abs(moved[0] - pts["near_doubles_left"][0]) > 10
 
 
-def _cal(rms=1.0, ok=True, coverage=0.8, drift=False) -> Calibration:
+def _cal(rms=1.0, ok=True, coverage=0.8, drift=False, window_rms=None, window_status=None):
     cam = make_camera()
+    status = window_status or ("moved" if drift else "ok")
+    window = DriftWindow(
+        t0_s=0,
+        t1_s=1,
+        n_frames=3,
+        status=status,
+        rms_line_px=window_rms,
+        camera=calib.to_params(cam) if window_rms is not None else None,
+    )
     return Calibration(
         source="auto",
         created_at=datetime.now(UTC),
@@ -95,8 +104,8 @@ def _cal(rms=1.0, ok=True, coverage=0.8, drift=False) -> Calibration:
         metrics=CalibrationMetrics(
             rms_line_px=rms, n_line_samples=int(coverage * 1000), n_expected_samples=1000
         ),
-        drift=[DriftWindow(t0_s=0, t1_s=1, n_frames=3, status="moved" if drift else "ok")],
-        drift_detected=drift,
+        drift=[window],
+        drift_detected=status == "moved",
     )
 
 
@@ -106,7 +115,12 @@ def test_auto_acceptable_rules():
     assert not calib.auto_acceptable(_cal(rms=2.5), 2.0)[0]
     assert not calib.auto_acceptable(_cal(ok=False), 2.0)[0]
     assert not calib.auto_acceptable(_cal(coverage=0.1), 2.0)[0]
-    assert not calib.auto_acceptable(_cal(drift=True), 2.0)[0]
+    assert not calib.auto_acceptable(_cal(drift=True), 2.0)[0]  # moved, no own camera
+    # A moved window with its own good fit is fine unattended; a poor one needs review.
+    ok, why = calib.auto_acceptable(_cal(drift=True, window_rms=1.2), 2.0)
+    assert ok and "moves" in why
+    assert not calib.auto_acceptable(_cal(drift=True, window_rms=2.4), 2.0)[0]
+    assert not calib.auto_acceptable(_cal(window_status="failed"), 2.0)[0]
 
 
 def test_calibration_file_roundtrip_and_geometry_key(tmp_path):

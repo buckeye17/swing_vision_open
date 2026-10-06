@@ -502,6 +502,25 @@ def auto_acceptable(cal: Calibration, threshold_px: float | None) -> tuple[bool,
         )
     if cal.metrics.coverage < 0.3:
         return False, f"Only {cal.metrics.coverage:.0%} of the visible lines were found"
+    if any(w.status == "failed" for w in cal.drift):
+        return False, "The court wasn't found in part of the video (see the drift check)"
     if cal.drift_detected:
-        return False, "The camera seems to move during the video"
+        # A sagging mount or a bumped tripod is fine unattended when every window where
+        # the camera sat elsewhere fits the lines just as well with its own camera.
+        moved = [w for w in cal.drift if w.status == "moved"]
+        bad = [
+            w
+            for w in moved
+            if w.camera is None or w.rms_line_px is None or w.rms_line_px > threshold_px
+        ]
+        if bad:
+            return False, (
+                f"The camera moves during the video and {len(bad)} of its {len(moved)} "
+                "moved time windows don't fit well on their own"
+            )
+        worst = max(w.rms_line_px for w in moved)  # type: ignore[type-var]
+        return True, (
+            f"Line RMS {rms:.2f} px ≤ {threshold_px:g} px; the camera moves in "
+            f"{len(moved)} time windows, each fitted on its own (≤ {worst:.2f} px)"
+        )
     return True, f"Line RMS {rms:.2f} px ≤ {threshold_px:g} px"
