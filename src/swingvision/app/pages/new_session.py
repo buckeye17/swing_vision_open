@@ -289,7 +289,7 @@ def _video_picked(result, name):
     except Exception:
         thumb = None
     return (
-        {"path": str(path)},
+        {"path": str(path), "duration_s": info.duration_s},
         _info_card(path, info, thumb),
         name or path.stem,
         False,
@@ -365,6 +365,10 @@ def _show_step(step, video):
     return step, panes, step == 0, HIDDEN if last else {}, {} if last else HIDDEN, not video
 
 
+#: Processing time per footage time on an RTX A5000 laptop (M7 overnight run).
+PROCESSING_X_REALTIME = 2.0
+
+
 @callback(
     Output("ns-review", "children"),
     Input("ns-step", "data"),
@@ -389,9 +393,22 @@ def _review(step, video, name, submode, profile_id, targets):
             ", ".join(t.name for t in valid) if valid else "none (accuracy shows in/out only)",
         ),
     ]
-    return dmc.Table(
+    table = dmc.Table(
         dmc.TableTbody(
             [dmc.TableTr([dmc.TableTd(k, fw=500, w=130), dmc.TableTd(v)]) for k, v in rows]
         ),
         fz="sm",
     )
+    hours = (video or {}).get("duration_s", 0) / 3600 * PROCESSING_X_REALTIME
+    auto = state.settings().processing.calibration_auto_accept_px is not None
+    note = (
+        "Processing continues on its own after court detection when the calibration fits well "
+        "(Settings)."
+        if auto
+        else "Processing pauses a few minutes in for you to review the court calibration "
+        "(Jobs page). To process unattended, e.g. overnight, turn on automatic acceptance in "
+        "Settings → Court calibration."
+    )
+    if hours >= 0.25:
+        note = f"Expect roughly {hours:.1f} h of processing. " + note
+    return dmc.Stack([table, dmc.Text(note, size="sm", c="dimmed")], gap="xs")

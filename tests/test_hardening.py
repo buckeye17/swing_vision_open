@@ -140,3 +140,15 @@ def test_broken_page_shows_an_error(settings):
 def test_library_migrates_jobs_action(settings):
     lib = Library(settings.output_root).init()
     assert lib.schema_version() >= 3
+
+
+def test_library_opens_the_relink_dialog_from_a_link(settings, synthetic_video):
+    import dash
+
+    from swingvision.app.main import create_app
+
+    create_app()
+    sid = services.create_session(settings, synthetic_video).load_config().id
+    page = next(p for p in dash.page_registry.values() if p["path"] == "/")
+    assert "no longer there" not in str(page["layout"](relink=sid))  # the video is in place
+    assert "Relink" in str(page["layout"](relink="nope"))  # unknown id: dialog stays closed
