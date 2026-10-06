@@ -157,3 +157,19 @@ def test_keypoint_shift():
     b = make_camera(offset_x=0.35)
     rms, mx = calib.keypoint_shift(a, b)
     assert 0 < rms <= mx
+
+
+def test_window_drift_refits_a_remounted_camera():
+    """A window filmed from somewhere else entirely (another mount, another zoom) gets its
+    own full fit instead of a failed pose-only refinement."""
+    main = make_camera(**CAMERAS["wide"])
+    remounted = make_camera(**CAMERAS["close"])
+    images = {0: render(main, seed=1), 1: render(remounted, seed=2)}
+    windows = [
+        DriftWindow(index=i, t0_s=100.0 * i, t1_s=100.0 * (i + 1), n_frames=5, status="ok")
+        for i in images
+    ]
+    out = calib.window_drift(main, windows, images.get, drift_px=3.0)
+    assert out[0].status == "ok"
+    assert out[1].status == "moved" and out[1].rms_line_px < calib.POOR_WINDOW_PX
+    assert keypoint_error(calib.to_camera(out[1].camera), remounted) < 2.0

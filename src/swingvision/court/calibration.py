@@ -50,7 +50,11 @@ from swingvision.storage.schemas import (
 )
 
 DARK_LUMINANCE = 25.0  # mean luma below which a frame is too dark to calibrate from
-MAX_WINDOWS = 12
+#: Up to 3 hours at the default 5-minute windows: longer windows blur a slowly sagging
+#: mount in their median image.
+MAX_WINDOWS = 36
+#: A drift window whose pose-only refit is worse than this (line RMS) gets a full re-fit.
+POOR_WINDOW_PX = 2.0
 
 #: Drift check: a bumped tripod changes the pose, not the lens.
 POSE_ONLY = FitOptions(fix_f=True, fit_k1=False)
@@ -199,11 +203,12 @@ def window_drift(
             continue
         img = images(win.index)
         prep = Prepared.from_rgb(img) if img is not None else None
-        det = pose_refine(prep, main) if prep is not None else None
-        if det is None or not det.ok or det.camera is None:
+        fit = _window_fit(prep, main) if prep is not None else None
+        if fit is None:
             out.append(win.model_copy(update={"status": "failed", "camera": None}))
             continue
-        shift = keypoint_shift(main, det.camera)
+        cam, line_rms = fit
+        shift = keypoint_shift(main, cam)
         rms, mx = shift if shift else (None, None)
         out.append(
             win.model_copy(
@@ -211,12 +216,45 @@ def window_drift(
                     "status": "moved" if rms is not None and rms > drift_px else "ok",
                     "shift_rms_px": rms,
                     "shift_max_px": mx,
-                    "rms_line_px": evaluate(prep, det.camera).rms_line_px,
-                    "camera": to_params(det.camera),
+                    "rms_line_px": line_rms,
+                    "camera": to_params(cam),
                 }
             )
         )
     return out
+
+
+def _window_fit(prep: Prepared, main: Camera) -> tuple[Camera, float | None] | None:
+    """The camera of one drift window: ``main`` pose-refined, or, when that fits poorly (the
+    camera was re-aimed or remounted far from ``main``), the best of that, a full
+    refinement and a fresh detection: the lowest line RMS among the fits that found most
+    of the lines."""
+    fits: list[tuple[Camera, CalibrationMetrics]] = []
+    det = pose_refine(prep, main)
+    if det.ok and det.camera is not None:
+        m = evaluate(prep, det.camera)
+        # A pose far off can still match a few lines (a neighboring court) closely, so a
+        # good fit must also find about as many line samples as the main camera expects.
+        if (
+            m.rms_line_px is not None
+            and m.rms_line_px <= POOR_WINDOW_PX
+            and m.n_line_samples >= 0.5 * expected_samples(main)
+        ):
+            return det.camera, m.rms_line_px
+        fits.append((det.camera, m))
+    for redo in (lambda: refine_from(prep, main), lambda: detect_court(prep)):
+        d = redo()
+        if d.ok and d.camera is not None:
+            fits.append((d.camera, evaluate(prep, d.camera)))
+    fits = [f for f in fits if f[1].rms_line_px is not None and np.isfinite(f[1].rms_line_px)]
+    if not fits:
+        return None
+    most = max(f[1].n_line_samples for f in fits)
+    cam, m = min(
+        (f for f in fits if f[1].n_line_samples >= 0.6 * most),
+        key=lambda f: f[1].rms_line_px,  # type: ignore[arg-type,return-value]
+    )
+    return cam, m.rms_line_px
 
 
 def auto_calibrate(
