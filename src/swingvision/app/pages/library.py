@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import dash
 import dash_mantine_components as dmc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from swingvision import services
 from swingvision.app import state
+from swingvision.app.components.file_browser import file_browser, register_file_browser
 from swingvision.app.components.ui import (
     fmt_duration,
     fmt_time,
@@ -18,13 +21,16 @@ from swingvision.app.components.ui import (
     status_badge,
 )
 from swingvision.app.worker_control import ensure_worker
+from swingvision.io.probe import VIDEO_EXTENSIONS
 from swingvision.pipeline.stage import read_manifest
 from swingvision.pipeline.stages import default_registry
 from swingvision.storage.schemas import PRACTICE_SUBMODE_LABELS
 from swingvision.storage.session import Session
 
+register_file_browser("lib-fb", mode="file", extensions=VIDEO_EXTENSIONS)
 
-def layout(**_):
+
+def layout(relink: str | None = None, **_):
     if state.settings().output_root is None:
         return dmc.Container([page_header("Library"), no_output_root_alert()], size="xl", px=0)
     return dmc.Container(
@@ -39,7 +45,10 @@ def layout(**_):
             dcc.Interval(id="lib-poll", interval=3000),
             dcc.Store(id="lib-delete-id"),
             dcc.Store(id="lib-sig"),
+            dcc.Store(id="lib-relink-id", data=relink),
             html.Div(id="lib-table"),
+            _relink_modal(relink),
+            file_browser("lib-fb", mode="file", title="Find the session's video"),
             dmc.Modal(
                 id="lib-delete-modal",
                 title="Delete session data?",
@@ -63,6 +72,61 @@ def layout(**_):
 
 
 dash.register_page(__name__, path="/", title="Library · Swing Vision Open", order=0, layout=layout)
+
+
+def _relink_text(sid: str | None):
+    lib = state.library()
+    row = lib.get_session(sid) if lib and sid else None
+    if row is None:
+        return "", None
+    path = Path(row["source_path"])
+    found = path.is_file()
+    text = dmc.Stack(
+        [
+            dmc.Text(
+                f"“{row['name']}” was made from {path.name}, which is "
+                + ("still in place." if found else "no longer there:"),
+                size="sm",
+            ),
+            dmc.Code(str(path), block=True),
+            dmc.Text(
+                "Choose the file where it is now. It must be the same video (it's checked); other "
+                "sessions whose videos are missing are looked for in the same folder too. Results "
+                "and the playback proxy don't need the video, only reprocessing does.",
+                size="sm",
+                c="dimmed",
+            ),
+        ],
+        gap="xs",
+    )
+    start = str(path.parent) if path.parent.is_dir() else None
+    return text, start
+
+
+def _relink_modal(sid: str | None):
+    text, _start = _relink_text(sid)
+    return dmc.Modal(
+        id="lib-relink-modal",
+        title="Relink the source video",
+        opened=bool(sid) and text != "",
+        size="lg",
+        children=dmc.Stack(
+            [
+                html.Div(text, id="lib-relink-text"),
+                dmc.Group(
+                    [
+                        dmc.Button("Cancel", id="lib-relink-cancel", variant="default"),
+                        dmc.Button(
+                            "Choose file…",
+                            id="lib-fb-open",
+                            leftSection=icon("tabler:folder-open", 16),
+                        ),
+                    ],
+                    justify="flex-end",
+                ),
+            ]
+        ),
+    )
 
 
 def _moved(root, s: dict) -> str:
@@ -125,6 +189,11 @@ def _row(root, s: dict):
                         leftSection=icon("tabler:target", 14),
                     ),
                     dmc.MenuItem(
+                        "Relink video…",
+                        id={"type": "lib-relink", "index": sid},
+                        leftSection=icon("tabler:link", 14),
+                    ),
+                    dmc.MenuItem(
                         "Reprocess from scratch",
                         id={"type": "lib-reprocess", "index": sid},
                         leftSection=icon("tabler:refresh", 14),
@@ -141,6 +210,20 @@ def _row(root, s: dict):
         ],
         position="bottom-end",
     )
+    status = [status_badge(s["status"])]
+    if services.source_missing(s):
+        status.append(
+            dmc.Tooltip(
+                html.Span(
+                    dmc.Badge("video missing", color="red", variant="outline", size="sm"),
+                    id={"type": "lib-relink-badge", "index": sid},
+                    style={"cursor": "pointer"},
+                ),
+                label=f"Not found: {s['source_path']}. Click to relink.",
+                multiline=True,
+                w=320,
+            )
+        )
     return dmc.TableTr(
         [
             dmc.TableTd(
@@ -158,7 +241,7 @@ def _row(root, s: dict):
             dmc.TableTd(_moved(root, s)),
             dmc.TableTd(_accuracy(root, s)),
             dmc.TableTd(fmt_time(s["created_at"])),
-            dmc.TableTd(status_badge(s["status"]), style={"whiteSpace": "nowrap"}),
+            dmc.TableTd(dmc.Group(status, gap=4, wrap="nowrap"), style={"whiteSpace": "nowrap"}),
             dmc.TableTd(menu),
         ]
     )
@@ -176,7 +259,12 @@ def _render(_, last_sig):
         return no_output_root_alert(), None
     sessions = lib.list_sessions()
     # Re-rendering closes open row menus, so only re-render when something changed.
-    sig = repr([(s["id"], s["status"], s["updated_at"], s["name"]) for s in sessions])
+    sig = repr(
+        [
+            (s["id"], s["status"], s["updated_at"], s["name"], services.source_missing(s))
+            for s in sessions
+        ]
+    )
     if sig == last_sig:
         return no_update, no_update
     return _table(lib.root, sessions), sig
@@ -283,3 +371,65 @@ def _delete(confirm, _cancel, sid):
     except ValueError as exc:
         return notification(str(exc), color="red"), False, no_update
     return notification("Session data deleted.", color="gray"), False, 0
+
+
+@callback(
+    Output("lib-relink-id", "data"),
+    Output("lib-relink-modal", "opened"),
+    Output("lib-relink-text", "children"),
+    Output("lib-fb-start", "data"),
+    Input({"type": "lib-relink", "index": ALL}, "n_clicks"),
+    Input({"type": "lib-relink-badge", "index": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def _open_relink(_menu, _badge):
+    trig = ctx.triggered_id
+    if not isinstance(trig, dict) or not ctx.triggered[0]["value"]:
+        return no_update, no_update, no_update, no_update
+    text, start = _relink_text(trig["index"])
+    return trig["index"], True, text, start
+
+
+@callback(
+    Output("lib-fb-start", "data", allow_duplicate=True),
+    Input("lib-relink-id", "data"),
+    prevent_initial_call="initial_duplicate",
+)
+def _relink_start(sid):
+    """Open the file browser in the video's old folder when it still exists."""
+    return _relink_text(sid)[1] if sid else no_update
+
+
+@callback(
+    Output("lib-relink-modal", "opened", allow_duplicate=True),
+    Input("lib-relink-cancel", "n_clicks"),
+    Input("lib-fb-open", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _close_relink(cancel, browse):
+    # "Choose file…" opens the file browser; this dialog closes behind it.
+    return False if (cancel or browse) else no_update
+
+
+@callback(
+    Output("notify", "sendNotifications", allow_duplicate=True),
+    Output("lib-poll", "n_intervals", allow_duplicate=True),
+    Input("lib-fb-result", "data"),
+    State("lib-relink-id", "data"),
+    prevent_initial_call=True,
+)
+def _relink(result, sid):
+    if not result or not sid:
+        return no_update, no_update
+    s = state.settings()
+    try:
+        relinked = services.relink_session(s, sid, Path(result["path"]))
+    except services.RelinkError as exc:
+        return notification(str(exc), "Not relinked", color="red"), no_update
+    others = len(relinked) - 1
+    msg = f"Relinked to {Path(result['path']).name}."
+    if others:
+        msg += f" Found the videos of {others} more session{'s' if others > 1 else ''} there too."
+    if state.OPTIONS.start_worker:
+        ensure_worker(s.output_root)
+    return notification(msg, icon_name="tabler:link"), 0

@@ -111,7 +111,15 @@ def _job_card(lib: Library, job: Job, sessions: dict, titles: dict, show_logs: b
                 leftSection=icon("tabler:refresh", 14),
             )
         )
-    if session and job.status == "needs_action" and job.current_stage == CameraStage.name:
+    if session and job.status == "needs_action" and job.action == "relink":
+        actions.insert(
+            0,
+            dmc.Anchor(
+                dmc.Button("Relink video", size="xs", leftSection=icon("tabler:link", 14)),
+                href=f"/?relink={job.session_id}",
+            ),
+        )
+    elif session and job.status == "needs_action" and job.current_stage == CameraStage.name:
         actions.insert(
             0,
             dmc.Anchor(

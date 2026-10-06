@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
+from swingvision.pipeline.errors import describe, is_gpu_oom
 from swingvision.pipeline.stage import (
     Cancelled,
     NeedsUserAction,
@@ -160,6 +161,7 @@ class RunResult:
     status: str  # done | cancelled | needs_action | failed
     message: str | None = None
     error: str | None = None
+    action: str | None = None  # needs_action: what for (NeedsUserAction.reason)
     ran: list[str] = field(default_factory=list)
 
 
@@ -205,18 +207,20 @@ def run(
         )
         started = time.time()
         try:
-            extra = p.stage.run(ctx)
+            extra = _run_stage(p.stage, ctx)
         except Cancelled:
             hooks.on_stage_end(name, "cancelled", None)
             return RunResult("cancelled", f"Cancelled during {name}", ran=ran)
         except NeedsUserAction as exc:
             hooks.on_stage_end(name, "needs_action", exc.message)
-            return RunResult("needs_action", exc.message, ran=ran)
+            return RunResult("needs_action", exc.message, action=exc.reason, ran=ran)
         except Exception as exc:
             tb = traceback.format_exc()
             logger.error("Stage {} failed:\n{}", name, tb)
-            hooks.on_stage_end(name, "failed", str(exc))
-            return RunResult("failed", f"{name} failed: {exc}", error=tb, ran=ran)
+            why = describe(exc)
+            hooks.on_stage_end(name, "failed", why)
+            title = p.stage.title or name
+            return RunResult("failed", f"{title} ({name}) failed: {why}", error=tb, ran=ran)
         finally:
             _release_gpu_memory()
         write_manifest(
@@ -230,6 +234,24 @@ def run(
         logger.info("Stage {} done in {:.1f}s", name, time.time() - started)
         hooks.on_stage_end(name, "done", None)
     return RunResult("done", "Complete", ran=ran)
+
+
+#: Before the one retry after a GPU out-of-memory error.
+OOM_RETRY_WAIT_S = 30.0
+
+
+def _run_stage(stage: Stage, ctx: StageContext):
+    """Run a stage, retrying once after a GPU out-of-memory error (another program may
+    have held the memory for a while; chunked stages resume from their checkpoints)."""
+    try:
+        return stage.run(ctx)
+    except Exception as exc:
+        if not (stage.uses_gpu and is_gpu_oom(exc)):
+            raise
+        ctx.log.warning("GPU out of memory in {}; retrying once", stage.name)
+    _release_gpu_memory()
+    time.sleep(OOM_RETRY_WAIT_S)
+    return stage.run(ctx)
 
 
 def _release_gpu_memory() -> None:

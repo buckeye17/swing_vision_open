@@ -99,3 +99,29 @@ def no_output_root_alert() -> dmc.Alert:
         color="yellow",
         icon=icon("tabler:folder-question"),
     )
+
+
+def error_page(exc: BaseException) -> dmc.Container:
+    """Shown instead of a page that failed to build."""
+    return dmc.Container(
+        [
+            page_header("This page couldn't be shown"),
+            dmc.Alert(
+                [
+                    dmc.Text(f"{type(exc).__name__}: {exc}", size="sm", ff="monospace"),
+                    dmc.Text(
+                        "A file this page reads may be missing or damaged, for example while the "
+                        "session is being reprocessed. Try again in a moment, or reprocess the "
+                        "session from the Library. The full error is in the app's log.",
+                        size="sm",
+                        mt="xs",
+                    ),
+                ],
+                color="red",
+                icon=icon("tabler:alert-triangle"),
+            ),
+            dmc.Anchor("Back to the library", href="/", mt="md"),
+        ],
+        size="xl",
+        px=0,
+    )

@@ -9,6 +9,8 @@ from the tracked positions in ``review-track``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import dash
 import dash_mantine_components as dmc
 import numpy as np
@@ -574,9 +576,28 @@ def layout(session_id: str | None = None, **_):
         ],
         gap="sm",
     )
+    missing = (
+        dmc.Alert(
+            [
+                dmc.Text(
+                    f"The source video isn't at {config.source.path} any more. Playback and "
+                    "results still work; reprocessing needs the video.",
+                    size="sm",
+                ),
+                dmc.Anchor("Relink it", href=f"/?relink={config.id}", size="sm"),
+            ],
+            title="Video missing",
+            color="yellow",
+            icon=icon("tabler:link-off"),
+            mb="sm",
+        )
+        if not Path(config.source.path).is_file()
+        else None
+    )
     return dmc.Container(
         [
             page_header(config.name, subtitle, right=header_right),
+            missing,
             dcc.Store(id="review-overlays", data=overlays),
             dcc.Store(id="review-time"),
             dcc.Store(id="review-fps", data=fps),

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import socket
 import threading
 import time
@@ -37,6 +38,9 @@ from swingvision.storage.library import (
 from swingvision.storage.session import Session
 
 LOCK_NAME = ".worker.lock"
+#: A job doesn't start with less free space than this in the output folder (a 2-hour
+#: session writes ≈ 3-4 GB: proxy, detections, pose).
+MIN_FREE_BYTES = 5 * 1024**3
 HEARTBEAT_S = 2.0
 PROGRESS_MIN_INTERVAL_S = 0.5
 
@@ -128,8 +132,24 @@ def process_job(library: Library, settings: AppSettings, job: Job, registry: Reg
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <7} | {message}",
     )
     reporter = JobReporter(library, job)
+    free = shutil.disk_usage(library.root).free
+    if free < MIN_FREE_BYTES:
+        logger.remove(sink)
+        message = (
+            f"Only {free / 1024**3:.1f} GB free in the output folder ({library.root}); "
+            f"processing needs at least {MIN_FREE_BYTES / 1024**3:.0f} GB. Free some space, "
+            "then retry."
+        )
+        library.finish_job(job.id, NEEDS_ACTION, message, action="disk_space")
+        return NEEDS_ACTION
     try:
-        logger.info("Job #{} for session {} ({})", job.id, row["name"], row["dir_name"])
+        logger.info(
+            "Job #{} for session {} ({}); {:.0f} GB free in the output folder",
+            job.id,
+            row["name"],
+            row["dir_name"],
+            free / 1024**3,
+        )
         result = run(
             registry,
             session,
@@ -153,7 +173,7 @@ def process_job(library: Library, settings: AppSettings, job: Job, registry: Reg
     status = {"done": DONE, "cancelled": CANCELLED, "needs_action": NEEDS_ACTION, "failed": FAILED}[
         result.status
     ]
-    library.finish_job(job.id, status, result.message, result.error)
+    library.finish_job(job.id, status, result.message, result.error, result.action)
     logger.info("Job #{} finished: {} ({})", job.id, status, result.message)
     return status
 

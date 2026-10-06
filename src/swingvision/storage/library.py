@@ -106,6 +106,10 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    # v3: what a job stopped with ``needs_action`` waits for (M7): calibration_review | relink
+    """
+    ALTER TABLE jobs ADD COLUMN action TEXT;
+    """,
 ]
 
 
@@ -134,6 +138,7 @@ class Job:
     message: str | None
     error: str | None
     cancel_requested: bool
+    action: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Job:
@@ -141,7 +146,8 @@ class Job:
         d["targets"] = json.loads(d["targets"]) if d["targets"] else None
         d["force"] = json.loads(d["force"] or "[]")
         d["cancel_requested"] = bool(d["cancel_requested"])
-        return cls(**d)
+        # Columns a newer version added are ignored, so an older worker keeps running.
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 class Library:
@@ -229,6 +235,13 @@ class Library:
             rows = conn.execute("SELECT * FROM sessions ORDER BY created_at DESC").fetchall()
         return [dict(r) for r in rows]
 
+    def sessions_by_hash(self, source_hash: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE source_hash = ?", (source_hash,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def update_session(self, session_id: str, **fields: Any) -> None:
         if not fields:
             return
@@ -314,7 +327,12 @@ class Library:
             conn.execute(f"UPDATE jobs SET {cols} WHERE id = ?", (*fields.values(), job_id))
 
     def finish_job(
-        self, job_id: int, status: str, message: str | None = None, error: str | None = None
+        self,
+        job_id: int,
+        status: str,
+        message: str | None = None,
+        error: str | None = None,
+        action: str | None = None,
     ) -> None:
         session_status = {
             DONE: "ready",
@@ -325,10 +343,10 @@ class Library:
         ts = now_iso()
         with self.transaction() as conn:
             conn.execute(
-                """UPDATE jobs SET status = ?, finished_at = ?, message = ?, error = ?,
+                """UPDATE jobs SET status = ?, finished_at = ?, message = ?, error = ?, action = ?,
                           progress = CASE WHEN ? = 'done' THEN 1.0 ELSE progress END
                    WHERE id = ?""",
-                (status, ts, message, error, status, job_id),
+                (status, ts, message, error, action, status, job_id),
             )
             conn.execute(
                 """UPDATE sessions SET status = ?, updated_at = ?

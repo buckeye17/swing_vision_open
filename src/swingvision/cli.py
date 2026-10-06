@@ -165,6 +165,48 @@ def sessions() -> None:
 
 
 @app.command()
+def relink(session_id: str, path: Path) -> None:
+    """Point a session at its source video's new location (same file, moved or renamed).
+
+    Other sessions whose videos are missing are looked for in the same folder.
+    """
+    from swingvision import services
+
+    settings = load_settings()
+    try:
+        relinked = services.relink_session(settings, session_id, path)
+    except services.RelinkError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    lib = services.open_library(settings)
+    for sid in relinked:
+        row = lib.get_session(sid)
+        typer.echo(f"Relinked {sid} ({row['name']}) -> {row['source_path']}")
+
+
+@app.command()
+def export(
+    session_id: str,
+    what: Annotated[str, typer.Option(help="shots | practice | swings")] = "shots",
+    fmt: Annotated[str, typer.Option("--format", help="csv | parquet")] = "csv",
+    out: Annotated[Path | None, typer.Option(help="Output file (default: in this folder)")] = None,
+) -> None:
+    """Export a session's shots (with practice results), practice shots or swings."""
+    from swingvision import services
+    from swingvision.analysis import export as ex
+
+    session = services.session_by_id(load_settings(), session_id)
+    if session is None:
+        raise typer.BadParameter(f"Unknown session {session_id}")
+    try:
+        data = ex.export_bytes(session, what, fmt)
+    except ex.ExportError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    out = out or Path(ex.filename(session, what, fmt))
+    out.write_bytes(data)
+    typer.echo(f"Wrote {out} ({len(data) / 1024:.0f} KB)")
+
+
+@app.command()
 def shots(
     session_id: str,
     all_hits: Annotated[

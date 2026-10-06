@@ -94,6 +94,82 @@ def create_session(
     return session
 
 
+# ---------------------------------------------------------------------------
+# Source video: missing files and relinking (M7)
+# ---------------------------------------------------------------------------
+
+
+class RelinkError(ValueError):
+    pass
+
+
+def source_missing(row: dict) -> bool:
+    """Whether a library session's source video is no longer where it was (cheap: a stat)."""
+    return not Path(row["source_path"]).is_file()
+
+
+def relink_session(settings: AppSettings, session_id: str, new_path: Path) -> list[str]:
+    """Point a session at its source video's new location.
+
+    The file must be the same video (same size and fast hash as when the session was
+    created). Other sessions whose video is missing too are looked for next to it (moved
+    together), by size and then hash. Returns the ids of every session relinked.
+    """
+    library = open_library(settings)
+    row = library.get_session(session_id)
+    if row is None:
+        raise RelinkError(f"Unknown session {session_id}")
+    new_path = Path(new_path)
+    if not new_path.is_file():
+        raise RelinkError(f"{new_path} is not a file")
+    source = source_info(new_path)
+    if source.fast_hash != row["source_hash"]:
+        raise RelinkError(
+            f"{new_path.name} is not the video this session was made from (different size or "
+            "content). Pick the original file; a re-encoded or trimmed copy needs a new session."
+        )
+    _relink(library, row, source)
+    relinked = [session_id]
+    for other in library.list_sessions():
+        if other["id"] == session_id or not source_missing(other):
+            continue
+        found = _find_by_hash(library, new_path.parent, other)
+        if found is not None:
+            _relink(library, other, found)
+            relinked.append(other["id"])
+    for sid in relinked:
+        # A job that stopped because the video was missing picks up where it stopped.
+        job = library.latest_job_for_session(sid)
+        if job is not None and job.status == "needs_action" and job.action == "relink":
+            library.enqueue_job(sid, job.targets, job.force)
+    return relinked
+
+
+def _relink(library: Library, row: dict, source) -> None:
+    session = Session.open(library.root, row["dir_name"])
+    config = session.load_config()
+    config.source = source
+    session.save_config(config)
+    library.update_session(row["id"], source_path=source.path)
+
+
+def _find_by_hash(library: Library, folder: Path, row: dict):
+    """The file in ``folder`` with ``row``'s video content (size first: hashing is slower)."""
+    from swingvision.io.probe import VIDEO_EXTENSIONS
+
+    session = Session.open(library.root, row["dir_name"])
+    size = session.load_config().source.size_bytes if session.config_path.exists() else None
+    for f in sorted(folder.iterdir()) if folder.is_dir() else []:
+        if not f.is_file() or f.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        if size is not None and f.stat().st_size != size:
+            continue
+        info = source_info(f)
+        if info.fast_hash == row["source_hash"]:
+            return info
+    return None
+
+
 def session_by_id(settings: AppSettings, session_id: str) -> Session | None:
     library = open_library(settings)
     row = library.get_session(session_id)

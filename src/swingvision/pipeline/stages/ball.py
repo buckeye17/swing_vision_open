@@ -21,7 +21,7 @@ from swingvision.ball.schedule import merge_windows, target_frames
 from swingvision.ball.trajectory import LinkParams, PlayerBoxes, link
 from swingvision.court import calibration as calib
 from swingvision.io.frames import frame_table
-from swingvision.pipeline.stage import Stage, StageContext
+from swingvision.pipeline.stage import NeedsUserAction, Stage, StageContext
 from swingvision.pipeline.stages.ingest import _source_path
 from swingvision.pipeline.stages.players import (
     ball_detection_crop,
@@ -122,7 +122,10 @@ def link_session(
 
 
 def _source_path_of(config) -> Path:
-    return Path(config.source.path)
+    src = Path(config.source.path)
+    if not src.exists():
+        raise NeedsUserAction("relink", f"Source video not found: {src}. Relink it in the Library.")
+    return src
 
 
 class BallRefineStage(Stage):

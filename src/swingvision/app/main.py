@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib
 
 import dash
@@ -10,7 +11,7 @@ from dash import Input, Output, State, callback, dcc
 from loguru import logger
 
 from swingvision.app import state
-from swingvision.app.components.ui import STATUS_COLORS, icon
+from swingvision.app.components.ui import STATUS_COLORS, error_page, icon
 from swingvision.app.server_routes import register_routes
 from swingvision.app.worker_control import ensure_worker, worker_state
 
@@ -126,6 +127,22 @@ def _worker_badge(_):
     return label, STATUS_COLORS[status]
 
 
+def _safe_layout(layout, module: str):
+    """A page that fails to build (a damaged or half-written file, say) explains itself
+    instead of leaving the screen blank; the traceback goes to the log."""
+
+    @functools.wraps(layout)
+    def safe(**kwargs):
+        try:
+            return layout(**kwargs)
+        except Exception as exc:
+            logger.exception("Page {} failed to render ({})", module, kwargs)
+            return error_page(exc)
+
+    safe._safe = True  # type: ignore[attr-defined]
+    return safe
+
+
 def create_app() -> dash.Dash:
     app = dash.Dash(
         __name__,
@@ -137,6 +154,9 @@ def create_app() -> dash.Dash:
     )
     for mod in PAGE_MODULES:
         importlib.import_module(f"swingvision.app.pages.{mod}")
+    for page in dash.page_registry.values():
+        if callable(page.get("layout")) and not getattr(page["layout"], "_safe", False):
+            page["layout"] = _safe_layout(page["layout"], page["module"])
     app.layout = _layout()
     register_routes(app.server)
     return app
