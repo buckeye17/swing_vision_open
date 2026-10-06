@@ -1,7 +1,5 @@
-"""New session: pick a video, choose mode, create + enqueue processing.
-
-Covers the practice path and the player profile. Targets (M5) and the match path
-(Phase 2) slot into this page later.
+"""New session wizard: footage → session type and player → practice targets → review, then
+create and enqueue processing. The match path (Phase 2) slots into the Session step later.
 """
 
 from __future__ import annotations
@@ -10,11 +8,16 @@ from pathlib import Path
 
 import dash
 import dash_mantine_components as dmc
-from dash import Input, Output, State, callback, dcc, html, no_update
+from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from swingvision import services
 from swingvision.app import state
 from swingvision.app.components.file_browser import file_browser, register_file_browser
+from swingvision.app.components.target_editor import (
+    register_target_editor,
+    target_editor,
+    targets_from_store,
+)
 from swingvision.app.components.ui import (
     fmt_bytes,
     fmt_duration,
@@ -29,141 +32,167 @@ from swingvision.io.probe import VIDEO_EXTENSIONS, ProbeError, probe_video
 from swingvision.storage.schemas import PRACTICE_SUBMODE_LABELS, VideoInfo
 
 register_file_browser("video-browser", mode="file", extensions=VIDEO_EXTENSIONS)
+register_target_editor("ns-tgt")
+HIDDEN = {"display": "none"}
+
+
+STEPS = ("Footage", "Session", "Targets", "Review")
+
+
+def _card(*children):
+    return dmc.Paper(list(children), p="lg", withBorder=True)
 
 
 def layout(**_):
     if state.settings().output_root is None:
-        return dmc.Container([page_header("New session"), no_output_root_alert()], size="md", px=0)
+        return dmc.Container([page_header("New session"), no_output_root_alert()], size="lg", px=0)
     profiles = services.list_profiles(state.settings())
-    return dmc.Container(
-        [
-            page_header("New session", "Pick footage, choose what kind of session it is."),
-            dcc.Store(id="ns-video"),
-            dmc.Stack(
-                [
-                    dmc.Paper(
-                        [
-                            dmc.Group(
-                                [
-                                    dmc.Title("1. Footage", order=4),
-                                    dmc.Button(
-                                        "Choose video…",
-                                        id="video-browser-open",
-                                        leftSection=icon("tabler:folder-open"),
-                                        variant="light",
-                                    ),
-                                ],
-                                justify="space-between",
-                            ),
-                            html.Div(
-                                id="ns-video-info",
-                                children=dmc.Text(
-                                    "No video selected.", c="dimmed", size="sm", mt="sm"
-                                ),
-                            ),
-                        ],
-                        p="lg",
-                        withBorder=True,
-                    ),
-                    dmc.Paper(
-                        [
-                            dmc.Title("2. Session", order=4, mb="sm"),
-                            dmc.Stack(
-                                [
-                                    dmc.TextInput(
-                                        id="ns-name",
-                                        label="Name",
-                                        placeholder="e.g. Basket forehands",
-                                    ),
-                                    dmc.Stack(
-                                        [
-                                            dmc.Text("Mode", size="sm", fw=500),
-                                            dmc.SegmentedControl(
-                                                id="ns-mode",
-                                                value="practice",
-                                                data=[
-                                                    {"value": "practice", "label": "Practice"},
-                                                    {
-                                                        "value": "match",
-                                                        "label": "Match (coming in Phase 2)",
-                                                        "disabled": True,
-                                                    },
-                                                ],
-                                            ),
-                                        ],
-                                        gap=4,
-                                    ),
-                                    dmc.Stack(
-                                        [
-                                            dmc.Text("Practice type", size="sm", fw=500),
-                                            dmc.SegmentedControl(
-                                                id="ns-submode",
-                                                value="self_feed",
-                                                data=[
-                                                    {"value": k, "label": v}
-                                                    for k, v in PRACTICE_SUBMODE_LABELS.items()
-                                                ],
-                                            ),
-                                        ],
-                                        gap=4,
-                                    ),
-                                    dmc.Group(
-                                        [
-                                            dmc.Select(
-                                                id="ns-profile",
-                                                label="Player",
-                                                description="Who is practicing (handedness "
-                                                "and height feed the swing analysis).",
-                                                data=[
-                                                    {"value": p.id, "label": p.name}
-                                                    for p in profiles
-                                                ],
-                                                value=profiles[0].id
-                                                if len(profiles) == 1
-                                                else None,
-                                                placeholder="Choose a profile"
-                                                if profiles
-                                                else "No profiles yet",
-                                                clearable=True,
-                                                flex=1,
-                                            ),
-                                            dmc.Anchor(
-                                                "Manage profiles",
-                                                href="/profiles",
-                                                size="sm",
-                                                pb=6,
-                                            ),
-                                        ],
-                                        align="flex-end",
-                                    ),
-                                    dmc.Text(
-                                        "Practice targets arrive in a later milestone; you'll "
-                                        "be able to set them on existing sessions.",
-                                        size="xs",
-                                        c="dimmed",
-                                    ),
-                                ],
-                                gap="md",
-                            ),
-                        ],
-                        p="lg",
-                        withBorder=True,
-                    ),
-                    dmc.Group(
-                        dmc.Button(
-                            "Create and process",
-                            id="ns-create",
-                            disabled=True,
-                            leftSection=icon("tabler:player-play"),
+    footage = _card(
+        dmc.Group(
+            [
+                dmc.Title("Footage", order=4),
+                dmc.Button(
+                    "Choose video…",
+                    id="video-browser-open",
+                    leftSection=icon("tabler:folder-open"),
+                    variant="light",
+                ),
+            ],
+            justify="space-between",
+        ),
+        html.Div(
+            id="ns-video-info",
+            children=dmc.Text("No video selected.", c="dimmed", size="sm", mt="sm"),
+        ),
+    )
+    session = _card(
+        dmc.Title("Session", order=4, mb="sm"),
+        dmc.Stack(
+            [
+                dmc.TextInput(id="ns-name", label="Name", placeholder="e.g. Basket forehands"),
+                dmc.Stack(
+                    [
+                        dmc.Text("Mode", size="sm", fw=500),
+                        dmc.SegmentedControl(
+                            id="ns-mode",
+                            value="practice",
+                            data=[
+                                {"value": "practice", "label": "Practice"},
+                                {
+                                    "value": "match",
+                                    "label": "Match (coming in Phase 2)",
+                                    "disabled": True,
+                                },
+                            ],
                         ),
-                        justify="flex-end",
+                    ],
+                    gap=4,
+                ),
+                dmc.Stack(
+                    [
+                        dmc.Text("Practice type", size="sm", fw=500),
+                        dmc.SegmentedControl(
+                            id="ns-submode",
+                            value="self_feed",
+                            data=[
+                                {"value": k, "label": v} for k, v in PRACTICE_SUBMODE_LABELS.items()
+                            ],
+                        ),
+                        dmc.Text(
+                            "Self-feed sessions recognize serves on their own; serve practice "
+                            "calls every shot against the service box.",
+                            size="xs",
+                            c="dimmed",
+                        ),
+                    ],
+                    gap=4,
+                ),
+                dmc.Group(
+                    [
+                        dmc.Select(
+                            id="ns-profile",
+                            label="Player",
+                            description="Who is practicing (handedness and height feed the "
+                            "swing analysis).",
+                            data=[{"value": p.id, "label": p.name} for p in profiles],
+                            value=profiles[0].id if len(profiles) == 1 else None,
+                            placeholder="Choose a profile" if profiles else "No profiles yet",
+                            clearable=True,
+                            flex=1,
+                        ),
+                        dmc.Anchor("Manage profiles", href="/profiles", size="sm", pb=6),
+                    ],
+                    align="flex-end",
+                ),
+            ],
+            gap="md",
+        ),
+    )
+    targets = _card(
+        dmc.Title("Targets", order=4, mb="xs"),
+        dmc.Text(
+            "Optional: where you're aiming. Accuracy is measured against these; you can change "
+            "them later on the session's Practice page.",
+            size="sm",
+            c="dimmed",
+            mb="sm",
+        ),
+        target_editor("ns-tgt"),
+    )
+    review = _card(dmc.Title("Review", order=4, mb="sm"), html.Div(id="ns-review"))
+    steps = [footage, session, targets, review]
+    panes = [
+        html.Div(step, id={"type": "ns-pane", "index": i}, style={} if i == 0 else HIDDEN)
+        for i, step in enumerate(steps)
+    ]
+    nav = dmc.Group(
+        [
+            dmc.Button(
+                "Back",
+                id="ns-back",
+                variant="default",
+                disabled=True,
+                leftSection=icon("tabler:arrow-left"),
+            ),
+            dmc.Group(
+                [
+                    dmc.Button(
+                        "Next", id="ns-next", disabled=True, rightSection=icon("tabler:arrow-right")
+                    ),
+                    dmc.Button(
+                        "Create and process",
+                        id="ns-create",
+                        disabled=True,
+                        leftSection=icon("tabler:player-play"),
+                        style=HIDDEN,
                     ),
                 ],
-                gap="md",
+                gap="sm",
             ),
+        ],
+        justify="space-between",
+        mt="md",
+    )
+    return dmc.Container(
+        [
+            page_header(
+                "New session", "Pick footage, say what kind of practice it is, set targets."
+            ),
+            dcc.Store(id="ns-video"),
+            dcc.Store(id="ns-step", data=0),
+            dmc.Stepper(
+                id="ns-stepper",
+                active=0,
+                size="sm",
+                allowNextStepsSelect=False,
+                children=[dmc.StepperStep(label=label) for label in STEPS],
+                mb="md",
+            ),
+            *panes,
+            nav,
             file_browser("video-browser", mode="file", title="Choose footage"),
         ],
-        size="md",
+        size="lg",
         px=0,
     )
 
@@ -241,7 +270,7 @@ def _info_card(path: Path, info: VideoInfo, thumb: str | None):
     Output("ns-video", "data"),
     Output("ns-video-info", "children"),
     Output("ns-name", "value"),
-    Output("ns-create", "disabled"),
+    Output("ns-next", "disabled"),
     Input("video-browser-result", "data"),
     State("ns-name", "value"),
     prevent_initial_call=True,
@@ -276,16 +305,23 @@ def _video_picked(result, name):
     State("ns-mode", "value"),
     State("ns-submode", "value"),
     State("ns-profile", "value"),
+    State("ns-tgt-targets", "data"),
     running=[(Output("ns-create", "loading"), True, False)],
     prevent_initial_call=True,
 )
-def _create(n, video, name, mode, submode, profile_id):
+def _create(n, video, name, mode, submode, profile_id, targets):
     if not n or not video:
         return no_update, no_update
     s = state.settings()
     try:
         session = services.create_session(
-            s, Path(video["path"]), name, mode, submode, me_profile_id=profile_id or None
+            s,
+            Path(video["path"]),
+            name,
+            mode,
+            submode,
+            me_profile_id=profile_id or None,
+            practice_targets=targets_from_store(targets),
         )
         config = session.load_config()
         job_id = services.enqueue(s, config.id)
@@ -295,4 +331,67 @@ def _create(n, video, name, mode, submode, profile_id):
         ensure_worker(s.output_root)
     return "/jobs", notification(
         f"Session “{config.name}” created; job #{job_id} queued.", icon_name="tabler:check"
+    )
+
+
+@callback(
+    Output("ns-step", "data"),
+    Input("ns-next", "n_clicks"),
+    Input("ns-back", "n_clicks"),
+    State("ns-step", "data"),
+    prevent_initial_call=True,
+)
+def _step(_n, _b, step):
+    step = step or 0
+    if ctx.triggered_id == "ns-next":
+        return min(step + 1, len(STEPS) - 1)
+    return max(step - 1, 0)
+
+
+@callback(
+    Output("ns-stepper", "active"),
+    Output({"type": "ns-pane", "index": ALL}, "style"),
+    Output("ns-back", "disabled"),
+    Output("ns-next", "style"),
+    Output("ns-create", "style"),
+    Output("ns-create", "disabled"),
+    Input("ns-step", "data"),
+    State("ns-video", "data"),
+)
+def _show_step(step, video):
+    step = step or 0
+    last = step == len(STEPS) - 1
+    panes = [{} if i == step else HIDDEN for i in range(len(STEPS))]
+    return step, panes, step == 0, HIDDEN if last else {}, {} if last else HIDDEN, not video
+
+
+@callback(
+    Output("ns-review", "children"),
+    Input("ns-step", "data"),
+    State("ns-video", "data"),
+    State("ns-name", "value"),
+    State("ns-submode", "value"),
+    State("ns-profile", "value"),
+    State("ns-tgt-targets", "data"),
+)
+def _review(step, video, name, submode, profile_id, targets):
+    if step != len(STEPS) - 1:
+        return no_update
+    profile = services.get_profile(state.settings(), profile_id) if profile_id else None
+    valid = targets_from_store(targets)
+    rows = [
+        ("Video", Path(video["path"]).name if video else "–"),
+        ("Name", name or "–"),
+        ("Practice type", PRACTICE_SUBMODE_LABELS.get(submode, submode)),
+        ("Player", profile.name if profile else "not set"),
+        (
+            "Targets",
+            ", ".join(t.name for t in valid) if valid else "none (accuracy shows in/out only)",
+        ),
+    ]
+    return dmc.Table(
+        dmc.TableTbody(
+            [dmc.TableTr([dmc.TableTd(k, fw=500, w=130), dmc.TableTd(v)]) for k, v in rows]
+        ),
+        fz="sm",
     )

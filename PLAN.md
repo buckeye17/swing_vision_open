@@ -283,9 +283,9 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 14 | `pose3d` | ✓ | 1 | MotionBERT lifting, world placement, scale from profile height |
 | 15 | `swings` | – | 1 | kinematics, phases, stroke class per hit |
 | 16 | `shots` | – | 1 | join events + ball_3d + swings → `shots.parquet` (✅ M4: events + ball_3d, line calls; swings join in M6) |
-| 17 | `segments` | – | 1 (practice) / 2 (match) | Practice: shots grouped into blocks. Match: points (+ warm-up) |
+| 17 | `segments` | – | 1 (practice) / 2 (match) | ✅ Practice (M5): one segment per shot (seen hits, unseen contacts from landing + impact sound, toss + sound), feeds, serve/groundstroke, deuce/ad, blocks. Match: points (+ warm-up) |
 | 18 | `outcomes` + `scoring` | – | 2 | match only: point winner, reason, confidence, score log |
-| 19 | `practice_eval` | – | 1 | practice only: per-shot target hit/miss, distance, block summaries |
+| 19 | `practice_eval` | – | 1 | ✅ practice only: line calls (service box for serves), per-shot target hit/miss, distance, depth/width error, with the user's edits; rerun in-app after target/shot edits |
 | 20 | `stats` | – | 1 (session) / 2 (match stats) | session aggregates → `stats.json` |
 
 **Calibration gating**: stages 4–5 run automatically. `court_auto` runs right after `ingest`, so the calibration can be reviewed while the proxy encodes. Unless the auto calibration passes the Settings threshold ("continue without review when line RMS < X px", off by default), `camera` stops the job with status `needs_action`; Jobs and the session page link to the Calibrate page, and confirming there re-queues the job. Stage 6 doesn't depend on calibration except for the court-ROI crop. The `camera` stage's fingerprint covers only the chosen camera, so re-confirming an unchanged calibration invalidates nothing; if the user later adjusts calibration, stages 7+ rerun on CPU in minutes. (The runner re-plans each stage just before running it, so a stage's config may read files that upstream stages or the user wrote.)
@@ -465,6 +465,8 @@ The homography alone only gives positions on the ground. For speed:
   * **Ball machine**: one fixed hitting side. Machine feeds are recognized as not-the-user's shots and reported as feed consistency.
   * **Serve practice**: serve targets in service boxes.
 
+✅ Built in M5 (details and measurements in `docs/m5-practice.md`): shots come from the player's hits whose ball crosses the net (or the net; or drops back behind it), from **unseen contacts** (the first bounce opposite the player plus the impact sound, after a per-session audio/video offset; a serve's contact is often above the frame) and, at dusk, from a **toss** (the tracked ball rising above the player) plus a loud impact. Serves are recognized without the serve sub-mode (toss, contact ≥ 2.2 m, pre-serve dribbles, a fast unseen ball into a service box). 98.1% of 162 shots labeled by eye are segmented correctly with no spurious segments.
+
 ### 7.9 Point outcomes and scoring
 
 * For each point, `outcomes.py` produces `(winner, reason, confidence, evidence)`. Reasons: `ace`, `service_winner`, `double_fault`, `winner`, `forced/unforced_error_out_long|wide`, `net`, `double_bounce`, `let`, `unknown`.
@@ -483,6 +485,8 @@ The homography alone only gives positions on the ground. For speed:
 * **Target frame**: `relative` (default: defined on the *opponent's* half relative to the hitter, so it auto-mirrors when the player switches ends) or `absolute`.
 * Per shot: in-court, in-target, distance to target center, depth/width error, net.
 * Per block/session: target hit %, in % and net %, mean/median distance, depth consistency (std), and a rolling accuracy curve over the session (fatigue/learning). Breakdowns by stroke type and speed bands.
+
+✅ Built in M5: landings in the hitter's frame (`rel_x/rel_y`), serves called against the diagonal service box, other shots against the singles court, close calls within 2σ; targets with a stroke filter (only *serve* is known until M6); user edits (exclude, confirm, place landing) applied by `practice_eval`. Every target hit/miss on both sessions agrees with the target outline projected into the image (`scripts/m5_check_targets.py`).
 
 ---
 
@@ -507,7 +511,9 @@ key outputs, fit RMS and flags.
 
 `swings.parquet`: `swing_id, shot_id, phase_{name}_start/end frames, durations, contact metrics, peak angular velocities and timings, joint angle summary (min/max/at-contact), pose_quality`.
 
-`segments.parquet`: `segment_id, kind (point|warmup|practice_shot|block), start_t, end_t, block_id, point_index, server, first_serve_in, rally_length, end_reason`.
+`segments.parquet` (✅ M5, schema `SEGMENTS`): `segment_id, kind (point|warmup|practice_shot|block), start_t, end_t, block_id, shot_id, hit_event_id, feed_event_id, feed_kind, t_feed, t_contact, contact_source (hit|audio|estimate), t_end, end_reason, landing_*, hitter, side, shot_kind, serve_side, n_shots, conf, flags, point_index, server, first_serve_in, rally_length`.
+
+`practice.parquet` (✅ M5, schema `PRACTICE`): per practice shot: landing (after edits) and its hitter's-frame position, call (`outcome`, `call_area`, `margin_m`, `close_call`), applicable targets and hits, distance/depth/width error to the nearest target, speed, feed speed and bounce, `excluded`, `landing_confirmed`, flags.
 
 `points.parquet` / `score_log.parquet`: `point_index, winner_inferred, winner_final, reason, confidence, evidence_json, score_before/after, server, ends, overridden`.
 
@@ -644,11 +650,14 @@ Each milestone ends with tests passing, a demo on real footage, and a short READ
   * Real-world radar/ball-machine comparison: **not possible yet**, no such footage exists. Substitute physical references on the user's footage: g refitted from ground-to-ground flights is 9.87 / 9.96 m/s² (+0.6% / +1.5%, two sessions), so the speed scale is right to ≈1-1.5%; bounce restitution 0.80 (hard court); fitted vs feet→bounce horizontal speed 0.98. Oct 1 serves: 139 km/h median ± 2.8 km/h per shot, contact 2.76 m high. **Open item: record one session with a radar gun or a ball machine and compare.**
   * Oct 4's framing cuts the serves' flights at the top of the frame, so it yields no shots over the net (recording guide: leave sky above the far baseline).
 
-#### M5 — Practice mode: segmentation, targets, accuracy
-* Practice segmentation (one segment per shot, blocks, auto hitting-side detection, ball-machine feeds, serve-practice sub-mode).
-* New-session wizard (practice path), target drawing (relative/absolute, saved target sets), `practice_eval`.
-* Practice page: target overlay, landing scatter, KPIs, rolling accuracy, per-block table, click-to-play.
-* ✅ Exit criteria: ≥ 95% of practice shots segmented correctly on labeled sessions, and target accuracy is correct for every confirmed landing.
+#### M5 — Practice mode: segmentation, targets, accuracy ✅ (done 2026-10-06)
+* `segments` (`analysis/segmentation.py`): one segment per practice shot from seen hits, unseen contacts (landing + impact sound, audio/video offset measured per session) and toss + sound; feeds (dribbles, drop, ball-machine feed), serve/groundstroke kind with block-level filling, deuce/ad, hitting side, blocks (pause, end change, kind change), padding from Settings.
+* `practice_eval` (`analysis/practice.py`): service-box calls for serves, relative/absolute rect/circle targets with stroke filters, distance/depth/width errors, summaries, rolling accuracy, breakdowns; user edits in `edits.json` (`storage/edits.py`, optimistic versioning): exclude, confirm, place landing. Both stages rerun in-process after an edit (`services.refresh_practice`).
+* New-session wizard (footage → session → targets → review), target editor (draw/move/erase, presets, saved target sets in the library), Practice page (targets on the video, landing map as hit / on the court, KPIs, rolling accuracy, blocks, shots, breakdown, click-to-play, shot corrections, targets and practice type editable in place), Segments card + timeline bands + N/P keys on the session page, Practice column in the Library.
+* `sv practice show|eval`, ground-truth store `training/segments/<id>.json`, `scripts/m5_check_targets.py`.
+* ✅ Exit criteria (details in `docs/m5-practice.md`):
+  * Practice shots segmented correctly: **98.1%** (159 of 162 labeled shots, no spurious segments; Oct 1 100/101, Oct 4 59/61 on the audited spans). Both sessions are serve practice; self-feed groundstrokes and ball-machine feeds are covered by synthetic tests only, as no such footage exists yet.
+  * Target accuracy: **158 of 158** landings with a detected bounce agree with the targets projected into the image, for every target battery (relative/absolute, rectangles/circles, stroke filters); bounce pixels checked frame by frame against the court lines.
 * 🎯 **First usable milestone**: practice sessions with landings, speed, movement, and accuracy.
 
 #### M6 — Pose, swings, strokes

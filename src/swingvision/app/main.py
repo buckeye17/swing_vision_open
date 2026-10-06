@@ -19,6 +19,7 @@ PAGE_MODULES = [
     "new_session",
     "jobs",
     "session_review",
+    "practice",
     "calibrate",
     "profiles",
     "labeling",

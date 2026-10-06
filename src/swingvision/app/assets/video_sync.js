@@ -4,7 +4,9 @@
  * - Publishes {t, paused, duration} to the dcc.Store named in data-time-store
  *   (throttled to ~10 Hz while playing, immediately on seek/pause).
  * - Moves the cursor (shapes[0]) of the dcc.Graph named in data-timeline.
- * - Keyboard: Space play/pause, J/L ±5 s, K pause, ←/→ one frame, Shift+←/→ 1 s.
+ * - Keyboard: Space play/pause, J/L ±5 s, K pause, ←/→ one frame, Shift+←/→ 1 s,
+ *   N/P next/previous segment when the page put segment start times (a JSON list) in the
+ *   video's data-segments attribute.
  */
 (function () {
     "use strict";
@@ -83,6 +85,19 @@
                 v.pause();
                 v.currentTime = Math.min(v.duration || 1e9, v.currentTime + (e.shiftKey ? 1 : 1 / fps));
                 break;
+            case "n": case "N": case "p": case "P": {
+                let starts = [];
+                try { starts = JSON.parse(v.dataset.segments || "[]"); } catch (err) { starts = []; }
+                const now = v.currentTime;
+                const next = e.key.toLowerCase() === "n";
+                // "Previous" skips back past the segment we're in when we're well into it.
+                const t = next ? starts.find((s) => s > now + 0.25)
+                               : [...starts].reverse().find((s) => s < now - 1.0);
+                if (t === undefined) { handled = false; break; }
+                v.currentTime = t;
+                v.play();
+                break;
+            }
             default: handled = false;
         }
         if (handled) e.preventDefault();

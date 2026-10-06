@@ -72,6 +72,21 @@ def _moved(root, s: dict) -> str:
     return f"{dist:,.0f} m" if dist is not None else "–"
 
 
+def _accuracy(root, s: dict):
+    """Headline stat for practice sessions: in % (and target hits), linking to the Practice
+    page (from the practice_eval stage's manifest)."""
+    m = read_manifest(Session.open(root, s["dir_name"]), "practice_eval")
+    extra = (m or {}).get("extra", {})
+    if s["mode"] != "practice" or not extra.get("n"):
+        return "–"
+    text = f"{extra['n']} shots"
+    if extra.get("in_pct") is not None:
+        text += f" · {extra['in_pct']:.0%} in"
+    if extra.get("target_pct") is not None:
+        text += f" · {extra['target_pct']:.0%} on target"
+    return dmc.Anchor(text, href=f"/practice/{s['id']}", size="sm")
+
+
 def _row(root, s: dict):
     mode = s["mode"].capitalize()
     if s["submode"]:
@@ -86,6 +101,12 @@ def _row(root, s: dict):
                         "Process (stale stages)",
                         id={"type": "lib-process", "index": sid},
                         leftSection=icon("tabler:player-play", 14),
+                    ),
+                    dmc.MenuItem(
+                        "Practice accuracy",
+                        href=f"/practice/{sid}",
+                        leftSection=icon("tabler:target-arrow", 14),
+                        disabled=s["mode"] != "practice",
                     ),
                     dmc.MenuItem(
                         "Calibrate court",
@@ -124,6 +145,7 @@ def _row(root, s: dict):
             dmc.TableTd(mode),
             dmc.TableTd(fmt_duration(s["duration_s"])),
             dmc.TableTd(_moved(root, s)),
+            dmc.TableTd(_accuracy(root, s)),
             dmc.TableTd(fmt_time(s["created_at"])),
             dmc.TableTd(status_badge(s["status"]), style={"whiteSpace": "nowrap"}),
             dmc.TableTd(menu),
@@ -168,7 +190,17 @@ def _table(root, sessions: list[dict]):
         dmc.TableTr(
             [
                 dmc.TableTh(h)
-                for h in ("", "Name", "Mode", "Length", "Moved", "Created", "Status", "")
+                for h in (
+                    "",
+                    "Name",
+                    "Mode",
+                    "Length",
+                    "Moved",
+                    "Practice",
+                    "Created",
+                    "Status",
+                    "",
+                )
             ]
         )
     )

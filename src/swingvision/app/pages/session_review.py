@@ -28,6 +28,7 @@ from plotly.subplots import make_subplots
 
 from swingvision import services
 from swingvision.app import state
+from swingvision.app.components import practice_view as pv
 from swingvision.app.components.ball_view import (
     BOUNCE_COLOR,
     HIT_COLOR,
@@ -107,9 +108,11 @@ def timeline_figure(
     speed_v: np.ndarray | None = None,
     events: dict | None = None,
     shots: dict | None = None,
+    segments: list[tuple[float, float, str]] | None = None,
 ) -> go.Figure:
     """Audio onsets and ball events on top; once tracked, the player's speed and the shots'
-    speeds in their own rows below.
+    speeds in their own rows below. ``segments``: (start, end, color) bands (practice
+    shots).
 
     The rows share the time axis (zooming one zooms all); the cursor spans all.
     """
@@ -248,7 +251,24 @@ def timeline_figure(
                 "y0": 0,
                 "y1": 1,
                 "line": {"color": CURSOR_COLOR, "width": 2},
-            }
+            },
+            # Practice shots as bands behind everything (the cursor stays shapes[0]).
+            *(
+                {
+                    "type": "rect",
+                    "xref": "x",
+                    "yref": "paper",
+                    "x0": a,
+                    "x1": b,
+                    "y0": 0,
+                    "y1": 1,
+                    "fillcolor": color,
+                    "opacity": 0.13,
+                    "line": {"width": 0},
+                    "layer": "below",
+                }
+                for a, b, color in (segments or [])
+            ),
         ],
     )
     return fig
@@ -451,6 +471,17 @@ def layout(session_id: str | None = None, **_):
         if video
         else None
     )
+    practice = pv.load(session) if config.practice else None
+    seg_bands, seg_starts, seg_times = None, [], {}
+    if practice is not None:
+        seg_bands = [
+            (practice.segments[r["segment_id"]]["start_t"],
+             practice.segments[r["segment_id"]]["end_t"], pv.result_color(r))
+            for r in practice.rows
+            if r["segment_id"] in practice.segments
+        ]  # fmt: skip
+        seg_times = {str(k): v["start_t"] for k, v in practice.segments.items()}
+        seg_starts = sorted(seg_times.values())
     summary = load_players_summary(session)
     machine = summary.machine if summary else None
     is_machine = bool(config.practice and config.practice.submode == "ball_machine")
@@ -495,8 +526,19 @@ def layout(session_id: str | None = None, **_):
         style={"position": "relative"},
     )
 
+    practice_button = (
+        dmc.Anchor(
+            dmc.Button(
+                "Practice", variant="light", size="sm", leftSection=icon("tabler:target-arrow", 16)
+            ),
+            href=f"/practice/{config.id}",
+        )
+        if config.practice
+        else None
+    )
     header_right = dmc.Group(
         [
+            practice_button,
             dmc.Anchor(
                 dmc.Button(
                     "Calibrate", variant="default", size="sm", leftSection=icon("tabler:target", 16)
@@ -520,6 +562,9 @@ def layout(session_id: str | None = None, **_):
             dcc.Store(id="review-shots", data=shot_data),
             dcc.Store(id="review-shot-id"),
             dcc.Store(id="review-session-id", data=config.id),
+            dcc.Store(id="review-seg-starts", data=seg_starts),
+            dcc.Store(id="review-seg-times", data=seg_times),
+            dcc.Store(id="review-sink"),
             dmc.Grid(
                 [
                     dmc.GridCol(
@@ -566,7 +611,7 @@ def layout(session_id: str | None = None, **_):
                                         ),
                                         dmc.Text(
                                             "Space play/pause · J/L ±5 s · ←/→ frame · "
-                                            "Shift+←/→ 1 s",
+                                            "Shift+←/→ 1 s · N/P next/previous shot",
                                             size="xs",
                                             c="dimmed",
                                         ),
@@ -584,6 +629,7 @@ def layout(session_id: str | None = None, **_):
                                             speed_v,
                                             evs,
                                             shot_data,
+                                            seg_bands,
                                         ),
                                         config={"displayModeBar": False, "scrollZoom": True},
                                     ),
@@ -620,18 +666,7 @@ def layout(session_id: str | None = None, **_):
                                 ball_card(
                                     ball_track, ball_events, video.duration_s if video else 0.0, fps
                                 ),
-                                dmc.Paper(
-                                    [
-                                        dmc.Title("Segments", order=5, mb="xs"),
-                                        dmc.Text(
-                                            "Shot segmentation arrives in M5.",
-                                            size="sm",
-                                            c="dimmed",
-                                        ),
-                                    ],
-                                    p="md",
-                                    withBorder=True,
-                                ),
+                                pv.segments_card(config.id, practice) if config.practice else None,
                                 player_card(config, profiles),
                                 _calibration_card(config.id, cal, cal_label),
                                 dmc.Paper(
@@ -1010,3 +1045,38 @@ def _show_shot(shot_id, session_id):
             z = paths.column("z").to_numpy()[m].astype(np.float64)
             path = (y, z, r["side"])
     return shot_detail(r), side_view_figure(path)
+
+
+clientside_callback(
+    """
+    function(starts) {
+        const v = document.getElementById("review-video");
+        if (v && starts) { v.dataset.segments = JSON.stringify(starts); }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("review-sink", "data"),
+    Input("review-seg-starts", "data"),
+)
+
+
+clientside_callback(
+    """
+    function(clicks, times) {
+        const ctx = window.dash_clientside.callback_context;
+        const nu = window.dash_clientside.no_update;
+        if (!times || !ctx.triggered.length || !ctx.triggered[0].value) { return nu; }
+        const id = JSON.parse(ctx.triggered[0].prop_id.split(".")[0]).index;
+        const v = document.getElementById("review-video");
+        const t = times[String(id)];
+        if (!v || t === undefined) { return nu; }
+        v.currentTime = Math.max(0, t);
+        v.play();
+        return t;
+    }
+    """,
+    Output("review-seek", "data", allow_duplicate=True),
+    Input({"type": "review-seg-row", "index": ALL}, "n_clicks"),
+    State("review-seg-times", "data"),
+    prevent_initial_call=True,
+)

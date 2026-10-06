@@ -4,15 +4,16 @@ A personal, local-first tennis video analysis tool. Point a fixed camera at the 
 a practice or a match, and let your NVIDIA GPU break the footage down. The roadmap and
 architecture are in [PLAN.md](PLAN.md).
 
-**Status: milestones M0–M4 are complete.** The app ingests footage, builds a
+**Status: milestones M0–M5 are complete: practice mode is usable.** The app ingests footage, builds a
 browser-playable proxy, detects audio onsets, finds the court and fits a full camera model
 (sub-pixel on real footage), checks whether the camera moved during the recording, and lets
 you review the calibration. It tracks you on the court (also at dusk) and reports your
 movement: distance, speeds, a live court map and a heatmap. It tracks the ball on every frame
 with a detector trained on your own labeled footage and finds hits, bounces (with their spot
 on the court) and net contacts. Every shot gets a 3D flight: speed off the racket, at the net
-and before the bounce, net clearance, height, landing spot and line call. Practice targets
-and accuracy, swing analysis and match scoring arrive in M5–M10.
+and before the bounce, net clearance, height, landing spot and line call. Practice sessions
+are cut into one clip per shot (feed, hit, landing), grouped into blocks, and scored against
+targets you draw on the court. Swing analysis and match scoring arrive in M6–M10.
 
 ## Requirements
 
@@ -141,6 +142,38 @@ session with it. Leave room above the far baseline in the picture: a serve that 
 top of the frame has no detected contact and gets no shot record. Details in
 [docs/m4-ball-3d.md](docs/m4-ball-3d.md).
 
+### Practice: shots, targets, accuracy
+
+Every practice shot becomes its own clip, from the feed (a drop, your pre-serve bounces, a
+ball-machine feed) to where the ball landed, and the shots are grouped into blocks (a pause
+to collect balls, a change of end, or switching between serves and groundstrokes starts a
+new one). Shots are found from the hits the ball tracker saw, and also when it didn't see
+the contact: a serve hit above the top of the picture is found from its landing and the
+sound of the impact, and at dusk from your toss and the impact sound. Serves are recognized
+on their own (toss, contact height, pre-serve bounces) and called against the right service
+box; pick *Serve practice* to treat every shot as a serve.
+
+**Targets.** Draw rectangles or circles on the court when creating a session (or later on
+the Practice page), or add presets (service boxes, T and wide corners, deep zones), and save
+them as named target sets. Targets are *relative* by default: you draw them as if hitting
+from the near end, and they follow you when you play from the other end. *Absolute* targets
+stay where they are drawn. A target can be limited to serves (other stroke types arrive with
+stroke classification in M6).
+
+The **Practice** page (button on the session page, link in the Library) shows the video with
+the targets drawn in, where every ball landed ("as you hit" or on the court; click one to
+play it), in %, net %, target hits, distance to target, depth spread and speed, accuracy over
+the session, a table per block and per shot, and a breakdown by serve side and speed. Fix
+what the analysis got wrong right there: *Not a practice shot*, *Landing is right*, or
+*Place landing* and click the map; accuracy updates in a second. On the session page the
+Segments card lists the blocks and shots, the timeline shows each shot as a band, and N/P
+jump to the next/previous shot.
+
+Accuracy: on the user's two serve-practice sessions, 159 of 162 shots labeled by eye are
+found and clipped correctly (98.1%) with no false clips, and every target hit/miss agrees
+with the targets projected into the video. Details in
+[docs/m5-practice.md](docs/m5-practice.md).
+
 ### Profiles
 
 Create a profile for yourself on **Profiles** (name, handedness, one- or two-handed
@@ -169,6 +202,9 @@ uv run sv bench ball motion unet:my-model "unet:my-model,15"   # compare (HTML r
 uv run sv eval                         # metrics on the Test clips vs the M3 targets
 uv run sv shots <session-id>           # shots: speed, net clearance, landing, line call
 uv run python scripts/m4_validate_speed.py <session-dir>   # speed-scale checks (gravity, drag)
+uv run sv practice show <session-id>   # practice blocks and shots: call, target, speed
+uv run sv practice eval                # segmentation vs shots labeled by eye (M5 target: 95%)
+uv run python scripts/m5_check_targets.py <session-id> --sets builtin  # target check in the image
 ```
 
 ## Recording tips
@@ -180,6 +216,9 @@ uv run python scripts/m4_validate_speed.py <session-dir>   # speed-scale checks 
   at the top edge of the picture, you can't be tracked while standing behind it.
 * Record 4K at 60 fps, with exposure and focus locked if your phone allows it. Avoid recording
   into darkness.
+* Leave room at the top of the picture (some sky above the far baseline): a serve's toss and
+  contact that go out of the top of the frame can only be found from where the ball lands
+  and the sound of the hit, and get no speed.
 * Don't touch the camera once you start recording. (If you do, the drift check notices and
   calibrates those minutes separately, but it's better not to.)
 
@@ -206,7 +245,7 @@ src/swingvision/
   players/           person detection, tracking, movement (M2)
   ball/              ball detectors, frame-rate schedules, linking, events (M3),
                      3D flight physics and fitting (M4)
-  analysis/          shot records (M4); segmentation, practice, stats later
+  analysis/          shot records (M4); practice segmentation, targets, accuracy (M5)
   training/          labels, labeling helpers, training, benchmark, evaluation (M3)
   models/            pretrained weights registry (URLs, SHA-256, licenses)
   pipeline/          stage framework, DAG runner, worker process, stages/
