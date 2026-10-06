@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
 import shutil
@@ -19,6 +20,9 @@ from swingvision.storage.schemas import (
     PracticeSubmode,
     Profile,
     SessionConfig,
+    SessionEdits,
+    Target,
+    TargetSet,
 )
 from swingvision.storage.session import Session
 
@@ -48,6 +52,7 @@ def create_session(
     mode: Mode = "practice",
     practice_submode: PracticeSubmode = "self_feed",
     me_profile_id: str | None = None,
+    practice_targets: list[Target] | None = None,
 ) -> Session:
     library = open_library(settings)
     source = source_info(Path(source_path))
@@ -66,7 +71,11 @@ def create_session(
         source=source,
         video=video,
         mode=mode,
-        practice=PracticeConfig(submode=practice_submode) if mode == "practice" else None,
+        practice=(
+            PracticeConfig(submode=practice_submode, targets=list(practice_targets or []))
+            if mode == "practice"
+            else None
+        ),
         match=MatchConfig() if mode == "match" else None,
         players=PlayersConfig(me_profile_id=me_profile_id),
     )
@@ -201,3 +210,131 @@ def set_session_player(settings: AppSettings, session_id: str, profile_id: str |
     config = session.load_config()
     config.players.me_profile_id = profile_id or None
     session.save_config(config)
+
+
+# ---------------------------------------------------------------------------
+# Practice (M5)
+# ---------------------------------------------------------------------------
+
+#: Stages cheap enough for the app to run itself after an edit (seconds, CPU).
+CHEAP_STAGES = frozenset({"segments", "practice_eval"})
+
+
+def set_practice(
+    settings: AppSettings,
+    session_id: str,
+    *,
+    submode: PracticeSubmode | None = None,
+    targets: list[Target] | None = None,
+) -> SessionConfig:
+    """Change a practice session's type and/or targets (call :func:`refresh_practice` next)."""
+    session = session_by_id(settings, session_id)
+    if session is None:
+        raise ValueError(f"Unknown session {session_id}")
+    config = session.load_config()
+    if config.practice is None:
+        raise ValueError("Not a practice session")
+    if submode is not None:
+        config.practice.submode = submode
+        open_library(settings).update_session(session_id, submode=submode)
+    if targets is not None:
+        config.practice.targets = list(targets)
+    session.save_config(config)
+    return config
+
+
+def refresh_practice(settings: AppSettings, session_id: str) -> tuple[str, int | None]:
+    """Bring ``segments`` and ``practice_eval`` up to date after an edit.
+
+    Runs them right here when nothing heavier is stale (``"ran"``); otherwise queues a job
+    (``"queued"``, job id). ``"busy"``: the session is being processed, and the change is
+    picked up when the job gets to these stages.
+    """
+    from swingvision.pipeline.runner import plan, run
+    from swingvision.pipeline.stages import default_registry
+    from swingvision.storage.library import ACTIVE_JOB_STATUSES
+
+    library = open_library(settings)
+    job = library.latest_job_for_session(session_id)
+    if job is not None and job.status in ACTIVE_JOB_STATUSES:
+        return "busy", job.id
+    session = session_by_id(settings, session_id)
+    if session is None:
+        raise ValueError(f"Unknown session {session_id}")
+    registry = default_registry()
+    planned = plan(registry, session, session.load_config(), settings, ["practice_eval"])
+    stale = {p.stage.name for p in planned if not p.fresh}
+    if not stale:
+        return "ran", None
+    if stale <= CHEAP_STAGES:
+        result = run(registry, session, settings, targets=["practice_eval"])
+        if result.status != "done":
+            raise RuntimeError(result.message or "Practice evaluation failed")
+        return "ran", None
+    return "queued", enqueue(settings, session_id, targets=["practice_eval"])
+
+
+def edit_practice_shot(
+    settings: AppSettings,
+    session_id: str,
+    t: float,
+    *,
+    exclude: bool | None = None,
+    landing: list[float] | bool | None = False,
+    confirmed: bool | None = None,
+    expected_version: int | None = None,
+) -> SessionEdits:
+    """Record a correction to the practice shot anchored at ``t`` (see ``storage.edits``)."""
+    from swingvision.storage import edits
+
+    session = session_by_id(settings, session_id)
+    if session is None:
+        raise ValueError(f"Unknown session {session_id}")
+    return edits.update(
+        session,
+        lambda e: edits.set_practice_shot(
+            e, t, exclude=exclude, landing=landing, confirmed=confirmed
+        ),
+        expected_version,
+    )
+
+
+def _target_set(row: dict) -> TargetSet:
+    return TargetSet(
+        id=row["id"],
+        name=row["name"],
+        targets=[Target.model_validate(t) for t in json.loads(row["targets"] or "[]")],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def list_target_sets(settings: AppSettings) -> list[TargetSet]:
+    return [_target_set(r) for r in open_library(settings).list_target_sets()]
+
+
+def get_target_set(settings: AppSettings, set_id: str) -> TargetSet | None:
+    row = open_library(settings).get_target_set(set_id)
+    return _target_set(row) if row else None
+
+
+def save_target_set(
+    settings: AppSettings, name: str, targets: list[Target], set_id: str | None = None
+) -> TargetSet:
+    """Save targets under a name; a set with the same name (any case) is replaced."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("A target set needs a name.")
+    library = open_library(settings)
+    if set_id is None:
+        same = [r for r in library.list_target_sets() if r["name"].lower() == name.lower()]
+        set_id = same[0]["id"] if same else secrets.token_hex(4)
+    payload = json.dumps([t.model_dump() for t in targets])
+    library.save_target_set(set_id, name, payload)
+    saved = get_target_set(settings, set_id)
+    assert saved is not None
+    return saved
+
+
+def delete_target_set(settings: AppSettings, set_id: str) -> None:
+    open_library(settings).delete_target_set(set_id)

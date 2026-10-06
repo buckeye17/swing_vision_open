@@ -35,6 +35,11 @@ class ProcessingDefaults(BaseModel):
     chunk_seconds: float = 120.0
     segment_pad_before_s: float = 2.0
     segment_pad_after_s: float = 2.0
+    #: Practice shots: padding before the feed and after the landing (s), and the pause
+    #: between two shots that starts a new block (collecting balls).
+    practice_pad_before_s: float = 1.0
+    practice_pad_after_s: float = 1.5
+    practice_block_gap_s: float = 45.0
     #: Continue without review when the auto calibration's line RMS is below this (px).
     #: ``None`` always pauses the job for review (status ``needs_action``).
     calibration_auto_accept_px: float | None = None

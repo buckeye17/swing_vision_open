@@ -25,6 +25,10 @@ bench_app = typer.Typer(no_args_is_help=True, help="Benchmarks.")
 app.add_typer(bench_app, name="bench")
 train_app = typer.Typer(no_args_is_help=True, help="Train models on your labels.")
 app.add_typer(train_app, name="train")
+practice_app = typer.Typer(
+    no_args_is_help=True, help="Practice sessions: shots, targets, accuracy."
+)
+app.add_typer(practice_app, name="practice")
 
 
 @app.command("app")
@@ -203,6 +207,122 @@ def shots(
         f"({s['n_speed']} speeds certain enough)"
     )
     typer.echo(speed_error_text())
+
+
+def _practice_session(session_id: str):
+    from swingvision import services
+
+    settings = load_settings()
+    session = services.session_by_id(settings, session_id)
+    if session is None:
+        raise typer.BadParameter(f"Unknown session {session_id}")
+    return settings, session
+
+
+@practice_app.command("show")
+def practice_show(
+    session_id: str,
+    refresh: Annotated[
+        bool, typer.Option(help="Rerun segmentation and accuracy first if they're stale")
+    ] = True,
+) -> None:
+    """A practice session's blocks and shots: kind, landing, call, targets (M5)."""
+    from swingvision import services
+    from swingvision.analysis import practice as pr
+    from swingvision.analysis.segmentation import blocks_of
+    from swingvision.storage import tables
+
+    settings, session = _practice_session(session_id)
+    if refresh:
+        status, job = services.refresh_practice(settings, session_id)
+        if status != "ran":
+            typer.echo(f"Processing needed first ({status}, job {job}).")
+    if not session.practice_path.exists():
+        raise typer.BadParameter("No practice results yet: process the session first")
+    rows = tables.read_table(session.practice_path).to_pylist()
+    blocks = blocks_of(tables.read_table(session.segments_path))
+
+    def num(v, fmt: str) -> str:
+        return "-" if v is None else format(v, fmt)
+
+    def pct(v) -> str:
+        return "-" if v is None else f"{v:.0%}"
+
+    for b in blocks:
+        mine = [r for r in rows if r["block_id"] == b["block_id"]]
+        s = pr.summarize(mine)
+        end = {-1: "near", 1: "far"}.get(b["side"], "?")
+        typer.echo(
+            f"\nBlock {b['block_id'] + 1}: {b['start_t']:.0f}-{b['end_t']:.0f} s, "
+            f"{b['n_shots']} {b['shot_kind']} shots from the {end} end; in {pct(s['in_pct'])}, "
+            f"net {pct(s['net_pct'])}, target {pct(s['target_pct'])}"
+        )
+        for r in mine:
+            land = "-"
+            if r["landing_x"] is not None:
+                land = f"({r['landing_x']:.2f}, {r['landing_y']:.2f})"
+            tgt = "" if r["in_target"] is None else ("  HIT " if r["in_target"] else "  miss")
+            if r["target_dist_m"] is not None:
+                tgt += f" {r['target_dist_m']:.2f} m"
+            kind = r["shot_kind"] + (f"/{r['serve_side']}" if r["serve_side"] else "")
+            typer.echo(
+                f"  {r['t_contact']:8.2f} {kind:<13} {land:>17} {r['outcome']:<9}"
+                f"{num(r['speed_kmh'], '.0f'):>5} km/h{tgt}{'  (excluded)' if r['excluded'] else ''}"
+            )
+    s = pr.summarize(rows)
+    typer.echo(
+        f"\n{s['n']} practice shots in {len(blocks)} blocks; {s['n_called']} called: "
+        f"in {pct(s['in_pct'])}, net {pct(s['net_pct'])}; target hits {pct(s['target_pct'])} "
+        f"of {s['n_targeted']}; median distance to target {num(s['dist_median'], '.2f')} m"
+    )
+
+
+@practice_app.command("eval")
+def practice_eval(
+    session_ids: Annotated[
+        list[str] | None, typer.Argument(help="Sessions (default: every labeled one)")
+    ] = None,
+) -> None:
+    """Score practice segmentation against shots labeled by eye (M5 exit criterion: 95%)."""
+    from swingvision import services
+    from swingvision.analysis.segmentation import practice_shots
+    from swingvision.storage import tables
+    from swingvision.training.practice_labels import (
+        SEGMENT_LABELS_DIR,
+        load_labels,
+        score_segments,
+    )
+
+    settings = load_settings()
+    root = settings.require_output_root()
+    if not session_ids:
+        d = root.joinpath(*SEGMENT_LABELS_DIR)
+        session_ids = sorted(p.stem for p in d.glob("*.json")) if d.exists() else []
+    if not session_ids:
+        raise typer.BadParameter("No labeled sessions (training/segments/<id>.json)")
+    total = [0, 0, 0]  # correct, labeled, spurious
+    for sid in session_ids:
+        labels = load_labels(root, sid)
+        session = services.session_by_id(settings, sid)
+        if labels is None or session is None:
+            typer.echo(f"{sid}: no labels or no session")
+            continue
+        services.refresh_practice(settings, sid)
+        sc = score_segments(practice_shots(tables.read_table(session.segments_path)), labels)
+        total[0] += sc.covered
+        total[1] += sc.n_labeled
+        total[2] += len(sc.false)
+        typer.echo(
+            f"{sid}: {sc.covered}/{sc.n_labeled} shots segmented correctly, "
+            f"{len(sc.false)} spurious -> {sc.accuracy:.1%} "
+            f"(recall {sc.recall:.1%}, precision {sc.precision:.1%}, net/landing agree "
+            f"{sc.end_agree}/{sc.matched})"
+        )
+        for name, ts in (("missed", sc.missed), ("spurious", sc.false), ("cut", sc.uncovered)):
+            if ts:
+                typer.echo(f"  {name}: " + ", ".join(f"{t:.1f}" for t in ts))
+    acc = total[0] / (total[1] + total[2]) if total[1] + total[2] else 1.0
+    typer.echo(f"{'PASS' if acc >= 0.95 else 'FAIL'}  all sessions: {acc:.1%} (>= 95%)")
 
 
 @court_app.command("detect")

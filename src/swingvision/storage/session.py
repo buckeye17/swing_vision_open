@@ -167,6 +167,21 @@ class Session:
     def shots_path(self) -> Path:
         return self.path / "shots.parquet"
 
+    @property
+    def segments_path(self) -> Path:
+        """Practice shots and blocks (match points from Phase 2)."""
+        return self.path / "segments.parquet"
+
+    @property
+    def practice_path(self) -> Path:
+        """Per-shot line calls and target accuracy (``practice_eval``)."""
+        return self.path / "practice.parquet"
+
+    @property
+    def edits_path(self) -> Path:
+        """User overrides (PLAN.md §9.3). Never written by the pipeline."""
+        return self.path / "edits.json"
+
     def job_log_path(self, job_id: int) -> Path:
         return self.logs_dir / f"job-{job_id:05d}.log"
 

@@ -96,6 +96,16 @@ MIGRATIONS: list[str] = [
         state TEXT
     );
     """,
+    # v2: saved practice target sets (M5)
+    """
+    CREATE TABLE target_sets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        targets TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 
@@ -443,6 +453,33 @@ class Library:
     def delete_profile(self, profile_id: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+
+    # -- target sets ---------------------------------------------------------------
+    def save_target_set(self, id: str, name: str, targets_json: str) -> None:
+        """Insert or replace a target set (``targets_json``: a JSON list of targets)."""
+        ts = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO target_sets (id, name, targets, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name = excluded.name,
+                       targets = excluded.targets, updated_at = excluded.updated_at""",
+                (id, name, targets_json, ts, ts),
+            )
+
+    def get_target_set(self, set_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM target_sets WHERE id = ?", (set_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_target_sets(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM target_sets ORDER BY name COLLATE NOCASE").fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_target_set(self, set_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM target_sets WHERE id = ?", (set_id,))
 
     # -- worker heartbeat ----------------------------------------------------------
     def worker_heartbeat(self, worker_id: str, pid: int, state: str, started_at: str) -> None:

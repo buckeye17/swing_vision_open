@@ -75,6 +75,35 @@ class Target(BaseModel):
     strokes: list[str] = Field(default_factory=list)
 
 
+class TargetSet(BaseModel):
+    """A named, reusable list of targets (``target_sets`` table)."""
+
+    id: str
+    name: str
+    targets: list[Target] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class PracticeShotEdit(BaseModel):
+    """A user correction to one practice shot, found again by its anchor time (the hit, or
+    the landing when the contact wasn't seen) so it survives re-segmentation."""
+
+    t: float
+    exclude: bool = False
+    #: Landing placed by the user, court meters.
+    landing: list[float] | None = None
+    #: The user checked the landing (detected or placed) on the video.
+    confirmed: bool = False
+
+
+class SessionEdits(BaseModel):
+    """``edits.json``: user overrides layered over derived data (PLAN.md §9.3)."""
+
+    version: int = 0
+    practice_shots: list[PracticeShotEdit] = Field(default_factory=list)
+
+
 class PracticeConfig(BaseModel):
     submode: PracticeSubmode = "self_feed"
     targets: list[Target] = Field(default_factory=list)
@@ -528,6 +557,92 @@ SHOTS = table_schema(
     ],
 )
 
+# ---------------------------------------------------------------------------
+# Segments and practice accuracy (PLAN.md §7.8, §7.10, §8)
+# ---------------------------------------------------------------------------
+
+#: Practice shots and the blocks they're grouped into (``segments``); match points and
+#: warm-ups arrive with Phase 2 in the same file.
+SEGMENTS = table_schema(
+    "segments",
+    1,
+    [
+        field("segment_id", pa.int32(), None, "Segment number within the session", nullable=False),
+        field("kind", pa.string(), None, "practice_shot | block (point | warmup: Phase 2)"),
+        field("start_t", pa.float64(), "s", "Segment start (feed minus padding)"),
+        field("end_t", pa.float64(), "s", "Segment end (landing plus padding)"),
+        field("block_id", pa.int32(), None, "Block the shot belongs to / the block's number"),
+        field("shot_id", pa.int32(), None, "shots.parquet row (null: the contact wasn't seen)"),
+        field("hit_event_id", pa.int32(), None, "The hit in events.parquet"),
+        field("feed_event_id", pa.int32(), None, "Ball-machine feed (hit by machine)"),
+        field("feed_kind", pa.string(), None, "machine | drop | dribble | toss | none"),
+        field("t_feed", pa.float64(), "s", "Start of the feed (drop, dribbles, machine feed)"),
+        field("t_contact", pa.float64(), "s", "Contact time (estimated when not seen)"),
+        field("contact_source", pa.string(), None, "hit | audio (impact sound) | estimate"),
+        field("t_end", pa.float64(), "s", "Landing, net contact or end of the tracked flight"),
+        field("end_reason", pa.string(), None, "bounce | net | lost | none"),
+        field("landing_event_id", pa.int32(), None, "Bounce the shot landed with"),
+        field("landing_x", pa.float32(), "m", "Where the ball first came down (court)"),
+        field("landing_y", pa.float32(), "m"),
+        field("landing_sigma_m", pa.float32(), "m", "1-σ landing position (major axis)"),
+        field("landing_source", pa.string(), None, "bounce (detected) | fit (extended path)"),
+        field("hitter", pa.string(), None, "me | opponent | machine | unknown"),
+        field("side", pa.int8(), None, "Hitter's half: -1 near (camera side), +1 far"),
+        field("shot_kind", pa.string(), None, "serve | groundstroke | unknown"),
+        field("serve_side", pa.string(), None, "Serves: deuce | ad (server's half)"),
+        field("n_shots", pa.int32(), None, "Blocks: practice shots in the block"),
+        field("conf", pa.float32(), None, "Confidence 0-1 that this is a practice shot"),
+        field("flags", pa.list_(pa.string()), None),
+        field("point_index", pa.int32(), None, "(Phase 2)"),
+        field("server", pa.string(), None, "(Phase 2)"),
+        field("first_serve_in", pa.bool_(), None, "(Phase 2)"),
+        field("rally_length", pa.int32(), None, "(Phase 2)"),
+    ],
+)
+
+#: One row per practice shot: line call, targets, accuracy (``practice_eval``).
+PRACTICE = table_schema(
+    "practice",
+    1,
+    [
+        field("segment_id", pa.int32(), None, "The shot's segment", nullable=False),
+        field("block_id", pa.int32(), None),
+        field("shot_id", pa.int32(), None, "shots.parquet row (null: contact not seen)"),
+        field("t_contact", pa.float64(), "s"),
+        field("t_end", pa.float64(), "s", "Landing / net / end time"),
+        field("side", pa.int8(), None, "Hitter's half: -1 near, +1 far"),
+        field("shot_kind", pa.string(), None, "serve | groundstroke | unknown"),
+        field("serve_side", pa.string(), None, "deuce | ad"),
+        field("stroke_type", pa.string(), None, "(M6)"),
+        field("landing_x", pa.float32(), "m", "Landing on the court (after user edits)"),
+        field("landing_y", pa.float32(), "m"),
+        field("landing_sigma_m", pa.float32(), "m"),
+        field("landing_source", pa.string(), None, "bounce | fit | user"),
+        field("landing_confirmed", pa.bool_(), None, "The user confirmed or placed the landing"),
+        field("rel_x", pa.float32(), "m", "Landing in the hitter's frame (hitter at the near end)"),
+        field("rel_y", pa.float32(), "m"),
+        field("outcome", pa.string(), None, "in | out_long | out_wide | net | own_side | unknown"),
+        field("call_area", pa.string(), None, "singles | deuce_box | ad_box (what was called)"),
+        field("margin_m", pa.float32(), "m", "Inside (+) / outside (-) the called area"),
+        field("close_call", pa.bool_(), None, "|margin| below 2 landing σ"),
+        field("targets", pa.list_(pa.string()), None, "Ids of the targets that apply"),
+        field("target_id", pa.string(), None, "Nearest applicable target"),
+        field("in_target", pa.bool_(), None, "Landed in an applicable target (null: n/a)"),
+        field("targets_hit", pa.list_(pa.string()), None),
+        field("target_dist_m", pa.float32(), "m", "Landing to the nearest target's center"),
+        field("target_edge_m", pa.float32(), "m", "Inside (+) / outside (-) that target"),
+        field("depth_err_m", pa.float32(), "m", "Deeper (+) / shorter (-) than its center"),
+        field("width_err_m", pa.float32(), "m", "Hitter's right (+) / left (-) of its center"),
+        field("speed_kmh", pa.float32(), "km/h", "Speed off the racket (uncalibrated)"),
+        field("speed_err_kmh", pa.float32(), "km/h", "Uncalibrated error bound"),
+        field("feed_speed_kmh", pa.float32(), "km/h", "Ball-machine feed speed"),
+        field("feed_land_x", pa.float32(), "m", "Ball-machine feed bounce"),
+        field("feed_land_y", pa.float32(), "m"),
+        field("excluded", pa.bool_(), None, "Marked 'not a practice shot' by the user"),
+        field("flags", pa.list_(pa.string()), None),
+    ],
+)
+
 SCHEMAS: dict[str, pa.Schema] = {
     "audio_onsets": AUDIO_ONSETS,
     "pass1_frames": PASS1_FRAMES,
@@ -541,4 +656,6 @@ SCHEMAS: dict[str, pa.Schema] = {
     "ball_flights": BALL_FLIGHTS,
     "ball_flight_paths": BALL_FLIGHT_PATHS,
     "shots": SHOTS,
+    "segments": SEGMENTS,
+    "practice": PRACTICE,
 }
