@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from swingvision.storage import cache
 from swingvision.storage.fsutil import atomic_write_text
 from swingvision.storage.schemas import SessionConfig
 
@@ -25,7 +26,8 @@ class Session:
         return self.path / CONFIG_NAME
 
     def load_config(self) -> SessionConfig:
-        return SessionConfig.model_validate_json(self.config_path.read_text(encoding="utf-8"))
+        text = cache.local(self.config_path).read_text(encoding="utf-8")
+        return SessionConfig.model_validate_json(text)
 
     def save_config(self, config: SessionConfig) -> None:
         atomic_write_text(self.config_path, config.model_dump_json(indent=2))

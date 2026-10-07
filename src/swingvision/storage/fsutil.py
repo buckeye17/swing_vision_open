@@ -10,6 +10,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from swingvision.storage import cache
+
 
 def atomic_replace(tmp: Path, dst: Path, retries: int = 20, delay_s: float = 0.05) -> None:
     """``os.replace`` with retries: on Windows a reader holding ``dst`` open blocks the rename."""
@@ -34,6 +36,7 @@ def atomic_write(path: Path, writer: Callable[[Path], None], suffix: str = "") -
     try:
         writer(tmp)
         atomic_replace(tmp, path)
+        cache.forget(path)
     finally:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
@@ -48,4 +51,4 @@ def atomic_write_json(path: Path, obj: Any) -> None:
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(cache.local(path).read_text(encoding="utf-8"))

@@ -17,6 +17,7 @@ from swingvision.app.worker_control import ensure_worker
 from swingvision.io.ffmpeg import available_encoders
 from swingvision.models.registry import REGISTRY, weights_dir
 from swingvision.settings import save_settings, settings_path
+from swingvision.storage import cache as read_cache
 from swingvision.storage.library import Library
 
 register_file_browser("out-browser", mode="folder")
@@ -195,6 +196,90 @@ def _ball_card(s):
     )
 
 
+def _units_card(s):
+    return dmc.Paper(
+        [
+            dmc.Title("Units", order=4),
+            dmc.Text(
+                "How distances, heights and speeds are shown. Data and exports stay metric.",
+                size="sm",
+                c="dimmed",
+                mb="sm",
+            ),
+            dmc.SegmentedControl(
+                id="set-units",
+                value=s.units,
+                data=[
+                    {"value": "metric", "label": "Metric (m, km/h)"},
+                    {"value": "imperial", "label": "Imperial (ft, mph)"},
+                ],
+            ),
+        ],
+        p="lg",
+        withBorder=True,
+    )
+
+
+def _cache_status(s) -> str:
+    if s.output_root is None:
+        return "No output folder yet."
+    if not read_cache.is_network_path(s.output_root):
+        return "The output folder is on this computer: there's nothing to cache."
+    active = read_cache.active()
+    if not s.local_cache or active is None:
+        return "The output folder is on a network share; the cache is off."
+    return (
+        f"The output folder is on a network share. Cached: "
+        f"{active.size_bytes() / 1024**3:.2f} GB in {active.dir}."
+    )
+
+
+def _cache_card(s):
+    return dmc.Paper(
+        [
+            dmc.Title("Local cache", order=4),
+            dmc.Text(
+                "When the output folder is on a network share (a NAS), the app keeps local "
+                "copies of the session data and playback videos it reads, which makes pages and "
+                "seeking much faster. Copies refresh by themselves when processing changes the "
+                "originals; the least recently used ones go when the cache is full.",
+                size="sm",
+                c="dimmed",
+                mb="sm",
+            ),
+            dmc.Switch(
+                id="set-cache-on",
+                label="Cache a network output folder on this computer",
+                checked=s.local_cache,
+                mb="sm",
+            ),
+            dmc.Group(
+                [
+                    dmc.NumberInput(
+                        id="set-cache-max",
+                        label="Cache size limit (GB)",
+                        value=s.cache_max_gb,
+                        min=1,
+                        max=2000,
+                        step=5,
+                        w=200,
+                    ),
+                    dmc.Button(
+                        "Clear cache",
+                        id="set-cache-clear",
+                        variant="default",
+                        leftSection=icon("tabler:trash"),
+                    ),
+                ],
+                align="flex-end",
+            ),
+            dmc.Text(_cache_status(s), id="set-cache-status", size="xs", c="dimmed", mt="xs"),
+        ],
+        p="lg",
+        withBorder=True,
+    )
+
+
 def layout(**_):
     s = state.settings()
     return dmc.Container(
@@ -334,6 +419,8 @@ def layout(**_):
                     ),
                     _players_card(s),
                     _ball_card(s),
+                    _units_card(s),
+                    _cache_card(s),
                     dmc.Paper(
                         [
                             dmc.Title("System", order=4, mb="xs"),
@@ -399,6 +486,9 @@ def _browser_start(value):
     State("set-roi-beside", "value"),
     State("set-ball-detector", "value"),
     State("set-ball-sweep", "value"),
+    State("set-units", "value"),
+    State("set-cache-on", "checked"),
+    State("set-cache-max", "value"),
     prevent_initial_call=True,
 )
 def _save(
@@ -417,6 +507,9 @@ def _save(
     roi_beside,
     ball_detector,
     ball_sweep,
+    units,
+    cache_on,
+    cache_max,
 ):
     if not n:
         return no_update, no_update
@@ -448,9 +541,25 @@ def _save(
     s.processing.roi_beside_m = float(roi_beside or s.processing.roi_beside_m)
     s.processing.ball_detector = ball_detector or s.processing.ball_detector
     s.processing.ball_sweep_hz = None if ball_sweep in (None, "full") else float(ball_sweep)
+    s.units = units if units in ("metric", "imperial") else s.units
+    s.local_cache = bool(cache_on)
+    s.cache_max_gb = max(1.0, float(cache_max or s.cache_max_gb))
     save_settings(s)
+    state.settings()  # apply the cache settings now
     if state.OPTIONS.start_worker:
         ensure_worker(s.output_root)
     return notification("Settings saved.", icon_name="tabler:check"), _tool_report(
         s.ffmpeg_path, s.ffprobe_path
     )
+
+
+@callback(
+    Output("set-cache-status", "children"),
+    Input("set-cache-clear", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _clear_cache(n):
+    active = read_cache.active()
+    if active is not None:
+        active.clear()
+    return _cache_status(state.settings())

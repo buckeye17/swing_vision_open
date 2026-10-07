@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from typing import Literal
 
 from platformdirs import user_config_dir, user_data_dir
 from pydantic import BaseModel, Field, field_validator
@@ -93,12 +94,21 @@ class AppSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8050
     processing: ProcessingDefaults = Field(default_factory=ProcessingDefaults)
+    #: How the app shows distances and speeds (data are always stored in SI units).
+    units: Literal["metric", "imperial"] = "metric"
+    #: Keep local copies of what the app reads from an output folder on a network share.
+    local_cache: bool = True
+    cache_dir: Path | None = None  # default: <data_dir>/cache
+    cache_max_gb: float = Field(20.0, ge=1.0)
 
     @field_validator("output_root", mode="before")
     @classmethod
     def _blank_is_unset(cls, value):
         # Path("") would silently mean the current directory.
         return None if isinstance(value, str) and not value.strip() else value
+
+    def cache_path(self) -> Path:
+        return self.cache_dir or data_dir() / "cache"
 
     def ffmpeg(self) -> str:
         return _resolve_tool(self.ffmpeg_path)

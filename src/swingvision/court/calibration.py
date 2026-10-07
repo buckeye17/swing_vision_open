@@ -40,6 +40,7 @@ from swingvision.court.detect import (
     ridge_samples,
 )
 from swingvision.io.frames import grab_frames, luminance, median_image
+from swingvision.storage import cache
 from swingvision.storage.fsutil import atomic_write_text
 from swingvision.storage.schemas import (
     Calibration,
@@ -526,7 +527,7 @@ def load(path: Path) -> Calibration | None:
     if not path.exists():
         return None
     try:
-        return Calibration.model_validate_json(path.read_text(encoding="utf-8"))
+        return Calibration.model_validate_json(cache.local(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 

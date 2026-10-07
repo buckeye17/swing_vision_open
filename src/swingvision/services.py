@@ -28,7 +28,7 @@ from swingvision.storage.session import Session
 
 
 def open_library(settings: AppSettings) -> Library:
-    return Library(settings.require_output_root()).init()
+    return Library(settings.require_output_root()).init().keep_open()
 
 
 def slugify(text: str, max_len: int = 40) -> str:

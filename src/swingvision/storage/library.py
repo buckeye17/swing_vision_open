@@ -1,13 +1,17 @@
 """SQLite library in the output root: sessions index, job queue, profiles, worker heartbeat.
 
 The app (many Flask threads) and the worker process both use this file, so every
-operation opens a short-lived connection in WAL mode.
+operation opens a short-lived connection in WAL mode. Long-running processes hold one more
+connection open (:meth:`Library.keep_open`): otherwise each short-lived one is the last to
+close, which checkpoints and deletes the WAL, ~90 ms a query on a network share (~3 ms with
+it).
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -150,6 +154,11 @@ class Job:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
+_lock = threading.Lock()
+_ready: set[Path] = set()  # libraries this process already created/migrated
+_anchors: dict[Path, sqlite3.Connection] = {}
+
+
 class Library:
     def __init__(self, output_root: Path):
         self.root = Path(output_root)
@@ -179,6 +188,9 @@ class Library:
                 raise
 
     def init(self) -> Library:
+        """Create or migrate the database (once per process: it's ~70 ms on a share)."""
+        if self.path in _ready and self.path.exists():
+            return self
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "sessions").mkdir(exist_ok=True)
         with self.connect() as conn:
@@ -186,6 +198,16 @@ class Library:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             for i, script in enumerate(MIGRATIONS[version:], start=version + 1):
                 conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {i};\nCOMMIT;")
+        _ready.add(self.path)
+        return self
+
+    def keep_open(self) -> Library:
+        """Hold a connection open for the rest of the process (see the module docstring)."""
+        with _lock:
+            if self.path not in _anchors:
+                conn = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
+                conn.execute("SELECT 1").fetchone()
+                _anchors[self.path] = conn
         return self
 
     def schema_version(self) -> int:

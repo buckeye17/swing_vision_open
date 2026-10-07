@@ -8,6 +8,7 @@ import re
 from flask import Flask, abort, request, send_file
 
 from swingvision.app import state
+from swingvision.storage import cache
 
 MEDIA = {
     "proxy.mp4": ("proxy_path", "video/mp4"),
@@ -34,6 +35,9 @@ def register_routes(server: Flask) -> None:
             path = getattr(session, attr)
         if not path.exists():
             abort(404)
+        # On a network share: the proxy streams from there until its local copy (made in the
+        # background) is complete; images are copied right away.
+        path = cache.local_if_ready(path) if name == "proxy.mp4" else cache.local(path)
         # conditional=True → HTTP Range support, which <video> seeking needs.
         return send_file(path, mimetype=mimetype, conditional=True, max_age=0)
 

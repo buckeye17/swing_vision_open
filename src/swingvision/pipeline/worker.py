@@ -218,7 +218,7 @@ def run_worker(
     follow_settings_file = settings is None
     settings = settings or load_settings()
     root = settings.require_output_root()
-    library = Library(root).init()
+    library = Library(root).init().keep_open()
     lock = worker_lock(root)
     try:
         lock.acquire(timeout=0)

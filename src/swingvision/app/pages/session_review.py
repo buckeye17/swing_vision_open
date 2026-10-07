@@ -726,7 +726,12 @@ def layout(session_id: str | None = None, **_):
                                 dmc.Paper(
                                     [
                                         dmc.Title("Pipeline", order=5, mb="xs"),
-                                        _stage_status(session, config),
+                                        # Filled in after the page shows: planning checks
+                                        # ~80 files (half a second on a network share).
+                                        html.Div(
+                                            dmc.Loader(size="xs", type="dots"),
+                                            id="review-pipeline",
+                                        ),
                                     ],
                                     p="md",
                                     withBorder=True,
@@ -954,3 +959,15 @@ clientside_callback(
     Input("review-skel-on", "checked"),
     Input("review-shot-on", "checked"),
 )
+
+
+@callback(
+    Output("review-pipeline", "children"),
+    Input("review-session-id", "data"),
+)
+def _pipeline_status(session_id):
+    found = state.session_for(session_id or "")
+    if found is None:
+        return no_update
+    session = found[2]
+    return _stage_status(session, session.load_config())

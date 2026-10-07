@@ -14,6 +14,7 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
+from swingvision.storage import cache
 from swingvision.storage.fsutil import atomic_write
 
 COMPRESSION = "zstd"
@@ -54,7 +55,7 @@ def write_table(table: pa.Table, path: Path, schema: pa.Schema, row_group_size: 
 
 
 def read_table(path: Path, columns: list[str] | None = None, filters: Any = None) -> pa.Table:
-    return pq.read_table(path, columns=columns, filters=filters)
+    return pq.read_table(cache.local(path), columns=columns, filters=filters)
 
 
 def part_path(directory: Path, index: int) -> Path:
@@ -71,7 +72,8 @@ def read_parts(directory: Path, schema: pa.Schema) -> pa.Table:
     files = sorted(directory.glob(PART_GLOB))
     if not files:
         return empty_table(schema)
-    return ds.dataset([str(f) for f in files], format="parquet", schema=schema).to_table()
+    local = [str(cache.local(f)) for f in files]
+    return ds.dataset(local, format="parquet", schema=schema).to_table()
 
 
 def consolidate_parts(
