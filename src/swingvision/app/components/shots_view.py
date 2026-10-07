@@ -7,6 +7,8 @@ shot from the playback time; the server only renders the side view when it chang
 
 from __future__ import annotations
 
+import json
+
 import dash_mantine_components as dmc
 import numpy as np
 import plotly.graph_objects as go
@@ -188,52 +190,46 @@ def _fmt_t(t: float) -> str:
     return f"{m:02d}:{t - 60 * m:04.1f}"
 
 
-def shots_table(shots: pa.Table | None):
+def shots_table(shots: pa.Table | None, video_id: str = "review-video"):
+    """The shots over the net, one row each; clicking a row plays the shot.
+
+    Rendered in the browser (``assets/sv_table.js``) from one component: as Dash components
+    (one per cell) a session's 600 shots slowed every update on the page to ~0.4 s.
+    """
     rows = [r for r in (shots.to_pylist() if shots is not None else []) if over_net(r)]
     body = []
     for r in rows:
         v = r["speed_racket_kmh"]
         uncertain = "speed_uncertain" in r["quality_flags"]
-        speed = "–" if v is None else _speed_pm(r) + (" ?" if uncertain else "")
         o = r["outcome"]
         body.append(
-            html.Tr(
-                [
-                    html.Td(_fmt_t(r["t_contact"])),
-                    html.Td(STROKE_SHORT.get(r.get("stroke_type") or "", "–")),
-                    html.Td(speed, style={"textAlign": "right"}),
-                    html.Td(
-                        dmc.Badge(
-                            OUTCOME_LABELS.get(o, o),
-                            color=OUTCOME_COLORS.get(o, "gray"),
-                            variant="light",
-                            size="xs",
-                        )
-                    ),
-                    html.Td(
-                        "–" if r["net_clearance_m"] is None else f"{r['net_clearance_m']:+.2f}",
-                        style={"textAlign": "right"},
-                    ),
+            {
+                "t": round(max(0.0, r["t_contact"] - 0.8), 3),
+                "cells": [
+                    _fmt_t(r["t_contact"]),
+                    STROKE_SHORT.get(r.get("stroke_type") or "", "–"),
+                    "–" if v is None else _speed_pm(r) + (" ?" if uncertain else ""),
+                    {
+                        "badge": OUTCOME_LABELS.get(o, o),
+                        "color": OUTCOME_COLORS.get(o, OUTCOME_COLORS["unknown"]),
+                    },
+                    "–" if r["net_clearance_m"] is None else f"{r['net_clearance_m']:+.2f}",
                 ],
-                id={"type": "review-shot-row", "index": r["shot_id"]},
-                n_clicks=0,
-                style={"cursor": "pointer"},
-            )
+            }
         )
-    head = html.Thead(
-        html.Tr(
-            [
-                html.Th("Time"),
-                html.Th("Stroke"),
-                html.Th("km/h", style={"textAlign": "right"}),
-                html.Th("Landing"),
-                html.Th("Net m", style={"textAlign": "right"}),
-            ]
-        )
-    )
+    spec = {
+        "head": [
+            {"label": "Time"},
+            {"label": "Stroke"},
+            {"label": "km/h", "align": "right"},
+            {"label": "Landing"},
+            {"label": "Net m", "align": "right"},
+        ],
+        "rows": body,
+        "video": video_id,
+    }
     return dmc.ScrollArea(
-        dmc.Table([head, html.Tbody(body)], highlightOnHover=True, fz="xs", verticalSpacing=2),
-        h=240,
+        html.Div(id="review-shots-table", **{"data-sv-table": json.dumps(spec)}), h=240
     )
 
 

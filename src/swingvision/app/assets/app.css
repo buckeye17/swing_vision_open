@@ -19,3 +19,37 @@
     background: #e8590c;
     pointer-events: none;
 }
+
+/* Tables rendered by assets/sv_table.js (styled like a compact dmc.Table) */
+.sv-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--mantine-font-size-xs);
+    line-height: var(--mantine-line-height);
+}
+.sv-table th {
+    text-align: left;
+    font-weight: 700;
+    padding: 2px 10px;
+    border-bottom: 1px solid var(--mantine-color-default-border);
+}
+.sv-table td {
+    padding: 2px 10px;
+    border-bottom: 1px solid var(--mantine-color-default-border);
+}
+.sv-table tr.sv-clickable {
+    cursor: pointer;
+}
+.sv-table tbody tr:hover {
+    background: var(--mantine-color-default-hover);
+}
+.sv-badge {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 16px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}

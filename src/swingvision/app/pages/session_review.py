@@ -848,28 +848,6 @@ def _place_machine(click, placing, session_id):
     return f"Ball machine at ({x:.1f}, {y:.1f}) m, placed by you.", False, notification(msg)
 
 
-clientside_callback(
-    """
-    function(clicks, shots) {
-        const ctx = window.dash_clientside.callback_context;
-        const nu = window.dash_clientside.no_update;
-        if (!shots || !ctx.triggered.length || !ctx.triggered[0].value) { return nu; }
-        const id = JSON.parse(ctx.triggered[0].prop_id.split(".")[0]).index;
-        const k = shots.id.indexOf(id);
-        const v = document.getElementById("review-video");
-        if (k < 0 || !v) { return nu; }
-        v.currentTime = Math.max(0, shots.t0[k] - 0.8);
-        v.play();
-        return shots.t0[k];
-    }
-    """,
-    Output("review-seek", "data", allow_duplicate=True),
-    Input({"type": "review-shot-row", "index": ALL}, "n_clicks"),
-    State("review-shots", "data"),
-    prevent_initial_call=True,
-)
-
-
 @callback(
     Output("review-shot-detail", "children"),
     Output("review-shot-side", "figure"),
