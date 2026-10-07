@@ -811,6 +811,11 @@ def _fold_heatmap(fold, session_id):
     prevent_initial_call=True,
 )
 def _set_profile(profile_id, session_id):
+    found = state.session_for(session_id or "")
+    if found is None:
+        return no_update, no_update
+    if (profile_id or None) == found[2].load_config().players.me_profile_id:
+        return no_update, no_update  # the select mounting, not a change
     s = state.settings()
     try:
         services.set_session_player(s, session_id, profile_id)
