@@ -32,7 +32,7 @@ from dash import (
 from plotly.subplots import make_subplots
 
 from swingvision import services
-from swingvision.app import state
+from swingvision.app import state, units
 from swingvision.app.components import practice_view as pv
 from swingvision.app.components import swings_view as sw_view
 from swingvision.app.components.ball_view import (
@@ -122,6 +122,7 @@ def timeline_figure(
 
     The rows share the time axis (zooming one zooms all); the cursor spans all.
     """
+    u = units.current()
     duration = config.video.duration_s if config.video else 1.0
     has_speed = speed_t is not None and len(speed_t) > 0
     has_shots = bool(shots and any(v is not None for v in shots["v"]))
@@ -195,12 +196,12 @@ def timeline_figure(
         fig.add_trace(
             go.Scatter(
                 x=speed_t,
-                y=speed_v * 3.6,
+                y=u.speed_from_mps(speed_v),
                 mode="lines",
                 name="Player speed",
                 line={"color": ME_COLOR, "width": 1.5},
                 connectgaps=False,
-                hovertemplate="%{x:.1f}s · %{y:.1f} km/h<extra>player speed</extra>",
+                hovertemplate=f"%{{x:.1f}}s · %{{y:.1f}} {u.speed_unit}<extra>player speed</extra>",
             ),
             row=speed_row,
             col=1,
@@ -219,7 +220,7 @@ def timeline_figure(
                     mode="markers",
                     name="shot " + outcome,
                     marker={"color": color, "size": 6},
-                    hovertemplate="%{x:.1f}s · %{y:.0f} ± %{customdata:.0f} km/h"
+                    hovertemplate=f"%{{x:.1f}}s · %{{y:.0f}} ± %{{customdata:.0f}} {u.speed_unit}"
                     + "<extra>"
                     + outcome
                     + " (uncalibrated)</extra>",
@@ -236,9 +237,11 @@ def timeline_figure(
     fig.update_yaxes(fixedrange=True, showgrid=False, zeroline=False)
     fig.update_yaxes(title_text="onset", row=1, col=1)
     if has_speed:
-        fig.update_yaxes(title_text="km/h", rangemode="tozero", row=speed_row, col=1)
+        fig.update_yaxes(title_text=u.speed_unit, rangemode="tozero", row=speed_row, col=1)
     if has_shots:
-        fig.update_yaxes(title_text="shot km/h", rangemode="tozero", row=shots_row, col=1)
+        fig.update_yaxes(
+            title_text=f"shot {u.speed_unit}", rangemode="tozero", row=shots_row, col=1
+        )
     fig.update_layout(
         height=150 + 70 * (rows - 1),
         margin={"l": 44, "r": 10, "t": 10, "b": 30},
@@ -326,13 +329,14 @@ def _calibration_card(session_id: str, cal: Calibration | None, label: str):
         )
     ]
     if cal is not None:
+        u = units.current()
         d = cal.camera_summary
         rms = cal.metrics.rms_line_px
         rows.append(
             dmc.Text(
                 (f"Line RMS {rms:.2f} px · " if rms is not None else "")
-                + f"camera {d.get('height_m', 0):.1f} m high, "
-                f"{d.get('behind_baseline_m', 0):.1f} m behind the baseline",
+                + f"camera {u.len_str(d.get('height_m', 0))} high, "
+                f"{u.len_str(d.get('behind_baseline_m', 0))} behind the baseline",
                 size="xs",
                 c="dimmed",
             )
@@ -362,13 +366,19 @@ def _calibration_card(session_id: str, cal: Calibration | None, label: str):
     return dmc.Paper(dmc.Stack(rows, gap=6), p="md", withBorder=True)
 
 
+def _xy_str(x: float, y: float) -> str:
+    """Court coordinates (metres) as ``(x, y) m`` in display units."""
+    u = units.current()
+    return f"({u.len(x):.1f}, {u.len(y):.1f}) {u.len_unit}"
+
+
 def _minimap_card(track: dict | None, machine, is_machine: bool, extra_traces=None):
     if is_machine:
         if machine is None:
             machine_text = "Ball machine not found yet. Turn on placing and click its spot."
         else:
             how = "placed by you" if machine.source == "user" else "found automatically"
-            machine_text = f"Ball machine at ({machine.x:.1f}, {machine.y:.1f}) m, {how}."
+            machine_text = f"Ball machine at {_xy_str(machine.x, machine.y)}, {how}."
     else:
         machine_text = ""
     return dmc.Paper(
@@ -500,6 +510,7 @@ def layout(session_id: str | None = None, **_):
                         "pathColor": PATH_COLOR,
                         "skelBlock": SKEL_BLOCK_S,
                         "edges": json.loads(sw_view.SKELETON_EDGES_JSON),
+                        **units.current().js_config(),
                     }
                 ),
             },
@@ -850,7 +861,7 @@ def _place_machine(click, placing, session_id):
             ensure_worker(s.output_root)
     except ValueError as exc:
         msg = f"Ball machine placed. {exc} Process the session again afterwards."
-    return f"Ball machine at ({x:.1f}, {y:.1f}) m, placed by you.", False, notification(msg)
+    return f"Ball machine at {_xy_str(x, y)}, placed by you.", False, notification(msg)
 
 
 @callback(

@@ -7,6 +7,7 @@ import numpy as np
 import pyarrow as pa
 from dash import dcc
 
+from swingvision.app import units
 from swingvision.app.components.court_diagram import heatmap_figure
 from swingvision.app.components.ui import fmt_duration, icon
 from swingvision.players import movement as mv
@@ -111,15 +112,16 @@ def movement_card(
             p="md",
             withBorder=True,
         )
+    u = units.current()
     s = mv.summarize(movement, frames, dark_luma, mv.MovementParams(), view_min)
     xc, yc, H = mv.heatmap(movement, fold=fold)
     dark = s["dark_frames"] / max(1, s["processed_frames"])
     stats = dmc.SimpleGrid(
         [
-            _stat("Distance", f"{s['distance_m']:.0f} m"),
+            _stat("Distance", u.len_str(s["distance_m"], 0)),
             _stat("Tracked", fmt_duration(s["tracked_s"]), f"{s['coverage']:.0%} of usable video"),
-            _stat("Top speed", f"{s['max_speed_mps'] * 3.6:.1f} km/h", "best 0.5 s"),
-            _stat("Avg moving", f"{s['mean_moving_speed_mps'] * 3.6:.1f} km/h"),
+            _stat("Top speed", u.speed_str_mps(s["max_speed_mps"]), "best 0.5 s"),
+            _stat("Avg moving", u.speed_str_mps(s["mean_moving_speed_mps"])),
         ],
         cols={"base": 2, "sm": 4},
         spacing="sm",
@@ -153,7 +155,14 @@ def movement_card(
                 figure=heatmap_figure(xc, yc, H, height=440),
                 config={"displayModeBar": False},
             ),
-            dmc.Text("Time spent per ½ m square.", size="xs", c="dimmed", ta="center"),
+            dmc.Text(
+                "Time spent per ½ m (1.6 ft) square."
+                if u.imperial
+                else "Time spent per ½ m square.",
+                size="xs",
+                c="dimmed",
+                ta="center",
+            ),
         ],
         p="md",
         withBorder=True,
@@ -164,7 +173,7 @@ def profile_facts(p: Profile | None) -> str:
     if p is None:
         return "No profile assigned."
     return f"{HANDEDNESS_LABELS[p.handedness]}, {BACKHAND_LABELS[p.backhand].lower()} backhand" + (
-        f", {p.height_m * 100:.0f} cm" if p.height_m else ""
+        f", {units.current().height_str(p.height_m)}" if p.height_m else ""
     )
 
 

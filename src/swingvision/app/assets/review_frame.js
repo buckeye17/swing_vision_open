@@ -9,7 +9,9 @@
  * 5,000 on a long session's review), so a 10 Hz time store stalled playback. Dash only hears
  * about the current shot (review-shot-id) and skeleton block (review-skel-key), when they
  * change. Settings come from the video's data-frame-config (JSON):
- * {linger, pathColor, skelBlock, edges}.
+ * {linger, pathColor, skelBlock, edges, lenFactor, lenUnit, speedFactor, speedUnit}.
+ * The display-unit keys (from units.Units.js_config) default to metric; the minimap's
+ * coordinates stay in metres, only the text changes.
  */
 (function () {
     "use strict";
@@ -48,6 +50,9 @@
         return i;
     }
 
+    const lenUnit = (cfg) => cfg.lenUnit || "m";
+    const speedUnit = (cfg) => cfg.speedUnit || "km/h";
+
     function minimap() {
         const host = el("review-minimap");
         const gd = host ? host.querySelector(".js-plotly-plot") : null;
@@ -83,7 +88,7 @@
         setImg("review-overlay", src);
     }
 
-    function player(now, gd) {
+    function player(now, gd, cfg) {
         const track = data("review-track");
         const box = el("review-box");
         let live = false, i = -1;
@@ -101,7 +106,11 @@
                     tx.push(track.x[k]); ty.push(track.y[k]);
                 }
             }
-            restyle(gd, "trail", live ? i : -1, {x: [tx, px], y: [ty, py]}, [0, 1]);
+            // customdata: the player's position in display units, for its hover text.
+            const lf = cfg.lenFactor || 1;
+            restyle(gd, "trail", live ? i : -1, {
+                x: [tx, px], y: [ty, py], customdata: [[], px.map((x, k) => [x * lf, py[k] * lf])],
+            }, [0, 1]);
         }
         let label = "not tracked";
         if (live) {
@@ -110,8 +119,10 @@
                 const dt = track.t[i] - track.t[i - 1];
                 v = Math.hypot(track.x[i] - track.x[i - 1], track.y[i] - track.y[i - 1]) / dt;
             }
-            label = "x " + track.x[i].toFixed(1) + " y " + track.y[i].toFixed(1) + " m · " +
-                    (v * 3.6).toFixed(1) + " km/h" + (track.interp[i] ? " · bridged" : "");
+            const lf = cfg.lenFactor || 1;
+            label = "x " + (track.x[i] * lf).toFixed(1) + " y " + (track.y[i] * lf).toFixed(1) +
+                    " " + lenUnit(cfg) + " · " + (v * 3.6 * (cfg.speedFactor || 1)).toFixed(1) +
+                    " " + speedUnit(cfg) + (track.interp[i] ? " · bridged" : "");
         }
         if (track && track.t.length) setText("review-pos", label);
         if (!box) return;
@@ -122,7 +133,7 @@
             `border:2px ${track.interp[i] ? "dashed" : "solid"} #ffd43b;border-radius:3px;`;
     }
 
-    function ball(now, gd) {
+    function ball(now, gd, cfg) {
         const events = data("review-events");
         if (events && gd && gd.data.length >= 3) {
             const bx = [], by = [], ks = [];
@@ -132,7 +143,10 @@
                     bx.push(events.cx[k]); by.push(events.cy[k]); ks.push(k);
                 }
             }
-            restyle(gd, "bounces", ks.join(","), {x: [bx], y: [by]}, [2]);
+            const lf = cfg.lenFactor || 1;
+            restyle(gd, "bounces", ks.join(","), {
+                x: [bx], y: [by], customdata: [bx.map((x, k) => [x * lf, by[k] * lf])],
+            }, [2]);
         }
         const track = data("review-ball-store");
         if (!on("review-ball-on") || !track || !track.t.length) { setImg("review-ball", ""); return; }
@@ -169,7 +183,7 @@
             const lx = [], ly = [], txt = [];
             if (i >= 0 && shots.cx[i] !== null) {
                 lx.push(shots.cx[i]); ly.push(shots.cy[i]);
-                txt.push(shots.v[i] !== null ? shots.v[i] + " km/h" : "");
+                txt.push(shots.v[i] !== null ? shots.v[i] + " " + speedUnit(cfg) : "");
             }
             restyle(gd, "landing", id, {x: [lx], y: [ly], text: [txt]}, [3]);
         }
@@ -185,7 +199,7 @@
         }
         if (label) {
             setText("review-shot-label", (shots.v[i] !== null ? shots.v[i] +
-                (shots.e[i] !== null ? " ± " + shots.e[i] : "") + " km/h" : "speed ?") +
+                (shots.e[i] !== null ? " ± " + shots.e[i] : "") + " " + speedUnit(cfg) : "speed ?") +
                 " · " + shots.o[i].replace("_", " "));
             label.style.cssText = "position:absolute;left:1%;top:1.5%;padding:2px 8px;" +
                 "border-radius:4px;background:rgba(0,0,0,0.6);color:#fff;" +
@@ -228,8 +242,8 @@
         const t = performance.now();
         const gd = force || t - state.minimapAt >= MINIMAP_MS ? minimap() : null;
         if (gd) state.minimapAt = t;
-        player(now, gd);
-        ball(now, gd);
+        player(now, gd, cfg);
+        ball(now, gd, cfg);
         shot(now, gd, cfg, state);
         skeleton(now, cfg, state);
     }

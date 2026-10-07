@@ -364,19 +364,29 @@ def rolling(rows: list[dict], window: int = ROLLING_WINDOW) -> dict:
     return out
 
 
-def speed_band(v: float | None) -> str | None:
+def speed_band(
+    v: float | None, edges: tuple[float, ...] = SPEED_BANDS_KMH, factor: float = 1.0
+) -> str | None:
+    """The band ``v`` (km/h) falls in, labelled in display units (``factor`` per km/h)."""
     if v is None:
         return None
     lo = 0.0
-    for hi in SPEED_BANDS_KMH:
+    for hi in edges:
         if v < hi:
-            return f"{lo:.0f}–{hi:.0f}" if lo else f"< {hi:.0f}"
+            a, b = round(lo * factor), round(hi * factor)
+            return f"{a:.0f}–{b:.0f}" if lo else f"< {b:.0f}"
         lo = hi
-    return f"≥ {lo:.0f}"
+    return f"≥ {round(lo * factor):.0f}"
 
 
-def breakdown(rows: list[dict]) -> list[tuple[str, dict]]:
-    """Summaries by shot kind (serves split deuce/ad), stroke type (M6) and speed band."""
+def breakdown(
+    rows: list[dict],
+    speed_edges: tuple[float, ...] = SPEED_BANDS_KMH,
+    speed_factor: float = 1.0,
+    speed_unit: str = "km/h",
+) -> list[tuple[str, dict]]:
+    """Summaries by shot kind (serves split deuce/ad), stroke type (M6) and speed band
+    (``speed_edges`` in km/h, labelled in display units: ``speed_factor`` per km/h)."""
     groups: dict[str, list[dict]] = {}
     for r in rows:
         k = KIND_LABELS.get(r["shot_kind"], "Shot")
@@ -386,7 +396,7 @@ def breakdown(rows: list[dict]) -> list[tuple[str, dict]]:
         if r["stroke_type"]:
             label = STROKE_LABELS.get(r["stroke_type"], r["stroke_type"].capitalize())
             groups.setdefault(f"Stroke: {label}", []).append(r)
-        band = speed_band(r["speed_kmh"])
+        band = speed_band(r["speed_kmh"], speed_edges, speed_factor)
         if band and "speed_uncertain" not in (r["flags"] or []):
-            groups.setdefault(f"{band} km/h", []).append(r)
+            groups.setdefault(f"{band} {speed_unit}", []).append(r)
     return [(k, summarize(v)) for k, v in groups.items()]

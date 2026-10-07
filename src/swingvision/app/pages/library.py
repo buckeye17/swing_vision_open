@@ -9,7 +9,7 @@ import dash_mantine_components as dmc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from swingvision import services
-from swingvision.app import state
+from swingvision.app import state, units
 from swingvision.app.components.file_browser import file_browser, register_file_browser
 from swingvision.app.components.ui import (
     fmt_duration,
@@ -129,11 +129,11 @@ def _relink_modal(sid: str | None):
     )
 
 
-def _moved(root, s: dict) -> str:
+def _moved(root, s: dict, u: units.Units) -> str:
     """Headline stat: distance covered (from the movement stage's manifest)."""
     m = read_manifest(Session.open(root, s["dir_name"]), "movement")
     dist = (m or {}).get("extra", {}).get("distance_m")
-    return f"{dist:,.0f} m" if dist is not None else "–"
+    return f"{u.len(dist):,.0f} {u.len_unit}" if dist is not None else "–"
 
 
 def _accuracy(root, s: dict):
@@ -151,7 +151,7 @@ def _accuracy(root, s: dict):
     return dmc.Anchor(text, href=f"/practice/{s['id']}", size="sm")
 
 
-def _row(root, s: dict):
+def _row(root, s: dict, u: units.Units):
     mode = s["mode"].capitalize()
     if s["submode"]:
         mode += f" · {PRACTICE_SUBMODE_LABELS.get(s['submode'], s['submode'])}"
@@ -238,7 +238,7 @@ def _row(root, s: dict):
             dmc.TableTd(dmc.Anchor(s["name"], href=f"/session/{sid}", fw=600)),
             dmc.TableTd(mode),
             dmc.TableTd(fmt_duration(s["duration_s"])),
-            dmc.TableTd(_moved(root, s)),
+            dmc.TableTd(_moved(root, s, u)),
             dmc.TableTd(_accuracy(root, s)),
             dmc.TableTd(fmt_time(s["created_at"])),
             dmc.TableTd(dmc.Group(status, gap=4, wrap="nowrap"), style={"whiteSpace": "nowrap"}),
@@ -285,6 +285,7 @@ def _table(root, sessions: list[dict]):
             p="xl",
             withBorder=True,
         )
+    u = units.current()
     head = dmc.TableThead(
         dmc.TableTr(
             [
@@ -305,7 +306,7 @@ def _table(root, sessions: list[dict]):
     )
     return dmc.Paper(
         dmc.Table(
-            [head, dmc.TableTbody([_row(root, s) for s in sessions])],
+            [head, dmc.TableTbody([_row(root, s, u) for s in sessions])],
             highlightOnHover=True,
             verticalSpacing="xs",
         ),

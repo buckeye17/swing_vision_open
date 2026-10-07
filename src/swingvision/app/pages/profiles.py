@@ -6,13 +6,15 @@ enrollment (recognizing you among other players) arrives with match mode in Phas
 
 from __future__ import annotations
 
+import math
+
 import dash
 import dash_mantine_components as dmc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from pydantic import ValidationError
 
 from swingvision import services
-from swingvision.app import state
+from swingvision.app import state, units
 from swingvision.app.components.ui import (
     icon,
     no_output_root_alert,
@@ -21,10 +23,20 @@ from swingvision.app.components.ui import (
 )
 from swingvision.storage.schemas import BACKHAND_LABELS, HANDEDNESS_LABELS, Profile
 
+HEIGHT_RANGE_M = (1.0, 2.5)  # Profile.height_m's allowed range
+
+
+def _height_bounds(u: units.Units) -> tuple[int, int]:
+    """The allowed height range in whole input units (100–250 cm, 40–98 in)."""
+    lo, hi = HEIGHT_RANGE_M
+    return math.ceil(lo * u.small_factor - 1e-9), math.floor(hi * u.small_factor + 1e-9)
+
 
 def layout(**_):
     if state.settings().output_root is None:
         return dmc.Container([page_header("Profiles"), no_output_root_alert()], size="md", px=0)
+    u = units.current()
+    h_min, h_max = _height_bounds(u)
     form = dmc.Stack(
         [
             dmc.TextInput(id="prof-name", label="Name", placeholder="e.g. Chris"),
@@ -52,10 +64,10 @@ def layout(**_):
             ),
             dmc.NumberInput(
                 id="prof-height",
-                label="Height (cm)",
+                label=f"Height ({u.height_input_unit})",
                 description="Scales the 3D swing skeleton. Optional.",
-                min=100,
-                max=250,
+                min=h_min,
+                max=h_max,
                 step=1,
                 allowDecimal=False,
             ),
@@ -137,7 +149,7 @@ def _initials(name: str) -> str:
 def _card(p: Profile):
     facts = [HANDEDNESS_LABELS[p.handedness], f"{BACKHAND_LABELS[p.backhand].lower()} backhand"]
     if p.height_m:
-        facts.append(f"{p.height_m * 100:.0f} cm")
+        facts.append(units.current().height_str(p.height_m))
     return dmc.Paper(
         dmc.Group(
             [
@@ -223,7 +235,7 @@ def _open(_new, _edits):
     p = services.get_profile(state.settings(), trig["index"])
     if p is None:
         return (no_update,) * 9
-    height = round(p.height_m * 100) if p.height_m else None
+    height = units.current().height_to_input(p.height_m) if p.height_m else None
     return True, f"Edit {p.name}", p.id, p.name, p.handedness, p.backhand, height, "", {}
 
 
@@ -241,15 +253,20 @@ def _open(_new, _edits):
     State("prof-version", "data"),
     prevent_initial_call=True,
 )
-def _save(n, pid, name, hand, backhand, height_cm, version):
+def _save(n, pid, name, hand, backhand, height_in, version):
     if not n:
         return no_update, no_update, no_update, no_update
+    u = units.current()
+    h_min, h_max = _height_bounds(u)
+    range_msg = f"Height must be between {h_min} and {h_max} {u.height_input_unit}."
     try:
-        height = float(height_cm) / 100 if height_cm not in (None, "") else None
+        height = u.height_from_input(height_in) if height_in not in (None, "") else None
+        if height is not None and not HEIGHT_RANGE_M[0] <= height <= HEIGHT_RANGE_M[1]:
+            return no_update, range_msg, no_update, no_update
         p = services.save_profile(state.settings(), name, hand, backhand, height, pid)
     except ValidationError as exc:
         fields = {str(e["loc"][0]) for e in exc.errors() if e.get("loc")}
-        msg = "Height must be between 100 and 250 cm." if "height_m" in fields else str(exc)
+        msg = range_msg if "height_m" in fields else str(exc)
         return no_update, msg, no_update, no_update
     except ValueError as exc:
         return no_update, str(exc), no_update, no_update

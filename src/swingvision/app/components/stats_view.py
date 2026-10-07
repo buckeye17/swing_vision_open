@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 
 from swingvision.analysis import stats as st
 from swingvision.analysis.shots import SPEED_SCALE_ERROR, speed_error_kmh
+from swingvision.app import units
 from swingvision.app.components.court_diagram import VIEW_Y, court_figure
 from swingvision.app.components.swings_view import STROKE_COLORS
 from swingvision.app.components.ui import fmt_duration
@@ -101,6 +102,7 @@ def _stat(label: str, value: str, sub: str = ""):
 
 
 def kpis(records: list[dict], movement: dict):
+    u = units.current()
     s = st.summarize_shots(records)
     items = [
         _stat("Shots", str(s["n"]), f"{s['n_seen']} with the contact seen"),
@@ -108,21 +110,19 @@ def kpis(records: list[dict], movement: dict):
         _stat("Net", pct(s["net_pct"]), f"{s['n_net']} shots"),
         _stat(
             "Speed",
-            num(s["speed_median"], ".0f", " km/h"),
+            u.speed_str(s["speed_median"]),
             f"median of {s['n_speed']}, ± {SPEED_SCALE_ERROR:.0%} uncalibrated",
         ),
-        _stat("Fastest", num(s["speed_max"], ".0f", " km/h"), "off the racket"),
+        _stat("Fastest", u.speed_str(s["speed_max"]), "off the racket"),
     ]
     if movement:
         items += [
             _stat(
                 "Distance",
-                f"{movement['distance_m']:,.0f} m",
+                f"{u.len(movement['distance_m']):,.0f} {u.len_unit}",
                 f"tracked {fmt_duration(movement['tracked_s'])}",
             ),
-            _stat(
-                "Top speed", f"{movement['max_speed_mps'] * 3.6:.1f} km/h", "running, best 0.5 s"
-            ),
+            _stat("Top speed", u.speed_str_mps(movement["max_speed_mps"]), "running, best 0.5 s"),
         ]
     return dmc.SimpleGrid(items, cols={"base": 2, "sm": 4, "lg": len(items)}, spacing="xs")
 
@@ -137,6 +137,7 @@ def speed_figure(records: list[dict]) -> go.Figure:
     rows = [r for r in records if r["speed_ok"]]
     if not rows:
         return empty_figure("No shot speeds yet (the ball's contact must be seen).")
+    u = units.current()
     fig = go.Figure()
     groups = [g for g in (*st.GROUPS, "unknown") if any(r["group"] == g for r in rows)]
     for g in groups:
@@ -145,7 +146,7 @@ def speed_figure(records: list[dict]) -> go.Figure:
         fig.add_trace(
             go.Box(
                 x=[group_label(g)] * len(rs),
-                y=[r["speed_kmh"] for r in rs],
+                y=[u.speed(r["speed_kmh"]) for r in rs],
                 name=group_label(g),
                 boxpoints="all",
                 jitter=0.45,
@@ -154,10 +155,13 @@ def speed_figure(records: list[dict]) -> go.Figure:
                 line={"color": group_color(g), "width": 2},
                 fillcolor="rgba(0,0,0,0)",
                 customdata=[
-                    [fmt_t(r["t"]), "" if e is None else f" ± {e:.0f}"]
+                    [fmt_t(r["t"]), "" if e is None else f" ± {u.speed(e):.0f}"]
                     for r, e in zip(rs, errs, strict=True)
                 ],
-                hovertemplate="%{customdata[0]} · %{y:.0f}%{customdata[1]} km/h<extra></extra>",
+                hovertemplate=(
+                    f"%{{customdata[0]}} · %{{y:.0f}}%{{customdata[1]}} {u.speed_unit}"
+                    "<extra></extra>"
+                ),
             )
         )
     return _layout(
@@ -166,7 +170,7 @@ def speed_figure(records: list[dict]) -> go.Figure:
         showlegend=False,
         xaxis={"fixedrange": True, "showgrid": False},
         yaxis={
-            "title": "km/h off the racket",
+            "title": f"{u.speed_unit} off the racket",
             "fixedrange": True,
             "gridcolor": GRID,
         },
@@ -266,6 +270,11 @@ def depth_figure(records: list[dict]) -> go.Figure:
     rows = [r for r in records if r["rel_y"] is not None and r["rel_y"] > 0]
     if not rows:
         return empty_figure("No landings yet.")
+    u = units.current()
+    k = u.len_factor
+    # Bins of ½ m, or 2 ft in imperial (0.61 m: close, and round in the unit shown).
+    size = 2.0 if u.imperial else 0.5
+    end = (court_model.HALF_LENGTH + 4) * k
     fig = go.Figure()
     for g in (*st.GROUPS, "unknown"):
         rs = [r for r in rows if r["group"] == g]
@@ -273,16 +282,17 @@ def depth_figure(records: list[dict]) -> go.Figure:
             continue
         fig.add_trace(
             go.Histogram(
-                x=[r["rel_y"] for r in rs],
+                x=[r["rel_y"] * k for r in rs],
                 name=group_label(g),
-                xbins={"start": 0, "end": court_model.HALF_LENGTH + 4, "size": 0.5},
+                xbins={"start": 0, "end": end, "size": size},
                 marker={"color": group_color(g), "line": {"color": "rgba(0,0,0,0)", "width": 0}},
-                hovertemplate=group_label(g) + ": %{y} shots at %{x} m<extra></extra>",
+                hovertemplate=group_label(g) + f": %{{y}} shots at %{{x}} {u.len_unit}"
+                "<extra></extra>",
             )
         )
     lines = [
-        (court_model.SERVICE_LINE_FROM_NET, "service line"),
-        (court_model.HALF_LENGTH, "baseline"),
+        (court_model.SERVICE_LINE_FROM_NET * k, "service line"),
+        (court_model.HALF_LENGTH * k, "baseline"),
     ]
     fig.update_layout(
         barmode="stack",
@@ -319,8 +329,8 @@ def depth_figure(records: list[dict]) -> go.Figure:
         260,
         showlegend=True,
         xaxis={
-            "title": "landing distance past the net (m)",
-            "range": [0, court_model.HALF_LENGTH + 4],
+            "title": f"landing distance past the net ({u.len_unit})",
+            "range": [0, end],
             "fixedrange": True,
             "showgrid": False,
         },
@@ -331,15 +341,16 @@ def depth_figure(records: list[dict]) -> go.Figure:
 def distance_figure(dist: dict) -> go.Figure:
     if not dist["t"]:
         return empty_figure("No player tracking yet.", 200)
+    u = units.current()
     minutes = dist["bin_s"] / 60
     fig = go.Figure(
         go.Bar(
             x=[t / 60 + minutes / 2 for t in dist["t"]],
-            y=dist["distance_m"],
+            y=u.len(list(dist["distance_m"])),
             width=minutes * 0.85,
             marker={"color": "#ffd43b", "cornerradius": 4},
             customdata=[[f"{t / 60:.0f}–{t / 60 + minutes:.0f} min"] for t in dist["t"]],
-            hovertemplate="%{customdata[0]}: %{y:.0f} m<extra></extra>",
+            hovertemplate=f"%{{customdata[0]}}: %{{y:.0f}} {u.len_unit}<extra></extra>",
         )
     )
     return _layout(
@@ -347,7 +358,11 @@ def distance_figure(dist: dict) -> go.Figure:
         200,
         showlegend=False,
         xaxis={"title": "minutes into the video", "fixedrange": True, "showgrid": False},
-        yaxis={"title": f"m per {minutes:.0f} min", "fixedrange": True, "gridcolor": GRID},
+        yaxis={
+            "title": f"{u.len_unit} per {minutes:.0f} min",
+            "fixedrange": True,
+            "gridcolor": GRID,
+        },
     )
 
 
@@ -356,18 +371,20 @@ def distance_figure(dist: dict) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 
-def _depth_text(g: str, s: dict) -> str:
+def _depth_text(g: str, s: dict, u: units.Units | None = None) -> str:
     if s["depth_mean"] is None:
         return "–"
+    u = u or units.current()
     line = "service line" if g == "serve" else "baseline"
-    sd = "" if s["depth_sd"] is None else f" ± {s['depth_sd']:.1f}"
-    return f"{s['depth_mean']:.1f}{sd} m ({line})"
+    sd = "" if s["depth_sd"] is None else f" ± {u.len(s['depth_sd']):.1f}"
+    return f"{u.len(s['depth_mean']):.1f}{sd} {u.len_unit} ({line})"
 
 
 def strokes_table(records: list[dict], swings: dict[str, dict]):
     groups = st.by_group(records)
     if not groups:
         return dmc.Text("No shots yet.", size="sm", c="dimmed")
+    u = units.current()
     head = dmc.TableThead(
         dmc.TableTr(
             [
@@ -412,12 +429,13 @@ def strokes_table(records: list[dict], swings: dict[str, dict]):
                     dmc.TableTd(
                         "–"
                         if s["speed_median"] is None
-                        else f"{s['speed_median']:.0f} / {s['speed_max']:.0f} km/h"
+                        else f"{u.speed(s['speed_median']):.0f} / "
+                        f"{u.speed(s['speed_max']):.0f} {u.speed_unit}"
                     ),
-                    dmc.TableTd(_depth_text(g, s)),
+                    dmc.TableTd(_depth_text(g, s, u)),
                     dmc.TableTd("–" if g == "serve" else pct(s["deep_pct"])),
                     dmc.TableTd(str(sw.get("n", "–"))),
-                    dmc.TableTd(num(sw.get("wrist_speed_median"), ".1f", " m/s")),
+                    dmc.TableTd(u.limb_speed_str(sw.get("wrist_speed_median"))),
                 ]
             )
         )

@@ -16,6 +16,7 @@ import pyarrow as pa
 from dash import dcc, html
 
 from swingvision.analysis.shots import SPEED_SCALE_ERROR, speed_error_kmh, speed_error_text
+from swingvision.app import units
 from swingvision.court import calibration as calib
 from swingvision.court import model as court_model
 from swingvision.pose.strokes import STROKE_LABELS
@@ -75,9 +76,13 @@ def _r(v, nd=1):
 def shots_store(
     shots: pa.Table | None, paths: pa.Table | None, cal: Calibration | None, width: int, height: int
 ) -> dict | None:
-    """Per-shot records for client callbacks (columns of equal length)."""
+    """Per-shot records for client callbacks (columns of equal length).
+
+    ``v``/``e`` (speed and its error) are in display units; ``cx``/``cy`` stay court metres.
+    """
     if shots is None or shots.num_rows == 0:
         return None
+    un = units.current()
     rows = [r for r in shots.to_pylist() if over_net(r)]
     if not rows:
         return None
@@ -115,8 +120,8 @@ def shots_store(
         out["id"].append(r["shot_id"])
         out["t0"].append(round(r["t_contact"], 3))
         out["t1"].append(round(t_end, 3))
-        out["v"].append(_r(r["speed_racket_kmh"], 0))
-        out["e"].append(_r(_error(r), 0))
+        out["v"].append(_r(un.speed(r["speed_racket_kmh"]), 0))
+        out["e"].append(_r(un.speed(_error(r)), 0))
         out["o"].append(r["outcome"])
         out["cx"].append(_r(r["landing_x"], 2))
         out["cy"].append(_r(r["landing_y"], 2))
@@ -128,9 +133,10 @@ def _error(r: dict) -> float | None:
     return speed_error_kmh(r["speed_racket_kmh"], r["speed_sigma_kmh"])
 
 
-def _speed_pm(r: dict) -> str:
-    """'139 ± 10' (km/h), with the uncalibrated error bound."""
-    v, e = r["speed_racket_kmh"], _error(r)
+def _speed_pm(r: dict, u: units.Units | None = None) -> str:
+    """'139 ± 10' (display speed units), with the uncalibrated error bound."""
+    u = u or units.current()
+    v, e = u.speed(r["speed_racket_kmh"]), u.speed(_error(r))
     if v is None:
         return "–"
     return f"{v:.0f}" + ("" if e is None else f" ± {e:.0f}")
@@ -196,6 +202,7 @@ def shots_table(shots: pa.Table | None, video_id: str = "review-video"):
     Rendered in the browser (``assets/sv_table.js``) from one component: as Dash components
     (one per cell) a session's 600 shots slowed every update on the page to ~0.4 s.
     """
+    u = units.current()
     rows = [r for r in (shots.to_pylist() if shots is not None else []) if over_net(r)]
     body = []
     for r in rows:
@@ -208,12 +215,12 @@ def shots_table(shots: pa.Table | None, video_id: str = "review-video"):
                 "cells": [
                     _fmt_t(r["t_contact"]),
                     STROKE_SHORT.get(r.get("stroke_type") or "", "–"),
-                    "–" if v is None else _speed_pm(r) + (" ?" if uncertain else ""),
+                    "–" if v is None else _speed_pm(r, u) + (" ?" if uncertain else ""),
                     {
                         "badge": OUTCOME_LABELS.get(o, o),
                         "color": OUTCOME_COLORS.get(o, OUTCOME_COLORS["unknown"]),
                     },
-                    "–" if r["net_clearance_m"] is None else f"{r['net_clearance_m']:+.2f}",
+                    "–" if r["net_clearance_m"] is None else f"{u.len(r['net_clearance_m']):+.2f}",
                 ],
             }
         )
@@ -221,9 +228,9 @@ def shots_table(shots: pa.Table | None, video_id: str = "review-video"):
         "head": [
             {"label": "Time"},
             {"label": "Stroke"},
-            {"label": "km/h", "align": "right"},
+            {"label": u.speed_unit, "align": "right"},
             {"label": "Landing"},
-            {"label": "Net m", "align": "right"},
+            {"label": f"Net {u.len_unit}", "align": "right"},
         ],
         "rows": body,
         "video": video_id,
@@ -238,6 +245,7 @@ def shots_card(shots: pa.Table | None):
     if shots is None:
         body = [dmc.Text("Shot analysis (3D flight) hasn't run yet.", size="sm", c="dimmed")]
         return dmc.Paper([title, *body], p="md", withBorder=True)
+    u = units.current()
     s = shot_summary(shots)
     in_pct = f"{s['in'] / s['called']:.0%}" if s["called"] else "–"
     body = [
@@ -247,12 +255,12 @@ def shots_card(shots: pa.Table | None):
                 _stat("In", in_pct, f"{s['in']} of {s['called']}"),
                 _stat(
                     "Median speed",
-                    "–" if s["median"] is None else f"{s['median']:.0f} km/h",
+                    u.speed_str(s["median"]),
                     f"off the racket, ± {SPEED_SCALE_ERROR:.0%}",
                 ),
                 _stat(
                     "Fastest",
-                    "–" if s["max"] is None else f"{s['max']:.0f} km/h",
+                    u.speed_str(s["max"]),
                     "uncalibrated",
                 ),
             ],
@@ -308,42 +316,45 @@ def shot_detail(r: dict | None):
     if r is None:
         return dmc.Text("No shot at this moment.", size="xs", c="dimmed")
 
+    u = units.current()
+
     def kmh(v):
-        return "–" if v is None else f"{v:.0f}"
+        return "–" if v is None else f"{u.speed(v):.0f}"
 
     o = r["outcome"]
-    speed = _speed_pm(r)
+    speed = _speed_pm(r, u)
     spin = {1: "topspin", -1: "slice/backspin", 0: "no clear spin"}.get(r["spin_sign"], "–")
     stroke = STROKE_LABELS.get(r.get("stroke_type") or "")
     parts = [
         f"{_fmt_t(r['t_contact'])} · "
         + (f"{stroke} · " if stroke else "")
-        + f"{speed} km/h off the racket",
-        f"net {kmh(r['speed_net_kmh'])} · before bounce {kmh(r['speed_bounce_kmh'])} km/h"
+        + f"{speed} {u.speed_unit} off the racket",
+        f"net {kmh(r['speed_net_kmh'])} · before bounce {kmh(r['speed_bounce_kmh'])} "
+        f"{u.speed_unit}"
         + (
             f" · ± is the uncalibrated error ({SPEED_SCALE_ERROR:.0%} + 2× fit σ "
-            f"{r['speed_sigma_kmh']:.0f})"
+            f"{u.speed(r['speed_sigma_kmh']):.0f})"
             if r["speed_sigma_kmh"] is not None
             else ""
         ),
     ]
     geo = []
     if r["net_clearance_m"] is not None:
-        geo.append(f"{r['net_clearance_m']:+.2f} m over the net")
+        geo.append(f"{u.len_str(r['net_clearance_m'], 2, sign=True)} over the net")
     if r["apex_m"] is not None:
-        geo.append(f"apex {r['apex_m']:.2f} m")
+        geo.append(f"apex {u.len_str(r['apex_m'], 2)}")
     if r["contact_height"] is not None:
-        geo.append(f"contact {r['contact_height']:.2f} m high")
+        geo.append(f"contact {u.len_str(r['contact_height'], 2)} high")
     geo.append(spin)
     land = "no landing"
     if r["landing_x"] is not None:
-        land = f"landed ({r['landing_x']:.2f}, {r['landing_y']:.2f}) m"
+        land = f"landed ({u.len(r['landing_x']):.2f}, {u.len(r['landing_y']):.2f}) {u.len_unit}"
         if r["landing_margin_m"] is not None:
-            land += f", {abs(r['landing_margin_m']) * 100:.0f} cm " + (
+            land += f", {u.small_str(abs(r['landing_margin_m']))} " + (
                 "inside" if r["landing_margin_m"] >= 0 else "outside"
             )
         if r["landing_sigma_m"] is not None:
-            land += f" (± {r['landing_sigma_m'] * 100:.0f} cm)"
+            land += f" (± {u.small_str(r['landing_sigma_m'])})"
         if r["landing_source"] == "fit":
             land += ", extrapolated"
     return dmc.Stack(
@@ -367,28 +378,39 @@ def shot_detail(r: dict | None):
 
 def side_view_figure(path: tuple[np.ndarray, np.ndarray, int] | None) -> go.Figure:
     """Height over distance along the court, from the hitter's baseline (left) to the
-    opponent's (right). ``path``: (y, z, side) of the fitted flight."""
-    L = court_model.HALF_LENGTH
+    opponent's (right). ``path``: (y, z, side) of the fitted flight, in metres; both axes
+    are drawn in display length units."""
+    u = units.current()
+    k = u.len_factor
+    L = court_model.HALF_LENGTH * k
+    sl = court_model.SERVICE_LINE_FROM_NET * k
     fig = go.Figure()
-    fig.add_shape(type="line", x0=-L - 2, x1=L + 3, y0=0, y1=0, line={"color": "#888", "width": 1})
     fig.add_shape(
-        type="line", x0=0, x1=0, y0=0, y1=court_model.NET_HEIGHT_CENTER,
+        type="line", x0=-L - 2 * k, x1=L + 3 * k, y0=0, y1=0, line={"color": "#888", "width": 1}
+    )
+    fig.add_shape(
+        type="line", x0=0, x1=0, y0=0, y1=court_model.NET_HEIGHT_CENTER * k,
         line={"color": "#aaa", "width": 3},
     )  # fmt: skip
-    for x in (-L, -court_model.SERVICE_LINE_FROM_NET, court_model.SERVICE_LINE_FROM_NET, L):
-        fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=0.15, line={"color": "#aaa", "width": 2})
-    top = 3.5
+    for x in (-L, -sl, sl, L):
+        fig.add_shape(
+            type="line", x0=x, x1=x, y0=0, y1=0.15 * k, line={"color": "#aaa", "width": 2}
+        )
+    top = 3.5 * k
     if path is not None:
         y, z, side = path
-        d = -side * y
-        top = max(top, float(np.nanmax(z)) + 0.4)
+        d = -side * np.asarray(y, dtype=float) * k
+        h = np.asarray(z, dtype=float) * k
+        top = max(top, float(np.nanmax(h)) + 0.4 * k)
         fig.add_trace(
             go.Scatter(
                 x=d,
-                y=z,
+                y=h,
                 mode="lines",
                 line={"color": PATH_COLOR, "width": 2.5},
-                hovertemplate="%{x:.1f} m · %{y:.2f} m high<extra></extra>",
+                hovertemplate=(
+                    f"%{{x:.1f}} {u.len_unit} · %{{y:.2f}} {u.len_unit} high<extra></extra>"
+                ),
             )
         )
     fig.update_layout(
@@ -398,20 +420,22 @@ def side_view_figure(path: tuple[np.ndarray, np.ndarray, int] | None) -> go.Figu
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         xaxis={
-            "range": [-L - 2, L + 3],
+            "range": [-L - 2 * k, L + 3 * k],
             "tickvals": [-L, 0, L],
             "ticktext": ["baseline", "net", "baseline"],
             "showgrid": False,
             "zeroline": False,
             "fixedrange": True,
         },
-        yaxis={"range": [0, top], "title": "m", "showgrid": False, "fixedrange": True},
+        yaxis={"range": [0, top], "title": u.len_unit, "showgrid": False, "fixedrange": True},
     )
     return fig
 
 
 def landing_traces(shots: pa.Table | None) -> list[go.Scatter]:
-    """Static landing dots for the court map, one trace per outcome color."""
+    """Static landing dots for the court map, one trace per outcome color (court metres;
+    the hover text in display units)."""
+    u = units.current()
     rows = [
         r
         for r in (shots.to_pylist() if shots is not None else [])
@@ -429,13 +453,20 @@ def landing_traces(shots: pa.Table | None) -> list[go.Scatter]:
                 mode="markers",
                 marker={"color": OUTCOME_COLORS[o], "size": 6, "opacity": 0.55},
                 customdata=[
-                    [r["t_contact"], r["speed_racket_kmh"] or float("nan"), _error(r) or 0.0]
+                    [
+                        r["t_contact"],
+                        u.speed(r["speed_racket_kmh"] or float("nan")),
+                        u.speed(_error(r) or 0.0),
+                        u.len(r["landing_x"]),
+                        u.len(r["landing_y"]),
+                    ]
                     for r in sel
                 ],
                 hovertemplate=(
-                    "%{customdata[1]:.0f} ± %{customdata[2]:.0f} km/h · "
+                    f"%{{customdata[1]:.0f}} ± %{{customdata[2]:.0f}} {u.speed_unit} · "
                     + OUTCOME_LABELS[o]
-                    + "<br>(%{x:.2f}, %{y:.2f}) m<extra></extra>"
+                    + f"<br>(%{{customdata[3]:.2f}}, %{{customdata[4]:.2f}}) {u.len_unit}"
+                    + "<extra></extra>"
                 ),
                 name="landings:" + o,
             )

@@ -20,7 +20,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from swingvision import services
 from swingvision.analysis import practice as pr
-from swingvision.app import state
+from swingvision.app import state, units
 from swingvision.app.components.court_diagram import ME_COLOR, court_figure
 from swingvision.app.components.ui import icon, notification
 from swingvision.court import model as cm
@@ -256,13 +256,14 @@ def target_editor(prefix: str, targets: list[Target] | None = None, saved_sets: 
 def target_rows(prefix: str, targets: list[Target]):
     if not targets:
         return dmc.Text("No targets yet.", size="sm", c="dimmed")
+    u = units.current()
     rows = []
     for t in targets:
         cx, cy = pr.target_center(t)
         size = (
-            f"⌀ {2 * t.r:.1f} m"  # type: ignore[operator]
+            f"⌀ {u.len_str(2 * t.r, 1)}"  # type: ignore[operator]
             if t.shape == "circle"
-            else f"{t.x1 - t.x0:.1f} × {t.y1 - t.y0:.1f} m"  # type: ignore[operator]
+            else f"{u.len(t.x1 - t.x0):.1f} × {u.len_str(t.y1 - t.y0, 1)}"  # type: ignore[operator]
         )
         rows.append(
             dmc.Paper(
@@ -309,7 +310,8 @@ def target_rows(prefix: str, targets: list[Target]):
                                     flex=1,
                                 ),
                                 dmc.Text(
-                                    f"{t.shape}, {size}, center ({cx:.1f}, {cy:.1f}) m",
+                                    f"{t.shape}, {size}, center "
+                                    f"({u.len(cx):.1f}, {u.len(cy):.1f}) {u.len_unit}",
                                     size="xs",
                                     c="dimmed",
                                 ),

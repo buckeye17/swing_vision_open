@@ -22,7 +22,7 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dcc, html, no_update
 
 from swingvision import services
-from swingvision.app import state
+from swingvision.app import state, units
 from swingvision.app.components.court_overlay import COURT_COLOR, NET_COLOR, polylines, trace_xy
 from swingvision.app.components.ui import (
     fmt_duration,
@@ -230,6 +230,7 @@ def _metric(label: str, value: str, tip: str | None = None):
 
 
 def _panel(st: dict):
+    u = units.current()
     m = CalibrationMetrics(**st["metrics"])
     cam = _camera(st)
     d = cam.describe()
@@ -263,9 +264,9 @@ def _panel(st: dict):
         _metric("Pinned points", str(len(pins))),
         dmc.Divider(my=4),
         dmc.Title("Camera", order=5),
-        _metric("Height", f"{d['height_m']:.2f} m"),
-        _metric("Behind baseline", f"{d['behind_baseline_m']:.2f} m"),
-        _metric("Sideways offset", f"{d['offset_x_m']:+.2f} m"),
+        _metric("Height", u.len_str(d["height_m"], 2)),
+        _metric("Behind baseline", u.len_str(d["behind_baseline_m"], 2)),
+        _metric("Sideways offset", u.len_str(d["offset_x_m"], 2, sign=True)),
         _metric("Tilt down", f"{d['tilt_down_deg']:.1f}°"),
         _metric("Horizontal FOV", f"{d['hfov_deg']:.1f}°"),
         _metric("Lens k1 / k2", f"{d['k1']:+.3f} / {d['k2']:+.3f}"),

@@ -10,7 +10,7 @@ from dash import Input, Output, State, callback, dcc, html, no_update
 
 from swingvision.analysis import export as ex
 from swingvision.analysis import stats as st
-from swingvision.app import state
+from swingvision.app import state, units
 from swingvision.app.components import stats_view as sv
 from swingvision.app.components.court_diagram import heatmap_figure
 from swingvision.app.components.shots_view import uncalibrated_badge
@@ -187,7 +187,8 @@ def layout(session_id: str | None = None, **_):
                     html.Div(id="st-strokes"),
                     hint="Depth: how far short of the line (−: past it) shots landed, the service "
                     "line for serves and the baseline for the rest. Deep: groundstrokes in, within "
-                    "2.7 m of the baseline. Wrist speed: the racket wrist's peak (swings page).",
+                    f"{units.current().len_str(st.DEEP_ZONE_M)} of the baseline. Wrist speed: the "
+                    "racket wrist's peak (swings page).",
                 ),
                 span=12,
             ),
@@ -250,10 +251,11 @@ def layout(session_id: str | None = None, **_):
 def _movement_facts(m: dict):
     if not m:
         return dmc.Text("Player tracking hasn't run yet.", size="sm", c="dimmed")
-    moving = m["mean_moving_speed_mps"] * 3.6
+    u = units.current()
+    moving = u.speed_str_mps(m["mean_moving_speed_mps"])
     return dmc.Text(
-        f"{m['distance_m']:,.0f} m covered in {fmt_duration(m['tracked_s'])} of tracking "
-        f"({m['coverage']:.0%} of the usable video) · average {moving:.1f} km/h while moving · "
+        f"{u.len(m['distance_m']):,.0f} {u.len_unit} covered in {fmt_duration(m['tracked_s'])} "
+        f"of tracking ({m['coverage']:.0%} of the usable video) · average {moving} while moving · "
         f"{m['near_half_frac']:.0%} of the time on the near half.",
         size="sm",
     )

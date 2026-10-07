@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 from dash import html
 from plotly.subplots import make_subplots
 
+from swingvision.app import units
 from swingvision.pose.kinematics import CURVE_LABELS, FrameKinematics, frame_kinematics
 from swingvision.pose.skeleton import COCO_EDGES, H36M_EDGES, H
 from swingvision.pose.strokes import STROKE_LABELS
@@ -206,6 +207,16 @@ def _phase_shapes(row: dict, t0: float) -> list[dict]:
     return shapes
 
 
+def _curve_display(u: units.Units, unit: str, y):
+    """A kinematics curve in display units: (values, unit). Speeds of the wrist (m/s) and
+    heights (m) convert; degrees stay."""
+    if unit == "m/s":
+        return u.limb_speed(np.asarray(y, dtype=float)), u.limb_speed_unit
+    if unit == "m":
+        return u.len(np.asarray(y, dtype=float)), u.len_unit
+    return y, unit
+
+
 def angle_figure(kin: FrameKinematics | None, row: dict | None, compare: dict | None = None):
     """Angle and speed curves around the contact (t = 0), phases shaded; ``compare``:
     ``{"label", "t" (relative), "curves"}`` drawn dashed."""
@@ -217,15 +228,17 @@ def angle_figure(kin: FrameKinematics | None, row: dict | None, compare: dict | 
         subplot_titles=[title for title, _ in CURVE_ROWS],
     )
     if kin is not None and row is not None:
+        u = units.current()
         rel = kin.t - row["t_contact"]
         curves = kin.curves()
         for i, (_, names) in enumerate(CURVE_ROWS, start=1):
             for name in names:
-                label, unit = CURVE_LABELS[name]
+                label, si_unit = CURVE_LABELS[name]
+                y, unit = _curve_display(u, si_unit, curves[name])
                 fig.add_trace(
                     go.Scatter(
                         x=rel,
-                        y=curves[name],
+                        y=y,
                         name=label,
                         legendgroup=name,
                         line={"color": CURVE_COLORS[name], "width": 2},
@@ -238,7 +251,7 @@ def angle_figure(kin: FrameKinematics | None, row: dict | None, compare: dict | 
                     fig.add_trace(
                         go.Scatter(
                             x=compare["t"],
-                            y=compare["curves"][name],
+                            y=_curve_display(u, si_unit, compare["curves"][name])[0],
                             name=f"{label} ({compare['label']})",
                             legendgroup=name,
                             showlegend=False,
@@ -273,17 +286,20 @@ def _bones(j: np.ndarray) -> tuple[list, list, list]:
 
 
 def skeleton_3d(t: np.ndarray, joints: np.ndarray, row: dict | None, hand: str, step: int = 2):
-    """Animated 3D skeleton on the court (meters), with the racket wrist's path and a phase
-    label per frame."""
+    """Animated 3D skeleton on the court (display length units), with the racket wrist's
+    path and a phase label per frame."""
     fig = go.Figure()
     if row is None or len(t) == 0:
         fig.update_layout(height=420, margin={"l": 0, "r": 0, "t": 0, "b": 0})
         return fig
+    u = units.current()
+    joints = joints * u.len_factor
     wrist = H[f"{'l' if hand == 'left' else 'r'}_wrist"]
     keep = np.arange(0, len(t), step)
     pelvis = joints[:, H["pelvis"]]
     cx, cy = np.nanmedian(pelvis[:, 0]), np.nanmedian(pelvis[:, 1])
-    half = 1.6
+    half = 1.6 * u.len_factor
+    z_top = 2.8 * u.len_factor
     path = joints[:, wrist]
     ic = int(np.argmin(np.abs(t - row["t_contact"])))
 
@@ -357,11 +373,11 @@ def skeleton_3d(t: np.ndarray, joints: np.ndarray, row: dict | None, hand: str, 
         showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)",
         scene={
-            "xaxis": {"range": [cx - half, cx + half], "title": "x (m)"},
-            "yaxis": {"range": [cy - half, cy + half], "title": "y (m)"},
-            "zaxis": {"range": [0, 2.8], "title": "z (m)"},
+            "xaxis": {"range": [cx - half, cx + half], "title": f"x ({u.len_unit})"},
+            "yaxis": {"range": [cy - half, cy + half], "title": f"y ({u.len_unit})"},
+            "zaxis": {"range": [0, z_top], "title": f"z ({u.len_unit})"},
             "aspectmode": "manual",
-            "aspectratio": {"x": 1, "y": 1, "z": 2.8 / (2 * half)},
+            "aspectratio": {"x": 1, "y": 1, "z": z_top / (2 * half)},
             "camera": {"eye": {"x": 1.4, "y": -1.6 if row["side"] != 1 else 1.6, "z": 0.6}},
         },
         sliders=[
@@ -408,6 +424,7 @@ def skeleton_3d(t: np.ndarray, joints: np.ndarray, row: dict | None, hand: str, 
 
 
 def swing_table(rows: list[dict], selected: int | None):
+    u = units.current()
     body = []
     for r in rows:
         style = {"cursor": "pointer"}
@@ -431,7 +448,10 @@ def swing_table(rows: list[dict], selected: int | None):
                     ),
                     html.Td("✎" if r["stroke_source"] == "user" else ""),
                     html.Td(num(r["forward_s"], ".2f", " s"), style={"textAlign": "right"}),
-                    html.Td(num(r["wrist_speed_peak"], ".1f"), style={"textAlign": "right"}),
+                    html.Td(
+                        num(u.limb_speed(r["wrist_speed_peak"]), ".1f"),
+                        style={"textAlign": "right"},
+                    ),
                     html.Td(", ".join(flags), style={"color": "var(--mantine-color-dimmed)"}),
                 ],
                 id={"type": "sw-row", "index": r["swing_id"]},
@@ -447,7 +467,7 @@ def swing_table(rows: list[dict], selected: int | None):
                 html.Th("Stroke"),
                 html.Th(""),
                 html.Th("Forward", style={"textAlign": "right"}),
-                html.Th("Wrist m/s", style={"textAlign": "right"}),
+                html.Th(f"Wrist {u.limb_speed_unit}", style={"textAlign": "right"}),
                 html.Th(""),
             ]
         )
@@ -463,17 +483,21 @@ def metrics_table(row: dict | None, compare: dict | None = None):
     if row is None:
         return dmc.Text("Pick a swing.", size="sm", c="dimmed")
     cmp_row = compare.get("row") if compare else None
+    u = units.current()
+    # Metres and m/s convert to display units; seconds, degrees and ratios stay.
+    conv = {" m": (u.len, f" {u.len_unit}"), " m/s": (u.limb_speed, f" {u.limb_speed_unit}")}
 
     def line(label: str, key: str, fmt: str, unit: str = "", hint: str | None = None):
+        f, unit = conv.get(unit, (lambda v: v, unit))
         cells = [
             html.Td(label),
-            html.Td(num(row.get(key), fmt, unit), style={"textAlign": "right"}),
+            html.Td(num(f(row.get(key)), fmt, unit), style={"textAlign": "right"}),
         ]
         if compare is not None:
             v = cmp_row.get(key) if cmp_row else compare.get("means", {}).get(key)
             cells.append(
                 html.Td(
-                    num(v, fmt, unit),
+                    num(f(v), fmt, unit),
                     style={"textAlign": "right", "color": "var(--mantine-color-dimmed)"},
                 )
             )

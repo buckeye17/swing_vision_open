@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 import plotly.graph_objects as go
 
+from swingvision.app import units
 from swingvision.court import model
 
 SURFACE = "#3d7a5a"
@@ -122,7 +123,11 @@ def minimap_figure(
     extra_traces: list | None = None,
 ):
     """Live minimap. Trace 0: trail, 1: player, 2: recent bounces, 3: the current shot's
-    landing (all moved client-side), then ``extra_traces``, the machine, the click grid."""
+    landing (all moved client-side), then ``extra_traces``, the machine, the click grid.
+
+    In imperial units the player's and bounces' hover text reads ``customdata`` (x, y in
+    feet), which the client sets along with their positions."""
+    u = units.current()
     fig = court_figure(height=420)
     fig.add_trace(
         go.Scatter(
@@ -141,7 +146,8 @@ def minimap_figure(
             y=[],
             mode="markers",
             marker={"color": ME_COLOR, "size": 13, "line": {"color": "#222", "width": 1.5}},
-            hovertemplate="x %{x:.1f} m, y %{y:.1f} m<extra>me</extra>",
+            customdata=[],
+            hovertemplate=_xy_hover(u, "x ", 1) + "<extra>me</extra>",
             name="me",
         )
     )
@@ -151,7 +157,8 @@ def minimap_figure(
             y=[],
             mode="markers",
             marker={"color": "#4dabf7", "size": 9, "line": {"color": "#fff", "width": 1}},
-            hovertemplate="bounce x %{x:.2f} m, y %{y:.2f} m<extra></extra>",
+            customdata=[],
+            hovertemplate=_xy_hover(u, "bounce x ", 2) + "<extra></extra>",
             name="bounces",
         )
     )
@@ -189,6 +196,16 @@ def minimap_figure(
     return fig
 
 
+def _xy_hover(u: units.Units, prefix: str, nd: int) -> str:
+    """``x 1.2 m, y 3.4 m``: from the point itself in metres, from ``customdata`` (display
+    units) otherwise."""
+    if not u.imperial:
+        return f"{prefix}%{{x:.{nd}f}} m, y %{{y:.{nd}f}} m"
+    return (
+        f"{prefix}%{{customdata[0]:.{nd}f}} {u.len_unit}, y %{{customdata[1]:.{nd}f}} {u.len_unit}"
+    )
+
+
 def heatmap_figure(xc: np.ndarray, yc: np.ndarray, H: np.ndarray, height: int = 460) -> go.Figure:
     """Time spent per cell (seconds) over the court.
 
@@ -198,6 +215,7 @@ def heatmap_figure(xc: np.ndarray, yc: np.ndarray, H: np.ndarray, height: int = 
     """
     from scipy.ndimage import gaussian_filter
 
+    u = units.current()
     fig = court_figure(height=height)
     if not H.any():
         return fig
@@ -212,7 +230,14 @@ def heatmap_figure(xc: np.ndarray, yc: np.ndarray, H: np.ndarray, height: int = 
             x=xc,
             y=yc,
             z=z,
-            customdata=smooth,
+            # Per cell: x, y (display units), seconds.
+            customdata=np.dstack(
+                np.broadcast_arrays(
+                    u.len(np.asarray(xc, dtype=float))[None, :],
+                    u.len(np.asarray(yc, dtype=float))[:, None],
+                    smooth,
+                )
+            ),
             zmin=0,
             zmax=top,
             colorscale=[
@@ -222,7 +247,10 @@ def heatmap_figure(xc: np.ndarray, yc: np.ndarray, H: np.ndarray, height: int = 
             ],
             zsmooth="best",
             showscale=False,
-            hovertemplate="x %{x:.1f} m, y %{y:.1f} m<br>%{customdata:.0f} s<extra></extra>",
+            hovertemplate=(
+                f"x %{{customdata[0]:.1f}} {u.len_unit}, y %{{customdata[1]:.1f}} {u.len_unit}"
+                "<br>%{customdata[2]:.0f} s<extra></extra>"
+            ),
         )
     )
     return fig

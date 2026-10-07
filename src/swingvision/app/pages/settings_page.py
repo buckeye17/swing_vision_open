@@ -8,11 +8,12 @@ from pathlib import Path
 
 import dash
 import dash_mantine_components as dmc
-from dash import Input, Output, State, callback, html, no_update
+from dash import Input, Output, State, callback, dcc, html, no_update
 
 from swingvision.app import state
 from swingvision.app.components.file_browser import file_browser, register_file_browser
 from swingvision.app.components.ui import icon, notification, page_header
+from swingvision.app.units import Units
 from swingvision.app.worker_control import ensure_worker
 from swingvision.io.ffmpeg import available_encoders
 from swingvision.models.registry import REGISTRY, weights_dir
@@ -67,7 +68,30 @@ def _tool_report(ffmpeg: str, ffprobe: str) -> list:
     return rows
 
 
+ROI_INPUT_METRIC = {"min": 0.5, "max": 8, "step": 0.5}
+ROI_INPUT_IMPERIAL = {"min": 2, "max": 26, "step": 1}  # ft
+
+
+def _roi_to_input(roi_m: float, u: Units) -> float:
+    """The beside-the-court distance in display length units (one decimal in feet)."""
+    return round(u.len(roi_m), 1) if u.imperial else roi_m
+
+
+def _roi_from_input(value, stored_m: float, u: Units) -> float:
+    """The beside-the-court distance typed in ``u``'s length units, in metres. An unchanged
+    (rounded) value keeps the stored metres, so saving doesn't drift it."""
+    if value in (None, ""):
+        return stored_m
+    value = float(value)
+    if value == 0:  # as before: an empty or zero entry keeps the stored value
+        return stored_m
+    if u.imperial and value == _roi_to_input(stored_m, u):
+        return stored_m
+    return value / u.len_factor
+
+
 def _players_card(s):
+    u = Units(s.units)
     p = s.processing
     models = [
         {
@@ -117,12 +141,10 @@ def _players_card(s):
                     ),
                     dmc.NumberInput(
                         id="set-roi-beside",
-                        label="Track up to this far beside the court (m)",
+                        label=f"Track up to this far beside the court ({u.len_unit})",
                         description="Smaller if a neighboring court is close",
-                        value=p.roi_beside_m,
-                        min=0.5,
-                        max=8,
-                        step=0.5,
+                        value=_roi_to_input(p.roi_beside_m, u),
+                        **(ROI_INPUT_IMPERIAL if u.imperial else ROI_INPUT_METRIC),
                         decimalScale=1,
                     ),
                 ],
@@ -440,6 +462,7 @@ def layout(**_):
             ),
             file_browser("out-browser", mode="folder", title="Choose output folder"),
             html.Div(id="set-dummy"),
+            dcc.Store(id="set-units-shown", data=s.units),  # what the form's inputs are in
         ],
         size="md",
         px=0,
@@ -471,6 +494,12 @@ def _browser_start(value):
 @callback(
     Output("notify", "sendNotifications", allow_duplicate=True),
     Output("set-tool-report", "children"),
+    Output("set-roi-beside", "value"),
+    Output("set-roi-beside", "label"),
+    Output("set-roi-beside", "min"),
+    Output("set-roi-beside", "max"),
+    Output("set-roi-beside", "step"),
+    Output("set-units-shown", "data"),
     Input("set-save", "n_clicks"),
     State("set-output-root", "value"),
     State("set-ffmpeg", "value"),
@@ -489,6 +518,7 @@ def _browser_start(value):
     State("set-units", "value"),
     State("set-cache-on", "checked"),
     State("set-cache-max", "value"),
+    State("set-units-shown", "data"),
     prevent_initial_call=True,
 )
 def _save(
@@ -510,22 +540,50 @@ def _save(
     units,
     cache_on,
     cache_max,
+    units_shown,
 ):
     if not n:
-        return no_update, no_update
+        return (
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+        )
     s = state.settings()
+    # The units the form's inputs are in: as rendered, or as the last save switched them to.
+    shown = Units(units_shown if units_shown in ("metric", "imperial") else s.units)
     if output_root:
         root = Path(output_root).expanduser()
         if not root.exists():
             if not root.parent.exists():
-                return notification(
-                    f"Parent folder of {root} does not exist.", "Not saved", "red"
-                ), no_update
+                return (
+                    notification(f"Parent folder of {root} does not exist.", "Not saved", "red"),
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                )
             root.mkdir()
         try:
             Library(root.resolve()).init()
         except Exception as exc:  # unwritable folder etc.
-            return notification(f"Cannot use {root}: {exc}", "Not saved", "red"), no_update
+            return (
+                notification(f"Cannot use {root}: {exc}", "Not saved", "red"),
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+            )
         s.output_root = root.resolve()
     else:
         s.output_root = None
@@ -538,7 +596,7 @@ def _save(
     s.processing.person_model = person_model or s.processing.person_model
     s.processing.person_rate_hz = float(person_rate or s.processing.person_rate_hz)
     s.processing.person_input_px = int(person_input or s.processing.person_input_px)
-    s.processing.roi_beside_m = float(roi_beside or s.processing.roi_beside_m)
+    s.processing.roi_beside_m = _roi_from_input(roi_beside, s.processing.roi_beside_m, shown)
     s.processing.ball_detector = ball_detector or s.processing.ball_detector
     s.processing.ball_sweep_hz = None if ball_sweep in (None, "full") else float(ball_sweep)
     s.units = units if units in ("metric", "imperial") else s.units
@@ -548,8 +606,17 @@ def _save(
     state.settings()  # apply the cache settings now
     if state.OPTIONS.start_worker:
         ensure_worker(s.output_root)
-    return notification("Settings saved.", icon_name="tabler:check"), _tool_report(
-        s.ffmpeg_path, s.ffprobe_path
+    u = Units(s.units)  # redraw the inputs in the units just saved
+    bounds = ROI_INPUT_IMPERIAL if u.imperial else ROI_INPUT_METRIC
+    return (
+        notification("Settings saved.", icon_name="tabler:check"),
+        _tool_report(s.ffmpeg_path, s.ffprobe_path),
+        _roi_to_input(s.processing.roi_beside_m, u),
+        f"Track up to this far beside the court ({u.len_unit})",
+        bounds["min"],
+        bounds["max"],
+        bounds["step"],
+        s.units,
     )
 
 

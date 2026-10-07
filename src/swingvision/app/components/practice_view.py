@@ -14,6 +14,7 @@ from dash import html
 from swingvision.analysis import practice as pr
 from swingvision.analysis.segmentation import blocks_of
 from swingvision.analysis.shots import SPEED_SCALE_ERROR
+from swingvision.app import units
 from swingvision.app.components.court_diagram import court_figure
 from swingvision.app.components.target_editor import (
     ABSOLUTE_COLOR,
@@ -117,10 +118,10 @@ def result_color(r: dict) -> str:
     return IN_COLOR if r["outcome"] == "in" else EXCLUDED_COLOR
 
 
-def result_label(r: dict) -> str:
+def result_label(r: dict, u: units.Units | None = None) -> str:
     o = OUTCOME_LABELS.get(r["outcome"], r["outcome"])
     if r["outcome"] in ("out_long", "out_wide") and r["margin_m"] is not None:
-        o += f" {abs(r['margin_m']) * 100:.0f} cm"
+        o += f" {(u or units.current()).small_str(abs(r['margin_m']))}"
     if r["in_target"] is True:
         return o + " · target"
     return o
@@ -165,6 +166,7 @@ def court_map(
 ) -> go.Figure:
     """Landings over the targets. ``view="hit"``: every shot as if hit from the near end
     (relative targets as drawn); ``"court"``: where things are on the court."""
+    u = units.current()
     fig = court_figure(height=height)
     shapes = list(fig.layout.shapes)
     sides = sorted({r["side"] for r in rows if r["side"] is not None}) or [-1]
@@ -205,13 +207,19 @@ def court_map(
                     },
                     "opacity": 0.9,
                 },
-                customdata=[[r["segment_id"], r["t_contact"]] for r in members],
-                text=[f"{shot_title(r)}<br>{result_label(r)}" for r in members],
+                customdata=[
+                    [r["segment_id"], r["t_contact"], u.len(pt[0]), u.len(pt[1])]
+                    for r, pt in zip(members, xy, strict=True)
+                ],
+                text=[f"{shot_title(r)}<br>{result_label(r, u)}" for r in members],
                 # While placing a landing, clicks must reach the grid underneath (a
                 # hovertemplate would override hoverinfo).
                 hovertemplate=None
                 if placing
-                else "%{text}<br>(%{x:.2f}, %{y:.2f}) m<extra></extra>",
+                else (
+                    f"%{{text}}<br>(%{{customdata[2]:.2f}}, %{{customdata[3]:.2f}}) "
+                    f"{u.len_unit}<extra></extra>"
+                ),
                 hoverinfo="skip" if placing else None,
                 name="landings",
             )
@@ -255,6 +263,7 @@ def court_map(
 
 
 def rolling_figure(rows: list[dict], has_targets: bool) -> go.Figure:
+    u = units.current()
     roll = pr.rolling(rows)
     fig = go.Figure()
     if has_targets:
@@ -286,7 +295,7 @@ def rolling_figure(rows: list[dict], has_targets: bool) -> go.Figure:
             mode="markers",
             marker={"color": [result_color(r) for r in kept], "size": 7, "symbol": "square"},
             customdata=[[r["segment_id"], r["t_contact"]] for r in kept],
-            text=[f"{shot_title(r)}<br>{result_label(r)}" for r in kept],
+            text=[f"{shot_title(r)}<br>{result_label(r, u)}" for r in kept],
             hovertemplate="%{text}<extra></extra>",
             name="shots",
         )
@@ -345,6 +354,7 @@ def _stat(label: str, value: str, sub: str = ""):
 
 
 def kpis(rows: list[dict], has_targets: bool):
+    u = units.current()
     s = pr.summarize(rows)
     items = [
         _stat("Shots", str(s["n"]), f"{s['n_landed']} landings seen"),
@@ -360,19 +370,19 @@ def kpis(rows: list[dict], has_targets: bool):
             ),
             _stat(
                 "To target",
-                "–" if s["dist_median"] is None else f"{s['dist_median']:.1f} m",
+                u.len_str(s["dist_median"], 1),
                 "median distance to its center",
             ),
         ]
     items += [
         _stat(
             "Depth spread",
-            "–" if s["depth_sd"] is None else f"± {s['depth_sd']:.1f} m",
+            "–" if s["depth_sd"] is None else f"± {u.len_str(s['depth_sd'], 1)}",
             "SD of landing depth",
         ),
         _stat(
             "Speed",
-            "–" if s["speed_median"] is None else f"{s['speed_median']:.0f} km/h",
+            u.speed_str(s["speed_median"]),
             f"median of {s['n_speed']}, ± {SPEED_SCALE_ERROR:.0%} uncalibrated",
         ),
     ]
@@ -380,11 +390,13 @@ def kpis(rows: list[dict], has_targets: bool):
         items.append(
             _stat(
                 "Machine feeds",
-                f"{s['feed_speed_mean']:.0f} km/h",
+                u.speed_str(s["feed_speed_mean"]),
                 "spread "
-                + ("–" if s["feed_spread_m"] is None else f"{s['feed_spread_m']:.1f} m")
+                + u.len_str(s["feed_spread_m"], 1)
                 + (
-                    "" if s["feed_speed_sd"] is None else f", speed ± {s['feed_speed_sd']:.0f} km/h"
+                    ""
+                    if s["feed_speed_sd"] is None
+                    else f", speed ± {u.speed_str(s['feed_speed_sd'])}"
                 ),
             )
         )
@@ -392,6 +404,7 @@ def kpis(rows: list[dict], has_targets: bool):
 
 
 def blocks_table(data: PracticeData, has_targets: bool):
+    u = units.current()
     body = []
     for b in data.blocks:
         rows = [r for r in data.rows if r["block_id"] == b["block_id"]]
@@ -411,11 +424,11 @@ def blocks_table(data: PracticeData, has_targets: bool):
                         style={"textAlign": "right"},
                     ),
                     html.Td(
-                        "–" if s["depth_sd"] is None else f"{s['depth_sd']:.1f}",
+                        "–" if s["depth_sd"] is None else f"{u.len(s['depth_sd']):.1f}",
                         style={"textAlign": "right"},
                     ),
                     html.Td(
-                        "–" if s["speed_median"] is None else f"{s['speed_median']:.0f}",
+                        "–" if s["speed_median"] is None else f"{u.speed(s['speed_median']):.0f}",
                         style={"textAlign": "right"},
                     ),
                 ],
@@ -434,8 +447,8 @@ def blocks_table(data: PracticeData, has_targets: bool):
                 html.Th("In", style={"textAlign": "right"}),
                 html.Th("Net", style={"textAlign": "right"}),
                 html.Th("Target" if has_targets else "", style={"textAlign": "right"}),
-                html.Th("Depth SD m", style={"textAlign": "right"}),
-                html.Th("km/h", style={"textAlign": "right"}),
+                html.Th(f"Depth SD {u.len_unit}", style={"textAlign": "right"}),
+                html.Th(u.speed_unit, style={"textAlign": "right"}),
             ]
         )
     )
@@ -443,6 +456,7 @@ def blocks_table(data: PracticeData, has_targets: bool):
 
 
 def shots_table(rows: list[dict], selected: int | None, has_targets: bool):
+    u = units.current()
     body = []
     for i, r in enumerate(sorted(rows, key=lambda r: r["t_contact"])):
         flags = []
@@ -452,12 +466,12 @@ def shots_table(rows: list[dict], selected: int | None, has_targets: bool):
             flags.append("close")
         if "contact_unseen" in (r["flags"] or []):
             flags.append("contact unseen")
-        speed = "–" if r["speed_kmh"] is None else f"{r['speed_kmh']:.0f}"
+        speed = "–" if r["speed_kmh"] is None else f"{u.speed(r['speed_kmh']):.0f}"
         tgt = ""
         if r["in_target"] is not None:
             tgt = "hit" if r["in_target"] else "miss"
             if r["target_dist_m"] is not None:
-                tgt += f" · {r['target_dist_m']:.1f} m"
+                tgt += f" · {u.len_str(r['target_dist_m'], 1)}"
         style = {"cursor": "pointer"}
         if r["segment_id"] == selected:
             style["background"] = "var(--mantine-color-teal-light)"
@@ -473,7 +487,7 @@ def shots_table(rows: list[dict], selected: int | None, has_targets: bool):
                     html.Td(kind_label(r) + (f" ({r['serve_side']})" if r["serve_side"] else "")),
                     html.Td(
                         dmc.Badge(
-                            result_label(r),
+                            result_label(r, u),
                             color=result_color(r),
                             variant="light",
                             size="xs",
@@ -498,7 +512,7 @@ def shots_table(rows: list[dict], selected: int | None, has_targets: bool):
                 html.Th("Shot"),
                 html.Th("Result"),
                 html.Th("Target") if has_targets else None,
-                html.Th("km/h", style={"textAlign": "right"}),
+                html.Th(u.speed_unit, style={"textAlign": "right"}),
                 html.Th(""),
             ]
         )
@@ -510,7 +524,8 @@ def shots_table(rows: list[dict], selected: int | None, has_targets: bool):
 
 
 def breakdown_table(rows: list[dict], has_targets: bool):
-    groups = pr.breakdown(rows)
+    u = units.current()
+    groups = pr.breakdown(rows, u.speed_bands_kmh, u.speed_factor, u.speed_unit)
     if not groups:
         return dmc.Text("No shots.", size="sm", c="dimmed")
     body = [
@@ -522,7 +537,7 @@ def breakdown_table(rows: list[dict], has_targets: bool):
                 html.Td(pct(s["net_pct"]), style={"textAlign": "right"}),
                 html.Td(pct(s["target_pct"]) if has_targets else "", style={"textAlign": "right"}),
                 html.Td(
-                    "–" if s["depth_mean"] is None else f"{s['depth_mean']:.1f}",
+                    "–" if s["depth_mean"] is None else f"{u.len(s['depth_mean']):.1f}",
                     style={"textAlign": "right"},
                 ),
             ]
@@ -537,7 +552,7 @@ def breakdown_table(rows: list[dict], has_targets: bool):
                 html.Th("In", style={"textAlign": "right"}),
                 html.Th("Net", style={"textAlign": "right"}),
                 html.Th("Target" if has_targets else "", style={"textAlign": "right"}),
-                html.Th("Depth m", style={"textAlign": "right"}),
+                html.Th(f"Depth {u.len_unit}", style={"textAlign": "right"}),
             ]
         )
     )
@@ -551,17 +566,18 @@ def shot_detail(r: dict | None, placing: bool):
             size="sm",
             c="dimmed",
         )
+    u = units.current()
     lines = [dmc.Text(shot_title(r), fw=600, size="sm")]
     if r["landing_x"] is not None:
         src = {"bounce": "detected bounce", "fit": "extended flight", "user": "placed by you"}
         land = (
-            f"Landed ({r['landing_x']:.2f}, {r['landing_y']:.2f}) m, "
+            f"Landed ({u.len(r['landing_x']):.2f}, {u.len(r['landing_y']):.2f}) {u.len_unit}, "
             f"{src.get(r['landing_source'], r['landing_source'])}"
         )
         if r["landing_sigma_m"] is not None:
-            land += f", ± {r['landing_sigma_m'] * 100:.0f} cm"
+            land += f", ± {u.small_str(r['landing_sigma_m'])}"
         lines.append(dmc.Text(land, size="xs"))
-    call = result_label(r)
+    call = result_label(r, u)
     if r["call_area"]:
         area = {"singles": "singles court", "deuce_box": "deuce box", "ad_box": "ad box"}
         call += f" (called against the {area.get(r['call_area'], r['call_area'])})"
@@ -569,15 +585,17 @@ def shot_detail(r: dict | None, placing: bool):
     if r["target_id"] is not None:
         lines.append(
             dmc.Text(
-                f"Nearest target {r['target_dist_m']:.2f} m from its center: "
-                f"{r['depth_err_m']:+.2f} m deep, {r['width_err_m']:+.2f} m to your right",
+                f"Nearest target {u.len_str(r['target_dist_m'], 2)} from its center: "
+                f"{u.len_str(r['depth_err_m'], 2, sign=True)} deep, "
+                f"{u.len_str(r['width_err_m'], 2, sign=True)} to your right",
                 size="xs",
             )
         )
     if r["speed_kmh"] is not None:
         lines.append(
             dmc.Text(
-                f"{r['speed_kmh']:.0f} ± {r['speed_err_kmh'] or 0:.0f} km/h off the racket "
+                f"{u.speed(r['speed_kmh']):.0f} ± {u.speed(r['speed_err_kmh'] or 0):.0f} "
+                f"{u.speed_unit} off the racket "
                 "(uncalibrated)",
                 size="xs",
             )
@@ -672,6 +690,7 @@ def targets_overlay(cal: Calibration | None, targets: list[Target]) -> dict | No
 
 def shots_store(data: PracticeData) -> dict:
     """Per-shot times for client callbacks (current shot, overlay side, N/P keys)."""
+    u = units.current()
     rows = sorted(data.rows, key=lambda r: r["t_contact"])
     out: dict = {k: [] for k in ("id", "t0", "t1", "tc", "side", "label")}
     for r in rows:
@@ -681,7 +700,7 @@ def shots_store(data: PracticeData) -> dict:
         out["t1"].append(round(seg.get("end_t", r["t_contact"] + 2), 2))
         out["tc"].append(round(r["t_contact"], 3))
         out["side"].append(r["side"])
-        out["label"].append(result_label(r))
+        out["label"].append(result_label(r, u))
     return out
 
 
@@ -709,6 +728,7 @@ def segments_card(session_id: str, data: PracticeData | None):
             "Shots are segmented once processing reaches the Segments stage.", size="sm", c="dimmed"
         )
         return dmc.Paper([title, body], p="md", withBorder=True)
+    u = units.current()
     items = []
     for b in data.blocks:
         rows = sorted(
@@ -722,7 +742,8 @@ def segments_card(session_id: str, data: PracticeData | None):
                 [
                     html.Span(fmt_t(r["t_contact"]), style={"fontFamily": "monospace"}),
                     html.Span(
-                        " " + result_label(r), style={"color": result_color(r), "fontWeight": 600}
+                        " " + result_label(r, u),
+                        style={"color": result_color(r), "fontWeight": 600},
                     ),
                 ],
                 id={"type": "review-seg-row", "index": r["segment_id"]},
