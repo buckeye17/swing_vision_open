@@ -30,6 +30,7 @@ from swingvision.app.components.ui import (
     no_output_root_alert,
     notification,
     page_header,
+    session_header,
 )
 from swingvision.app.worker_control import ensure_worker
 from swingvision.court import calibration as calib
@@ -340,14 +341,11 @@ def layout(session_id: str | None = None, **_):
     _lib, row, session = found
     user = calib.load(session.court_user_path)
     auto = calib.load(session.court_auto_path)
-    back = dmc.Anchor(
-        dmc.Button("Back to session", variant="default", leftSection=icon("tabler:arrow-left")),
-        href=f"/session/{session_id}",
-    )
+    header = session_header(session, session.load_config(), "calibration", row["status"])
     if (user is None and auto is None) or not session.court_background_path.exists():
         return dmc.Container(
             [
-                page_header(f"Calibrate · {row['name']}", right=back),
+                header,
                 dmc.Alert(
                     [
                         dmc.Text(
@@ -440,11 +438,8 @@ def layout(session_id: str | None = None, **_):
     )
     return dmc.Container(
         [
-            page_header(
-                f"Calibrate · {row['name']}",
-                "Line up the court model with the painted lines.",
-                right=back,
-            ),
+            header,
+            dmc.Text("Line up the court model with the painted lines.", c="dimmed", mb="md"),
             dcc.Store(id="cal-state", data=st),
             dcc.Store(id="cal-sid", data=session_id),
             dmc.Grid(

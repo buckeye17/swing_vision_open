@@ -12,7 +12,7 @@ from swingvision.analysis.shots import SPEED_SCALE_ERROR, speed_error_kmh
 from swingvision.app import units
 from swingvision.app.components.court_diagram import VIEW_Y, court_figure
 from swingvision.app.components.swings_view import STROKE_COLORS
-from swingvision.app.components.ui import fmt_duration
+from swingvision.app.components.ui import fmt_duration, stat_grid, stat_tile
 from swingvision.court import model as court_model
 
 UNKNOWN_COLOR = "#868e96"
@@ -86,45 +86,32 @@ def empty_figure(text: str, height: int = 260) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 
-def _stat(label: str, value: str, sub: str = ""):
-    return dmc.Paper(
-        dmc.Stack(
-            [
-                dmc.Text(label, size="xs", c="dimmed"),
-                dmc.Text(value, fw=700, size="xl"),
-                dmc.Text(sub, size="xs", c="dimmed"),
-            ],
-            gap=0,
-        ),
-        p="xs",
-        withBorder=True,
-    )
-
-
 def kpis(records: list[dict], movement: dict):
     u = units.current()
     s = st.summarize_shots(records)
     items = [
-        _stat("Shots", str(s["n"]), f"{s['n_seen']} with the contact seen"),
-        _stat("In", pct(s["in_pct"]), f"{s['n_in']} of {s['n_called']} called"),
-        _stat("Net", pct(s["net_pct"]), f"{s['n_net']} shots"),
-        _stat(
+        stat_tile("Shots", str(s["n"]), f"{s['n_seen']} with the contact seen"),
+        stat_tile("In", pct(s["in_pct"]), f"{s['n_in']} of {s['n_called']} called"),
+        stat_tile("Net", pct(s["net_pct"]), f"{s['n_net']} shots"),
+        stat_tile(
             "Speed",
             u.speed_str(s["speed_median"]),
             f"median of {s['n_speed']}, ± {SPEED_SCALE_ERROR:.0%} uncalibrated",
         ),
-        _stat("Fastest", u.speed_str(s["speed_max"]), "off the racket"),
+        stat_tile("Fastest", u.speed_str(s["speed_max"]), "off the racket"),
     ]
     if movement:
         items += [
-            _stat(
+            stat_tile(
                 "Distance",
                 f"{u.len(movement['distance_m']):,.0f} {u.len_unit}",
                 f"tracked {fmt_duration(movement['tracked_s'])}",
             ),
-            _stat("Top speed", u.speed_str_mps(movement["max_speed_mps"]), "running, best 0.5 s"),
+            stat_tile(
+                "Top speed", u.speed_str_mps(movement["max_speed_mps"]), "running, best 0.5 s"
+            ),
         ]
-    return dmc.SimpleGrid(items, cols={"base": 2, "sm": 4, "lg": len(items)}, spacing="xs")
+    return stat_grid(items)
 
 
 # ---------------------------------------------------------------------------

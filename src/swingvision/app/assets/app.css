@@ -1,3 +1,212 @@
+/*
+ * Look: graphite surfaces, optic yellow (the Mantine primary, "ball") only for what you act
+ * on, condensed numerals for measurements. Data colours (hits, bounces, the player) never
+ * double as UI colours. Theme colours and fonts are in main.py (THEME).
+ */
+:root {
+    --sv-surface: var(--mantine-color-white);
+    --sv-rail: var(--mantine-color-gray-0);
+    --sv-raised: var(--mantine-color-gray-1);
+    --sv-line: var(--mantine-color-gray-3);
+    --sv-num-font: "Barlow Condensed", Barlow, system-ui, sans-serif;
+    --sv-ok: #2f9e44;
+    --sv-busy: #e8a400;
+    --sv-action: #9c4dde;
+    --sv-bad: #e03131;
+}
+[data-mantine-color-scheme="light"] {
+    --mantine-color-body: #f5f6f4;
+}
+[data-mantine-color-scheme="dark"] {
+    --mantine-color-body: #0e1110;
+    --sv-surface: #151a18;
+    --sv-rail: #121614;
+    --sv-raised: #1f2624;
+    --sv-line: #222927;
+    --sv-ok: #5bd38c;
+    --sv-busy: #f2c94c;
+    --sv-action: #c08cff;
+    --sv-bad: #f0716a;
+}
+
+/* Cards sit one step above the page; hairline borders, no shadows. */
+.mantine-Paper-root {
+    --paper-border-color: var(--sv-line);
+    background-color: var(--sv-surface);
+}
+.mantine-AppShell-navbar,
+.mantine-AppShell-header {
+    background: var(--sv-rail);
+    border-color: var(--sv-line);
+}
+.mantine-Title-root {
+    letter-spacing: 0.01em;
+}
+
+/* Left rail */
+.sv-logo {
+    font-family: var(--sv-num-font);
+    font-weight: 700;
+    font-size: 21px;
+    color: var(--mantine-color-text);
+    white-space: nowrap;
+}
+.sv-dim {
+    color: var(--mantine-color-dimmed);
+    font-weight: 500;
+}
+.sv-navlink {
+    height: 40px;
+    border-radius: var(--mantine-radius-md);
+    color: var(--mantine-color-dimmed);
+}
+.sv-navlink .mantine-NavLink-label {
+    font-size: var(--mantine-font-size-sm);
+}
+.sv-navlink[data-active],
+.sv-navlink[data-active]:hover {
+    background: var(--sv-raised);
+    color: var(--mantine-color-text);
+    font-weight: 600;
+}
+.sv-worker {
+    border: 1px solid var(--sv-line);
+    border-radius: 10px;
+    padding: 10px 12px;
+}
+.sv-worker-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: var(--mantine-font-size-sm);
+}
+.sv-worker-detail {
+    color: var(--mantine-color-dimmed);
+    font-size: var(--mantine-font-size-xs);
+}
+.sv-worker-detail:empty {
+    display: none;
+}
+.sv-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--mantine-color-dimmed);
+}
+[data-status="idle"] > .sv-dot { background: var(--sv-ok); }
+[data-status="busy"] > .sv-dot { background: var(--sv-busy); }
+[data-status="stopped"] > .sv-dot { background: var(--sv-bad); }
+
+/* Page and session headers */
+.sv-crumb {
+    font-size: var(--mantine-font-size-sm);
+    color: var(--mantine-color-dimmed);
+}
+.sv-crumb a {
+    color: inherit;
+}
+.sv-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    font-size: var(--mantine-font-size-sm);
+    color: var(--mantine-color-dimmed);
+}
+.sv-meta > :first-child {
+    color: var(--mantine-color-text);
+}
+.sv-tabs {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    box-shadow: inset 0 -1px 0 var(--sv-line);
+    margin-bottom: var(--mantine-spacing-lg);
+}
+.sv-tab {
+    padding: 10px 14px 12px;
+    color: var(--mantine-color-dimmed);
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    text-decoration: none;
+    font-size: var(--mantine-font-size-sm);
+}
+.sv-tab:hover {
+    color: var(--mantine-color-text);
+    text-decoration: none;
+}
+.sv-tab[data-active] {
+    color: var(--mantine-color-text);
+    font-weight: 600;
+    border-bottom-color: var(--mantine-primary-color-filled);
+}
+
+/* Numbers: one tile shape everywhere (ui.stat_tile). */
+.sv-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    border: 1px solid var(--sv-line);
+    border-radius: var(--mantine-radius-lg);
+    background: var(--sv-surface);
+    overflow: hidden;
+}
+.sv-stats > .sv-stat {
+    padding: 12px 16px;
+    border-right: 1px solid var(--sv-line);
+    border-bottom: 1px solid var(--sv-line);
+    margin: 0 -1px -1px 0;
+}
+.sv-stats-plain {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+    gap: 12px;
+}
+.sv-stat-label {
+    font-size: var(--mantine-font-size-xs);
+    font-weight: 500;
+    color: var(--mantine-color-dimmed);
+}
+.sv-stat-value {
+    font-family: var(--sv-num-font);
+    font-weight: 600;
+    font-size: 30px;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.sv-stats-plain .sv-stat-value {
+    font-size: 24px;
+}
+.sv-stat-unit {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--mantine-color-dimmed);
+    margin-left: 3px;
+}
+.sv-stat-sub {
+    font-size: var(--mantine-font-size-xs);
+    color: var(--mantine-color-dimmed);
+}
+.sv-stat-sub:empty {
+    display: none;
+}
+
+/* Keyboard hints */
+.sv-keys {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    font-size: var(--mantine-font-size-xs);
+    color: var(--mantine-color-dimmed);
+}
+.sv-keys .mantine-Kbd-root {
+    font-size: 10px;
+    padding: 0 5px;
+}
+
 /* File browser rows */
 .sv-fb-row {
     padding: 6px 10px;
@@ -16,26 +225,31 @@
     position: absolute;
     width: 2px;
     margin-left: -1px;
-    background: #e8590c;
+    background: var(--mantine-primary-color-filled);
     pointer-events: none;
 }
 
-/* Tables rendered by assets/sv_table.js (styled like a compact dmc.Table) */
+/* Tables rendered by assets/sv_table.js */
 .sv-table {
     width: 100%;
     border-collapse: collapse;
     font-size: var(--mantine-font-size-xs);
     line-height: var(--mantine-line-height);
+    font-variant-numeric: tabular-nums;
 }
 .sv-table th {
     text-align: left;
-    font-weight: 700;
-    padding: 2px 10px;
-    border-bottom: 1px solid var(--mantine-color-default-border);
+    font-weight: 500;
+    color: var(--mantine-color-dimmed);
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--sv-line);
+    position: sticky;
+    top: 0;
+    background: var(--sv-surface);
 }
 .sv-table td {
-    padding: 2px 10px;
-    border-bottom: 1px solid var(--mantine-color-default-border);
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--sv-line);
 }
 .sv-table tr.sv-clickable {
     cursor: pointer;
@@ -45,11 +259,10 @@
 }
 .sv-badge {
     display: inline-block;
-    padding: 0 6px;
-    border-radius: 999px;
-    font-size: 9px;
-    font-weight: 700;
-    line-height: 16px;
-    text-transform: uppercase;
+    padding: 0 7px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 18px;
     white-space: nowrap;
 }

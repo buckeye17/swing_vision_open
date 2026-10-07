@@ -16,7 +16,15 @@ from dash import ALL, Input, Output, State, callback, clientside_callback, ctx, 
 from swingvision import services
 from swingvision.app import state
 from swingvision.app.components import swings_view as sv
-from swingvision.app.components.ui import icon, no_output_root_alert, notification, page_header
+from swingvision.app.components.ui import (
+    export_menu,
+    icon,
+    key_hints,
+    no_output_root_alert,
+    notification,
+    page_header,
+    session_header,
+)
 from swingvision.pose.strokes import STROKES
 from swingvision.storage.edits import EditConflict
 
@@ -88,32 +96,7 @@ def layout(session_id: str | None = None, **_):
     _lib, _row, session = found
     config = session.load_config()
     data = sv.load(session)
-    links = [
-        dmc.Anchor(
-            dmc.Button(
-                "Session", variant="default", size="sm", leftSection=icon("tabler:movie", 16)
-            ),
-            href=f"/session/{config.id}",
-        )
-    ]
-    if config.practice is not None:
-        links.append(
-            dmc.Anchor(
-                dmc.Button(
-                    "Practice", variant="default", size="sm", leftSection=icon("tabler:target", 16)
-                ),
-                href=f"/practice/{config.id}",
-            )
-        )
-    links.append(
-        dmc.Anchor(
-            dmc.Button(
-                "Stats", variant="default", size="sm", leftSection=icon("tabler:chart-bar", 16)
-            ),
-            href=f"/stats/{config.id}",
-        )
-    )
-    header = page_header(config.name, "Swings", right=dmc.Group(links, gap="sm"))
+    header = session_header(session, config, "swings", _row["status"], export_menu(session, config))
     if data is None:
         return dmc.Container([header, _missing(config.id)], size="xl", px=0)
     strokes = sv.strokes_only(data.rows)
@@ -176,7 +159,7 @@ def layout(session_id: str | None = None, **_):
                         variant="light",
                         leftSection=icon("tabler:player-play", 14),
                     ),
-                    dmc.Text("Space play/pause · ←/→ one frame", size="xs", c="dimmed"),
+                    key_hints([(["Space"], "play"), (["←", "→"], "frame")]),
                 ],
                 gap="sm",
             ),

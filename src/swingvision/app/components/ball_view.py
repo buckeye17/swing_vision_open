@@ -6,6 +6,7 @@ import dash_mantine_components as dmc
 import numpy as np
 import pyarrow as pa
 
+from swingvision.app.components.ui import stat_grid, stat_tile
 from swingvision.storage import tables
 
 #: Ball positions sent to the browser per second (the video publishes its time at ~10 Hz;
@@ -65,17 +66,18 @@ def ball_card(
         tracked_s = len(src) / max(fps, 1.0)
         kinds = events.column("kind").to_pylist() if events is not None else []
         body = [
-            dmc.SimpleGrid(
+            stat_grid(
                 [
-                    _stat(
-                        "Ball seen", f"{tracked_s:.0f} s", f"{tracked_s / max(duration_s, 1):.0%}"
+                    stat_tile(
+                        "Ball seen",
+                        f"{tracked_s / max(duration_s, 1):.0%}",
+                        f"{tracked_s:.0f} s of video",
                     ),
-                    _stat("Hits", str(kinds.count("hit")), None),
-                    _stat("Bounces", str(kinds.count("bounce")), None),
-                    _stat("Net", str(kinds.count("net")), None),
+                    stat_tile("Hits", f"{kinds.count('hit'):,}"),
+                    stat_tile("Bounces", f"{kinds.count('bounce'):,}"),
+                    stat_tile("Net", f"{kinds.count('net'):,}"),
                 ],
-                cols=4,
-                spacing="xs",
+                plain=True,
             ),
             dmc.Text(
                 "Hits and bounces are on the timeline; bounces of the last 3 s show on the court.",
@@ -84,14 +86,3 @@ def ball_card(
             ),
         ]
     return dmc.Paper([dmc.Title("Ball", order=5, mb="xs"), *body], p="md", withBorder=True)
-
-
-def _stat(label: str, value: str, sub: str | None):
-    return dmc.Stack(
-        [
-            dmc.Text(label, size="xs", c="dimmed"),
-            dmc.Text(value, fw=700),
-            dmc.Text(sub or "", size="xs", c="dimmed"),
-        ],
-        gap=0,
-    )

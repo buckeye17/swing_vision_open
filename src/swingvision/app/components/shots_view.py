@@ -17,6 +17,7 @@ from dash import dcc, html
 
 from swingvision.analysis.shots import SPEED_SCALE_ERROR, speed_error_kmh, speed_error_text
 from swingvision.app import units
+from swingvision.app.components.ui import icon, stat_grid, stat_tile
 from swingvision.court import calibration as calib
 from swingvision.court import model as court_model
 from swingvision.pose.strokes import STROKE_LABELS
@@ -145,10 +146,12 @@ def _speed_pm(r: dict, u: units.Units | None = None) -> str:
 def uncalibrated_badge():
     return dmc.Tooltip(
         dmc.Badge(
-            "Uncalibrated speeds",
+            f"Uncalibrated · ±{SPEED_SCALE_ERROR:.0%}",
             color="yellow",
             variant="light",
-            size="sm",
+            size="md",
+            tt="none",
+            leftSection=icon("tabler:info-circle", 13),
             style={"cursor": "help"},
         ),
         label=speed_error_text(),
@@ -178,17 +181,6 @@ def shot_summary(shots: pa.Table | None) -> dict:
         "n_speed": len(speeds),
         "hidden": (shots.num_rows if shots is not None else 0) - len(rows),
     }
-
-
-def _stat(label: str, value: str, sub: str | None = None):
-    return dmc.Stack(
-        [
-            dmc.Text(label, size="xs", c="dimmed"),
-            dmc.Text(value, fw=700),
-            dmc.Text(sub or "", size="xs", c="dimmed"),
-        ],
-        gap=0,
-    )
 
 
 def _fmt_t(t: float) -> str:
@@ -249,23 +241,18 @@ def shots_card(shots: pa.Table | None):
     s = shot_summary(shots)
     in_pct = f"{s['in'] / s['called']:.0%}" if s["called"] else "–"
     body = [
-        dmc.SimpleGrid(
+        stat_grid(
             [
-                _stat("Over the net", str(s["n"]), f"{s['called']} with a landing"),
-                _stat("In", in_pct, f"{s['in']} of {s['called']}"),
-                _stat(
+                stat_tile("Over the net", str(s["n"]), f"{s['called']} with a landing"),
+                stat_tile("In", in_pct, f"{s['in']} of {s['called']}"),
+                stat_tile(
                     "Median speed",
                     u.speed_str(s["median"]),
                     f"off the racket, ± {SPEED_SCALE_ERROR:.0%}",
                 ),
-                _stat(
-                    "Fastest",
-                    u.speed_str(s["max"]),
-                    "uncalibrated",
-                ),
+                stat_tile("Fastest", u.speed_str(s["max"]), "off the racket"),
             ],
-            cols=4,
-            spacing="xs",
+            plain=True,
         ),
         dmc.Divider(my=6),
         html.Div(
@@ -286,14 +273,6 @@ def shots_card(shots: pa.Table | None):
             "Click a row to play the shot.",
             size="xs",
             c="dimmed",
-        ),
-        dmc.Alert(
-            speed_error_text(),
-            title="Speeds are uncalibrated",
-            color="yellow",
-            variant="light",
-            p="xs",
-            styles={"message": {"fontSize": "var(--mantine-font-size-xs)"}},
         ),
     ]
     return dmc.Paper(

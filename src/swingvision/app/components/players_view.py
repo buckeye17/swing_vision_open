@@ -9,7 +9,7 @@ from dash import dcc
 
 from swingvision.app import units
 from swingvision.app.components.court_diagram import heatmap_figure
-from swingvision.app.components.ui import fmt_duration, icon
+from swingvision.app.components.ui import fmt_duration, icon, stat_grid, stat_tile
 from swingvision.players import movement as mv
 from swingvision.storage import tables
 from swingvision.storage.schemas import (
@@ -89,17 +89,6 @@ def speed_series(movement: pa.Table, bin_s: float = 0.5) -> tuple[np.ndarray, np
     return tb, peak
 
 
-def _stat(label: str, value: str, hint: str | None = None):
-    return dmc.Stack(
-        [
-            dmc.Text(label, size="xs", c="dimmed", tt="uppercase", fw=600),
-            dmc.Text(value, size="xl", fw=700),
-            dmc.Text(hint, size="xs", c="dimmed") if hint else None,
-        ],
-        gap=0,
-    )
-
-
 def movement_card(
     movement: pa.Table, frames: pa.Table, dark_luma: float, view_min: float, fold: bool = False
 ):
@@ -116,15 +105,16 @@ def movement_card(
     s = mv.summarize(movement, frames, dark_luma, mv.MovementParams(), view_min)
     xc, yc, H = mv.heatmap(movement, fold=fold)
     dark = s["dark_frames"] / max(1, s["processed_frames"])
-    stats = dmc.SimpleGrid(
+    stats = stat_grid(
         [
-            _stat("Distance", u.len_str(s["distance_m"], 0)),
-            _stat("Tracked", fmt_duration(s["tracked_s"]), f"{s['coverage']:.0%} of usable video"),
-            _stat("Top speed", u.speed_str_mps(s["max_speed_mps"]), "best 0.5 s"),
-            _stat("Avg moving", u.speed_str_mps(s["mean_moving_speed_mps"])),
+            stat_tile("Distance", u.len_str(s["distance_m"], 0)),
+            stat_tile(
+                "Tracked", fmt_duration(s["tracked_s"]), f"{s['coverage']:.0%} of usable video"
+            ),
+            stat_tile("Top speed", u.speed_str_mps(s["max_speed_mps"]), "best 0.5 s"),
+            stat_tile("Avg moving", u.speed_str_mps(s["mean_moving_speed_mps"])),
         ],
-        cols={"base": 2, "sm": 4},
-        spacing="sm",
+        plain=True,
     )
     notes = []
     if dark > 0.02:

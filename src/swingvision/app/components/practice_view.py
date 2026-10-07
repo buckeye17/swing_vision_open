@@ -22,6 +22,7 @@ from swingvision.app.components.target_editor import (
     target_labels,
     target_shape,
 )
+from swingvision.app.components.ui import stat_grid, stat_tile
 from swingvision.court import calibration as calib
 from swingvision.court.camera import Camera
 from swingvision.storage import edits as ed
@@ -121,7 +122,7 @@ def result_color(r: dict) -> str:
 def result_label(r: dict, u: units.Units | None = None) -> str:
     o = OUTCOME_LABELS.get(r["outcome"], r["outcome"])
     if r["outcome"] in ("out_long", "out_wide") and r["margin_m"] is not None:
-        o += f" {(u or units.current()).small_str(abs(r['margin_m']))}"
+        o += f" {(u or units.current()).len_str(abs(r['margin_m']), 1)}"
     if r["in_target"] is True:
         return o + " · target"
     return o
@@ -338,49 +339,34 @@ def rolling_figure(rows: list[dict], has_targets: bool) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 
-def _stat(label: str, value: str, sub: str = ""):
-    return dmc.Paper(
-        dmc.Stack(
-            [
-                dmc.Text(label, size="xs", c="dimmed"),
-                dmc.Text(value, fw=700, size="xl"),
-                dmc.Text(sub, size="xs", c="dimmed"),
-            ],
-            gap=0,
-        ),
-        p="xs",
-        withBorder=True,
-    )
-
-
 def kpis(rows: list[dict], has_targets: bool):
     u = units.current()
     s = pr.summarize(rows)
     items = [
-        _stat("Shots", str(s["n"]), f"{s['n_landed']} landings seen"),
-        _stat("In", pct(s["in_pct"]), f"{s['n_in']} of {s['n_called']} called"),
-        _stat("Net", pct(s["net_pct"]), f"{s['n_net']} shots"),
+        stat_tile("Shots", str(s["n"]), f"{s['n_landed']} landings seen"),
+        stat_tile("In", pct(s["in_pct"]), f"{s['n_in']} of {s['n_called']} called"),
+        stat_tile("Net", pct(s["net_pct"]), f"{s['n_net']} shots"),
     ]
     if has_targets:
         items += [
-            _stat(
+            stat_tile(
                 "Target hits",
                 pct(s["target_pct"]),
                 f"{s['n_target_hits']} of {s['n_targeted']} aimed",
             ),
-            _stat(
+            stat_tile(
                 "To target",
                 u.len_str(s["dist_median"], 1),
                 "median distance to its center",
             ),
         ]
     items += [
-        _stat(
+        stat_tile(
             "Depth spread",
             "–" if s["depth_sd"] is None else f"± {u.len_str(s['depth_sd'], 1)}",
             "SD of landing depth",
         ),
-        _stat(
+        stat_tile(
             "Speed",
             u.speed_str(s["speed_median"]),
             f"median of {s['n_speed']}, ± {SPEED_SCALE_ERROR:.0%} uncalibrated",
@@ -388,7 +374,7 @@ def kpis(rows: list[dict], has_targets: bool):
     ]
     if s["feed_speed_mean"] is not None:
         items.append(
-            _stat(
+            stat_tile(
                 "Machine feeds",
                 u.speed_str(s["feed_speed_mean"]),
                 "spread "
@@ -400,7 +386,7 @@ def kpis(rows: list[dict], has_targets: bool):
                 ),
             )
         )
-    return dmc.SimpleGrid(items, cols={"base": 2, "sm": 4, "lg": len(items)}, spacing="xs")
+    return stat_grid(items)
 
 
 def blocks_table(data: PracticeData, has_targets: bool):

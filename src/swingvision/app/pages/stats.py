@@ -8,15 +8,19 @@ import dash
 import dash_mantine_components as dmc
 from dash import Input, Output, State, callback, dcc, html, no_update
 
-from swingvision.analysis import export as ex
 from swingvision.analysis import stats as st
 from swingvision.app import state, units
 from swingvision.app.components import stats_view as sv
 from swingvision.app.components.court_diagram import heatmap_figure
 from swingvision.app.components.shots_view import uncalibrated_badge
-from swingvision.app.components.ui import fmt_duration, icon, no_output_root_alert, page_header
+from swingvision.app.components.ui import (
+    export_menu,
+    fmt_duration,
+    no_output_root_alert,
+    page_header,
+    session_header,
+)
 from swingvision.players import movement as mv
-from swingvision.storage.schemas import PRACTICE_SUBMODE_LABELS
 
 
 def _card(title: str, *children, right=None, hint: str | None = None):
@@ -28,38 +32,6 @@ def _card(title: str, *children, right=None, hint: str | None = None):
         ],
         p="sm",
         withBorder=True,
-    )
-
-
-def _export_menu(session_id: str, available: dict[str, bool]):
-    items = []
-    for what, label in ex.EXPORTS.items():
-        for fmt in ex.FORMATS:
-            items.append(
-                dmc.MenuItem(
-                    f"{label} ({fmt.upper() if fmt == 'csv' else 'Parquet'})",
-                    href=f"/export/{session_id}/{what}.{fmt}",
-                    refresh=True,
-                    disabled=not available[what],
-                    leftSection=icon(
-                        "tabler:file-spreadsheet" if fmt == "csv" else "tabler:database", 14
-                    ),
-                )
-            )
-    return dmc.Menu(
-        [
-            dmc.MenuTarget(
-                dmc.Button("Export", size="sm", leftSection=icon("tabler:download", 16))
-            ),
-            dmc.MenuDropdown(items),
-        ],
-        position="bottom-end",
-    )
-
-
-def _nav_button(label: str, href: str, ic: str):
-    return dmc.Anchor(
-        dmc.Button(label, variant="default", size="sm", leftSection=icon(ic, 16)), href=href
     )
 
 
@@ -76,29 +48,6 @@ def layout(session_id: str | None = None, **_):
     _lib, _row, session = found
     config = session.load_config()
     data = st.load(session)
-    subtitle = "Stats"
-    if config.practice is not None:
-        subtitle += f" · Practice · {PRACTICE_SUBMODE_LABELS[config.practice.submode]}"
-    if config.video:
-        subtitle += f" · {fmt_duration(config.video.duration_s)}"
-    available = {
-        "shots": session.shots_path.exists(),
-        "practice": session.practice_path.exists(),
-        "swings": session.swings_path.exists(),
-    }
-    header_right = dmc.Group(
-        [
-            _nav_button("Session", f"/session/{config.id}", "tabler:movie"),
-            _nav_button("Practice", f"/practice/{config.id}", "tabler:target-arrow")
-            if config.practice is not None
-            else None,
-            _nav_button("Swings", f"/swings/{config.id}", "tabler:ball-tennis")
-            if available["swings"]
-            else None,
-            _export_menu(config.id, available),
-        ],
-        gap="sm",
-    )
     groups = [
         {"value": g, "label": sv.group_label(g)}
         for g in (*st.GROUPS, "unknown")
@@ -231,7 +180,7 @@ def layout(session_id: str | None = None, **_):
     )
     return dmc.Container(
         [
-            page_header(config.name, subtitle, right=header_right),
+            session_header(session, config, "stats", _row["status"], export_menu(session, config)),
             dcc.Store(id="st-session-id", data=config.id),
             dmc.Stack(
                 [

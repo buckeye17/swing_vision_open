@@ -21,11 +21,12 @@ from swingvision.app.components.target_editor import (
     targets_from_store,
 )
 from swingvision.app.components.ui import (
-    fmt_duration,
     icon,
+    key_hints,
     no_output_root_alert,
     notification,
     page_header,
+    session_header,
 )
 from swingvision.storage.edits import EditConflict
 from swingvision.storage.schemas import PRACTICE_SUBMODE_LABELS
@@ -73,40 +74,8 @@ def layout(session_id: str | None = None, **_):
     data = pv.load(session)
     video = config.video
     fps = video.fps_avg if video else 60.0
-    subtitle = f"Practice · {PRACTICE_SUBMODE_LABELS[config.practice.submode]}"
-    if video:
-        subtitle += f" · {fmt_duration(video.duration_s)}"
     header_right = dmc.Group(
         [
-            dmc.Anchor(
-                dmc.Button(
-                    "Session",
-                    variant="default",
-                    size="sm",
-                    leftSection=icon("tabler:movie", 16),
-                ),
-                href=f"/session/{config.id}",
-            ),
-            dmc.Anchor(
-                dmc.Button(
-                    "Swings",
-                    variant="default",
-                    size="sm",
-                    leftSection=icon("tabler:ball-tennis", 16),
-                ),
-                href=f"/swings/{config.id}",
-            )
-            if session.swings_path.exists()
-            else None,
-            dmc.Anchor(
-                dmc.Button(
-                    "Stats",
-                    variant="default",
-                    size="sm",
-                    leftSection=icon("tabler:chart-bar", 16),
-                ),
-                href=f"/stats/{config.id}",
-            ),
             dmc.Select(
                 id="pr-submode",
                 value=config.practice.submode,
@@ -215,11 +184,22 @@ def layout(session_id: str | None = None, **_):
                     dmc.Stack(
                         [
                             player,
-                            dmc.Text(
-                                "Space play/pause · N/P next/previous shot · J/L ±5 s · "
-                                "targets drawn in yellow follow your end",
-                                size="xs",
-                                c="dimmed",
+                            dmc.Group(
+                                [
+                                    key_hints(
+                                        [
+                                            (["Space"], "play"),
+                                            (["N", "P"], "shot"),
+                                            (["J", "L"], "±5 s"),
+                                        ]
+                                    ),
+                                    dmc.Text(
+                                        "Targets drawn in yellow follow your end",
+                                        size="xs",
+                                        c="dimmed",
+                                    ),
+                                ],
+                                justify="space-between",
                             ),
                             html.Div(id="pr-kpis"),
                             dmc.Paper(
@@ -291,7 +271,7 @@ def layout(session_id: str | None = None, **_):
     )
     return dmc.Container(
         [
-            page_header(config.name, subtitle, right=header_right),
+            session_header(session, config, "practice", _row["status"], header_right),
             dcc.Store(id="pr-session-id", data=config.id),
             dcc.Store(id="pr-version", data=0),
             dcc.Store(id="pr-edits-version", data=data.edits_version if data else 0),

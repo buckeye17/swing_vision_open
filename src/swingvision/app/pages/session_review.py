@@ -67,11 +67,14 @@ from swingvision.app.components.shots_view import (
     side_view_figure,
 )
 from swingvision.app.components.ui import (
+    export_menu,
     fmt_duration,
     icon,
+    key_hints,
     no_output_root_alert,
     notification,
     page_header,
+    session_header,
     status_badge,
 )
 from swingvision.app.worker_control import ensure_worker
@@ -83,7 +86,6 @@ from swingvision.players.movement import heatmap
 from swingvision.storage import tables
 from swingvision.storage.schemas import (
     AUDIO_ONSETS,
-    PRACTICE_SUBMODE_LABELS,
     Calibration,
     SessionConfig,
 )
@@ -366,6 +368,18 @@ def _calibration_card(session_id: str, cal: Calibration | None, label: str):
     return dmc.Paper(dmc.Stack(rows, gap=6), p="md", withBorder=True)
 
 
+def _layer_chip(chip_id: str, label: str, checked: bool, available: bool):
+    """A video overlay on/off (``assets/review_frame.js`` reads the input's ``checked``)."""
+    return dmc.Chip(
+        label,
+        id=chip_id,
+        checked=checked,
+        disabled=not available,
+        size="sm",
+        variant="outline",
+    )
+
+
 def _xy_str(x: float, y: float) -> str:
     """Court coordinates (metres) as ``(x, y) m`` in display units."""
     u = units.current()
@@ -436,15 +450,6 @@ def layout(session_id: str | None = None, **_):
     config = session.load_config()
     video = config.video
     fps = video.fps_avg if video else 60.0
-    subtitle = config.mode.capitalize()
-    if config.practice:
-        subtitle += f" · {PRACTICE_SUBMODE_LABELS[config.practice.submode]}"
-    if video:
-        subtitle += (
-            f" · {fmt_duration(video.duration_s)} · {video.display_width}×"
-            f"{video.display_height} @ {video.fps_avg:.2f} fps"
-        )
-
     if session.audio_onsets_path.exists():
         onsets = tables.read_table(session.audio_onsets_path)
     else:
@@ -541,52 +546,7 @@ def layout(session_id: str | None = None, **_):
         style={"position": "relative"},
     )
 
-    practice_button = (
-        dmc.Anchor(
-            dmc.Button(
-                "Practice", variant="light", size="sm", leftSection=icon("tabler:target-arrow", 16)
-            ),
-            href=f"/practice/{config.id}",
-        )
-        if config.practice
-        else None
-    )
-    swings_button = (
-        dmc.Anchor(
-            dmc.Button(
-                "Swings", variant="light", size="sm", leftSection=icon("tabler:ball-tennis", 16)
-            ),
-            href=f"/swings/{config.id}",
-        )
-        if session.swings_path.exists()
-        else None
-    )
-    stats_button = (
-        dmc.Anchor(
-            dmc.Button(
-                "Stats", variant="light", size="sm", leftSection=icon("tabler:chart-bar", 16)
-            ),
-            href=f"/stats/{config.id}",
-        )
-        if session.shots_path.exists() or session.movement_path.exists()
-        else None
-    )
     has_pose = session.pose2d_path.exists() and video is not None and has_proxy
-    header_right = dmc.Group(
-        [
-            practice_button,
-            swings_button,
-            stats_button,
-            dmc.Anchor(
-                dmc.Button(
-                    "Calibrate", variant="default", size="sm", leftSection=icon("tabler:target", 16)
-                ),
-                href=f"/calibrate/{config.id}",
-            ),
-            status_badge(row["status"], "lg"),
-        ],
-        gap="sm",
-    )
     missing = (
         dmc.Alert(
             [
@@ -607,7 +567,9 @@ def layout(session_id: str | None = None, **_):
     )
     return dmc.Container(
         [
-            page_header(config.name, subtitle, right=header_right),
+            session_header(
+                session, config, "overview", row["status"], export_menu(session, config)
+            ),
             missing,
             dcc.Store(id="review-overlays", data=overlays),
             dcc.Store(id="review-seek"),
@@ -631,84 +593,113 @@ def layout(session_id: str | None = None, **_):
                                 player,
                                 dmc.Group(
                                     [
+                                        dmc.Text(id="review-readout", ff="monospace", size="sm"),
                                         dmc.Group(
                                             [
-                                                dmc.Text(
-                                                    id="review-readout", ff="monospace", size="sm"
+                                                _layer_chip(
+                                                    "review-overlay-on",
+                                                    "Court",
+                                                    overlays is not None,
+                                                    overlays is not None,
                                                 ),
-                                                dmc.Switch(
-                                                    id="review-overlay-on",
-                                                    label="Court overlay",
-                                                    size="xs",
-                                                    checked=overlays is not None,
-                                                    disabled=overlays is None,
+                                                _layer_chip(
+                                                    "review-box-on",
+                                                    "Player box",
+                                                    track is not None,
+                                                    track is not None,
                                                 ),
-                                                dmc.Switch(
-                                                    id="review-box-on",
-                                                    label="Player box",
-                                                    size="xs",
-                                                    checked=track is not None,
-                                                    disabled=track is None,
+                                                _layer_chip(
+                                                    "review-ball-on",
+                                                    "Ball",
+                                                    ball is not None,
+                                                    ball is not None,
                                                 ),
-                                                dmc.Switch(
-                                                    id="review-ball-on",
-                                                    label="Ball",
-                                                    size="xs",
-                                                    checked=ball is not None,
-                                                    disabled=ball is None,
+                                                _layer_chip(
+                                                    "review-skel-on", "Skeleton", False, has_pose
                                                 ),
-                                                dmc.Switch(
-                                                    id="review-skel-on",
-                                                    label="Skeleton",
-                                                    size="xs",
-                                                    checked=False,
-                                                    disabled=not has_pose,
-                                                ),
-                                                dmc.Switch(
-                                                    id="review-shot-on",
-                                                    label="Shot path",
-                                                    size="xs",
-                                                    checked=shot_data is not None,
-                                                    disabled=shot_data is None,
+                                                _layer_chip(
+                                                    "review-shot-on",
+                                                    "Shot path",
+                                                    shot_data is not None,
+                                                    shot_data is not None,
                                                 ),
                                             ],
-                                            gap="md",
-                                        ),
-                                        dmc.Text(
-                                            "Space play/pause · J/L ±5 s · ←/→ frame · "
-                                            "Shift+←/→ 1 s · N/P next/previous shot",
-                                            size="xs",
-                                            c="dimmed",
+                                            gap=6,
                                         ),
                                     ],
                                     justify="space-between",
                                 ),
                                 dmc.Paper(
-                                    dcc.Graph(
-                                        id="review-timeline",
-                                        figure=timeline_figure(
-                                            config,
-                                            onsets_t,
-                                            onsets_s,
-                                            speed_t,
-                                            speed_v,
-                                            evs,
-                                            shot_data,
-                                            seg_bands,
+                                    [
+                                        dmc.Group(
+                                            [
+                                                dmc.Title("Timeline", order=5),
+                                                key_hints(
+                                                    [
+                                                        (["Space"], "play"),
+                                                        (["J", "L"], "±5 s"),
+                                                        (["←", "→"], "frame"),
+                                                        (["Shift"], "+ arrow: 1 s"),
+                                                        (["N", "P"], "shot"),
+                                                    ]
+                                                ),
+                                            ],
+                                            justify="space-between",
+                                            px="sm",
+                                            pt="xs",
                                         ),
-                                        config={"displayModeBar": False, "scrollZoom": True},
-                                    ),
+                                        dcc.Graph(
+                                            id="review-timeline",
+                                            figure=timeline_figure(
+                                                config,
+                                                onsets_t,
+                                                onsets_s,
+                                                speed_t,
+                                                speed_v,
+                                                evs,
+                                                shot_data,
+                                                seg_bands,
+                                            ),
+                                            config={"displayModeBar": False, "scrollZoom": True},
+                                        ),
+                                        dmc.Text(
+                                            f"{len(onsets_t):,} audio onsets"
+                                            + (" and player speed" if len(speed_t) else "")
+                                            + ". Click to seek; drag to zoom, double-click to "
+                                            "reset.",
+                                            size="xs",
+                                            c="dimmed",
+                                            px="sm",
+                                            pb="xs",
+                                        ),
+                                    ],
                                     withBorder=True,
                                     p=4,
                                 ),
-                                dmc.Text(
-                                    f"{len(onsets_t)} audio onsets"
-                                    + (" and player speed" if len(speed_t) else "")
-                                    + ". Click the timeline to seek; drag to zoom, "
-                                    "double-click to reset.",
-                                    size="xs",
-                                    c="dimmed",
-                                ),
+                            ],
+                            gap="sm",
+                        ),
+                        span={"base": 12, "lg": 8},
+                    ),
+                    dmc.GridCol(
+                        _minimap_card(track, machine, is_machine, landing_traces(shots)),
+                        span={"base": 12, "lg": 4},
+                    ),
+                ],
+                gutter="lg",
+            ),
+            html.Div(
+                pv.kpis(pv.filtered(practice, None, None, excluded=False), bool(practice.targets)),
+                style={"marginTop": "var(--mantine-spacing-lg)"},
+            )
+            if practice is not None
+            else None,
+            dmc.Grid(
+                [
+                    dmc.GridCol(
+                        dmc.Stack(
+                            [
+                                shots_card(shots),
                                 html.Div(
                                     movement_card(
                                         movement,
@@ -719,19 +710,17 @@ def layout(session_id: str | None = None, **_):
                                     id="review-movement",
                                 ),
                             ],
-                            gap="xs",
+                            gap="lg",
                         ),
                         span={"base": 12, "lg": 8},
                     ),
                     dmc.GridCol(
                         dmc.Stack(
                             [
-                                _minimap_card(track, machine, is_machine, landing_traces(shots)),
-                                shots_card(shots),
+                                pv.segments_card(config.id, practice) if config.practice else None,
                                 ball_card(
                                     ball_track, ball_events, video.duration_s if video else 0.0, fps
                                 ),
-                                pv.segments_card(config.id, practice) if config.practice else None,
                                 player_card(config, profiles),
                                 _calibration_card(config.id, cal, cal_label),
                                 dmc.Paper(
@@ -754,6 +743,7 @@ def layout(session_id: str | None = None, **_):
                                             config.source.path,
                                             size="xs",
                                             c="dimmed",
+                                            ff="monospace",
                                             style={"wordBreak": "break-all"},
                                         ),
                                     ],
@@ -761,12 +751,13 @@ def layout(session_id: str | None = None, **_):
                                     withBorder=True,
                                 ),
                             ],
-                            gap="sm",
+                            gap="lg",
                         ),
                         span={"base": 12, "lg": 4},
                     ),
                 ],
-                gutter="md",
+                gutter="lg",
+                mt="lg",
             ),
         ],
         size="xl",

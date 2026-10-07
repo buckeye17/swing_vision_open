@@ -35,12 +35,28 @@ def layout(relink: str | None = None, **_):
         return dmc.Container([page_header("Library"), no_output_root_alert()], size="xl", px=0)
     return dmc.Container(
         [
-            page_header(
-                "Library",
-                str(state.settings().output_root),
-                right=dmc.Anchor(
-                    dmc.Button("New session", leftSection=icon("tabler:plus")), href="/new"
-                ),
+            dmc.Group(
+                [
+                    dmc.Stack(
+                        [
+                            dmc.Title("Library", order=1),
+                            dmc.Text(
+                                str(state.settings().output_root),
+                                size="xs",
+                                c="dimmed",
+                                ff="monospace",
+                                style={"overflowWrap": "anywhere"},
+                            ),
+                        ],
+                        gap=4,
+                    ),
+                    dmc.Anchor(
+                        dmc.Button("New session", leftSection=icon("tabler:plus")), href="/new"
+                    ),
+                ],
+                justify="space-between",
+                align="flex-end",
+                mb="lg",
             ),
             dcc.Interval(id="lib-poll", interval=3000),
             dcc.Store(id="lib-delete-id"),
@@ -129,26 +145,40 @@ def _relink_modal(sid: str | None):
     )
 
 
-def _moved(root, s: dict, u: units.Units) -> str:
-    """Headline stat: distance covered (from the movement stage's manifest)."""
-    m = read_manifest(Session.open(root, s["dir_name"]), "movement")
-    dist = (m or {}).get("extra", {}).get("distance_m")
-    return f"{u.len(dist):,.0f} {u.len_unit}" if dist is not None else "–"
+def _manifest_extra(root, s: dict, stage: str) -> dict:
+    m = read_manifest(Session.open(root, s["dir_name"]), stage)
+    return (m or {}).get("extra", {})
 
 
-def _accuracy(root, s: dict):
-    """Headline stat for practice sessions: in % (and target hits), linking to the Practice
-    page (from the practice_eval stage's manifest)."""
-    m = read_manifest(Session.open(root, s["dir_name"]), "practice_eval")
-    extra = (m or {}).get("extra", {})
-    if s["mode"] != "practice" or not extra.get("n"):
-        return "–"
-    text = f"{extra['n']} shots"
-    if extra.get("in_pct") is not None:
-        text += f" · {extra['in_pct']:.0%} in"
-    if extra.get("target_pct") is not None:
-        text += f" · {extra['target_pct']:.0%} on target"
-    return dmc.Anchor(text, href=f"/practice/{s['id']}", size="sm")
+def _metric(value: str, sub: str = ""):
+    return dmc.TableTd(
+        html.Div(
+            [
+                html.Div(value, className="sv-stat-value", style={"fontSize": 22}),
+                html.Div(sub, className="sv-stat-sub"),
+            ]
+        ),
+        ta="right",
+    )
+
+
+def _metrics(root, s: dict, u: units.Units) -> list:
+    """Shots, in % and distance moved (from the stages' manifests)."""
+    moved = _manifest_extra(root, s, "movement").get("distance_m")
+    moved_cell = _metric(f"{u.len(moved):,.0f}", u.len_unit) if moved is not None else _metric("–")
+    extra = _manifest_extra(root, s, "practice_eval") if s["mode"] == "practice" else {}
+    if not extra.get("n"):
+        return [_metric("–"), _metric("–"), moved_cell]
+    in_pct = extra.get("in_pct")
+    target = extra.get("target_pct")
+    return [
+        _metric(f"{extra['n']}", "practice shots"),
+        _metric(
+            "–" if in_pct is None else f"{in_pct:.0%}",
+            "" if target is None else f"{target:.0%} on target",
+        ),
+        moved_cell,
+    ]
 
 
 def _row(root, s: dict, u: units.Units):
@@ -224,23 +254,57 @@ def _row(root, s: dict, u: units.Units):
                 w=320,
             )
         )
+    links = []
+    if s["status"] == "ready":
+        if s["mode"] == "practice":
+            links.append(("Practice", f"/practice/{sid}"))
+        links.append(("Stats", f"/stats/{sid}"))
     return dmc.TableTr(
         [
             dmc.TableTd(
-                dmc.Image(
-                    src=f"/media/{sid}/thumb.jpg",
-                    w=96,
-                    h=54,
-                    radius="sm",
-                    fallbackSrc="data:image/gif;base64,R0lGODlhAQABAAAAACw=",
+                dmc.Anchor(
+                    dmc.Image(
+                        src=f"/media/{sid}/thumb.jpg",
+                        w=128,
+                        h=72,
+                        radius="md",
+                        fallbackSrc="data:image/gif;base64,R0lGODlhAQABAAAAACw=",
+                    ),
+                    href=f"/session/{sid}",
+                    **{"aria-label": f"Open {s['name']}"},
+                ),
+                w=144,
+            ),
+            dmc.TableTd(
+                dmc.Stack(
+                    [
+                        dmc.Anchor(
+                            s["name"], href=f"/session/{sid}", fw=600, c="var(--mantine-color-text)"
+                        ),
+                        dmc.Text(
+                            f"{mode} · {fmt_duration(s['duration_s'])} · "
+                            f"created {fmt_time(s['created_at'])}",
+                            size="sm",
+                            c="dimmed",
+                        ),
+                        dmc.Group(
+                            [
+                                dmc.Anchor(
+                                    dmc.Button(label, variant="default", size="compact-xs"),
+                                    href=href,
+                                )
+                                for label, href in links
+                            ],
+                            gap=6,
+                            mt=4,
+                        )
+                        if links
+                        else None,
+                    ],
+                    gap=0,
                 )
             ),
-            dmc.TableTd(dmc.Anchor(s["name"], href=f"/session/{sid}", fw=600)),
-            dmc.TableTd(mode),
-            dmc.TableTd(fmt_duration(s["duration_s"])),
-            dmc.TableTd(_moved(root, s, u)),
-            dmc.TableTd(_accuracy(root, s)),
-            dmc.TableTd(fmt_time(s["created_at"])),
+            *_metrics(root, s, u),
             dmc.TableTd(dmc.Group(status, gap=4, wrap="nowrap"), style={"whiteSpace": "nowrap"}),
             dmc.TableTd(menu),
         ]
@@ -289,28 +353,58 @@ def _table(root, sessions: list[dict]):
     head = dmc.TableThead(
         dmc.TableTr(
             [
-                dmc.TableTh(h)
-                for h in (
-                    "",
-                    "Name",
-                    "Mode",
-                    "Length",
-                    "Moved",
-                    "Practice",
-                    "Created",
-                    "Status",
-                    "",
-                )
+                dmc.TableTh(""),
+                dmc.TableTh("Session"),
+                dmc.TableTh("Shots", ta="right"),
+                dmc.TableTh("In", ta="right"),
+                dmc.TableTh("Moved", ta="right"),
+                dmc.TableTh("Status"),
+                dmc.TableTh(""),
             ]
         )
     )
-    return dmc.Paper(
-        dmc.Table(
-            [head, dmc.TableTbody([_row(root, s, u) for s in sessions])],
-            highlightOnHover=True,
-            verticalSpacing="xs",
-        ),
-        withBorder=True,
+    waiting = [x for x in sessions if x["status"] == "needs_action"]
+    banner = (
+        dmc.Alert(
+            dmc.Group(
+                [
+                    dmc.Text(
+                        (
+                            f"“{waiting[0]['name']}” is waiting for you."
+                            if len(waiting) == 1
+                            else f"{len(waiting)} sessions are waiting for you."
+                        )
+                        + " Processing continues once you've had a look.",
+                        size="sm",
+                    ),
+                    dmc.Anchor(dmc.Button("Open Jobs", color="violet", size="xs"), href="/jobs"),
+                ],
+                justify="space-between",
+            ),
+            title="Needs action",
+            color="violet",
+            icon=icon("tabler:alert-triangle"),
+            mb="md",
+        )
+        if waiting
+        else None
+    )
+    return html.Div(
+        [
+            banner,
+            dmc.Paper(
+                dmc.TableScrollContainer(
+                    dmc.Table(
+                        [head, dmc.TableTbody([_row(root, s, u) for s in sessions])],
+                        highlightOnHover=True,
+                        verticalSpacing="sm",
+                        horizontalSpacing="md",
+                    ),
+                    minWidth=820,
+                ),
+                withBorder=True,
+            ),
+        ]
     )
 
 
