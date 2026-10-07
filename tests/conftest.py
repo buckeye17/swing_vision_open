@@ -20,10 +20,16 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+@pytest.fixture(autouse=True)
+def _default_settings(tmp_path, monkeypatch):
+    """Every test sees default settings, never the user's own (units, output folder, ...).
+    The data dir stays shared so tests can still find installed base weights."""
+    monkeypatch.setenv("SWINGVISION_CONFIG_DIR", str(tmp_path / "config"))
+
+
 @pytest.fixture
 def settings(tmp_path, monkeypatch) -> AppSettings:
     """Isolated settings file + output root."""
-    monkeypatch.setenv("SWINGVISION_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("SWINGVISION_DATA_DIR", str(tmp_path / "data"))
     s = AppSettings(output_root=tmp_path / "out")
     s.processing.chunk_seconds = 2.0
