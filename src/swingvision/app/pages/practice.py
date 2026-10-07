@@ -135,7 +135,7 @@ def layout(session_id: str | None = None, **_):
             **{
                 "data-sv-player": "1",
                 "data-fps": f"{fps}",
-                "data-time-store": "pr-time",
+                "data-frame": "practice",  # overlays: assets/practice_frame.js
             },
         )
     else:
@@ -297,7 +297,6 @@ def layout(session_id: str | None = None, **_):
             dcc.Store(id="pr-edits-version", data=data.edits_version if data else 0),
             dcc.Store(id="pr-selected"),
             dcc.Store(id="pr-placing", data=False),
-            dcc.Store(id="pr-time"),
             dcc.Store(id="pr-seek"),
             dcc.Store(id="pr-sink"),
             dcc.Store(id="pr-court-click"),
@@ -623,39 +622,17 @@ clientside_callback(
 )
 
 
+# The overlays follow playback in assets/practice_frame.js; redraw them when the shots or
+# targets change (a paused video doesn't redraw by itself).
 clientside_callback(
     """
-    function(t, shots, overlays) {
-        const hidden = {display: "none"};
-        const now = (t && t.t) || 0;
-        // i: the shot playing now; last: the latest one started (its end keeps the targets
-        // on the right half between shots).
-        let i = -1, last = -1;
-        if (shots) {
-            for (let k = shots.t0.length - 1; k >= 0; k--) {
-                if (shots.t0[k] <= now) { last = k; if (now <= shots.t1[k]) { i = k; } break; }
-            }
-        }
-        let src = "", style = hidden;
-        const ref = last >= 0 ? last : 0;
-        const side = shots && shots.side.length ? shots.side[ref] : -1;
-        if (overlays) {
-            src = side === 1 ? overlays.far : overlays.near;
-            style = {position: "absolute", inset: 0, width: "100%", height: "100%",
-                     pointerEvents: "none", display: "block"};
-        }
-        if (i < 0) { return [src, style, "", hidden]; }
-        const labelStyle = {position: "absolute", left: "1%", top: "1.5%", padding: "2px 8px",
-            borderRadius: "4px", background: "rgba(0,0,0,0.6)", color: "#fff",
-            font: "600 14px system-ui, sans-serif", pointerEvents: "none"};
-        return [src, style, "Shot " + (i + 1) + " · " + shots.label[i], labelStyle];
+    function() {
+        if (window.svFrameRefresh) { window.svFrameRefresh("pr-video"); }
+        return window.dash_clientside.no_update;
     }
     """,
-    Output("pr-overlay", "src"),
-    Output("pr-overlay", "style"),
-    Output("pr-label", "children"),
-    Output("pr-label", "style"),
-    Input("pr-time", "data"),
+    Output("pr-sink", "data", allow_duplicate=True),
     Input("pr-shots", "data"),
-    State("pr-overlays", "data"),
+    Input("pr-overlays", "data"),
+    prevent_initial_call="initial_duplicate",
 )

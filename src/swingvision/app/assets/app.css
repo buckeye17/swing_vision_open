@@ -10,3 +10,12 @@
 .sv-fb-row-selected:hover {
     background: var(--mantine-primary-color-light);
 }
+
+/* Playback cursor over the session timeline (assets/video_sync.js) */
+.sv-cursor {
+    position: absolute;
+    width: 2px;
+    margin-left: -1px;
+    background: #e8590c;
+    pointer-events: none;
+}

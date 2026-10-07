@@ -1,14 +1,17 @@
 """Session review: proxy video + timeline synced to playback, player tracking, movement.
 
-``assets/video_sync.js`` publishes the video's current time into the
-``review-time`` store (~10 Hz) and moves the timeline cursor directly with
-Plotly, so playback stays smooth without a server round trip per frame. The
-player box on the video and the court minimap follow the same store client-side,
-from the tracked positions in ``review-track``.
+``assets/video_sync.js`` draws the playback overlays on every frame through
+``assets/review_frame.js`` (time readout, court overlay, player box, ball, shot path,
+skeleton, and the court minimap), from the data in this page's stores, and moves the
+timeline cursor (a div over the plot: relayouting a long timeline takes ~1 s). None of it
+goes through Dash: on a long session every Dash update costs a few hundred ms, so a time
+store updated during playback stalled the video. Dash hears only when the current shot
+(``review-shot-id``) or skeleton block (``review-skel-key``) changes.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import dash
@@ -85,7 +88,7 @@ from swingvision.storage.schemas import (
     SessionConfig,
 )
 
-CURSOR_COLOR = "#e8590c"
+SKEL_BLOCK_S = 8.0  # the skeleton overlay's pose arrives in blocks this long
 OVERLAY_STYLE = {
     "position": "absolute",
     "inset": 0,
@@ -244,34 +247,23 @@ def timeline_figure(
         showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
+        # Practice shots as bands behind everything. The playback cursor isn't a shape:
+        # video_sync.js draws it over the plot (moving a shape redraws the whole figure).
         shapes=[
             {
-                "type": "line",
+                "type": "rect",
                 "xref": "x",
                 "yref": "paper",
-                "x0": 0,
-                "x1": 0,
+                "x0": a,
+                "x1": b,
                 "y0": 0,
                 "y1": 1,
-                "line": {"color": CURSOR_COLOR, "width": 2},
-            },
-            # Practice shots as bands behind everything (the cursor stays shapes[0]).
-            *(
-                {
-                    "type": "rect",
-                    "xref": "x",
-                    "yref": "paper",
-                    "x0": a,
-                    "x1": b,
-                    "y0": 0,
-                    "y1": 1,
-                    "fillcolor": color,
-                    "opacity": 0.13,
-                    "line": {"width": 0},
-                    "layer": "below",
-                }
-                for a, b, color in (segments or [])
-            ),
+                "fillcolor": color,
+                "opacity": 0.13,
+                "line": {"width": 0},
+                "layer": "below",
+            }
+            for a, b, color in (segments or [])
         ],
     )
     return fig
@@ -500,8 +492,16 @@ def layout(session_id: str | None = None, **_):
             **{
                 "data-sv-player": "1",
                 "data-fps": f"{fps}",
-                "data-time-store": "review-time",
                 "data-timeline": "review-timeline",
+                "data-frame": "review",
+                "data-frame-config": json.dumps(
+                    {
+                        "linger": LINGER_S,
+                        "pathColor": PATH_COLOR,
+                        "skelBlock": SKEL_BLOCK_S,
+                        "edges": json.loads(sw_view.SKELETON_EDGES_JSON),
+                    }
+                ),
             },
         )
     else:
@@ -599,8 +599,6 @@ def layout(session_id: str | None = None, **_):
             page_header(config.name, subtitle, right=header_right),
             missing,
             dcc.Store(id="review-overlays", data=overlays),
-            dcc.Store(id="review-time"),
-            dcc.Store(id="review-fps", data=fps),
             dcc.Store(id="review-seek"),
             dcc.Store(id="review-track", data=track),
             dcc.Store(id="review-ball-store", data=ball),
@@ -611,6 +609,7 @@ def layout(session_id: str | None = None, **_):
             dcc.Store(id="review-seg-starts", data=seg_starts),
             dcc.Store(id="review-seg-times", data=seg_times),
             dcc.Store(id="review-sink"),
+            dcc.Store(id="review-frame-sink"),
             dcc.Store(id="review-skel-key"),
             dcc.Store(id="review-skel"),
             dmc.Grid(
@@ -769,44 +768,6 @@ dash.register_page(
 
 clientside_callback(
     """
-    function(t, fps) {
-        if (!t) { return "00:00.000"; }
-        const s = t.t || 0;
-        const m = Math.floor(s / 60);
-        const sec = (s - m * 60).toFixed(3).padStart(6, "0");
-        const frame = Math.round(s * (fps || 60));
-        return `${String(m).padStart(2, "0")}:${sec} · frame ≈${frame}` +
-               (t.paused ? " · paused" : "");
-    }
-    """,
-    Output("review-readout", "children"),
-    Input("review-time", "data"),
-    State("review-fps", "data"),
-)
-
-clientside_callback(
-    """
-    function(t, on, overlays) {
-        const style = {position: "absolute", inset: 0, width: "100%", height: "100%",
-                       pointerEvents: "none", display: "none"};
-        if (!overlays || !on) { return [window.dash_clientside.no_update, style]; }
-        const now = (t && t.t) || 0;
-        let src = overlays.main;
-        for (const w of overlays.windows || []) {
-            if (now >= w.t0 && now < w.t1) { src = w.src; break; }
-        }
-        return [src, Object.assign({}, style, {display: "block"})];
-    }
-    """,
-    Output("review-overlay", "src"),
-    Output("review-overlay", "style"),
-    Input("review-time", "data"),
-    Input("review-overlay-on", "checked"),
-    State("review-overlays", "data"),
-)
-
-clientside_callback(
-    """
     function(click) {
         if (!click || !click.points || !click.points.length) {
             return window.dash_clientside.no_update;
@@ -818,112 +779,6 @@ clientside_callback(
     """,
     Output("review-seek", "data"),
     Input("review-timeline", "clickData"),
-)
-
-
-clientside_callback(
-    """
-    function(t, boxOn, track) {
-        const hidden = {display: "none"};
-        const host = document.getElementById("review-minimap");
-        const gd = host ? host.querySelector(".js-plotly-plot") : null;
-        if (!track || !track.t.length) { return [hidden, ""]; }
-        const now = (t && t.t) || 0;
-        const ts = track.t;
-        // Last sample at or before now.
-        let lo = 0, hi = ts.length - 1, i = -1;
-        while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            if (ts[mid] <= now + 1e-3) { i = mid; lo = mid + 1; } else { hi = mid - 1; }
-        }
-        const live = i >= 0 && now - ts[i] <= 0.15;
-        const tx = [], ty = [];
-        let px = [], py = [];
-        if (live) {
-            px = [track.x[i]]; py = [track.y[i]];
-            for (let k = i; k >= 0 && ts[k] >= now - 3 && track.run[k] === track.run[i]; k--) {
-                tx.push(track.x[k]); ty.push(track.y[k]);
-            }
-        }
-        if (gd && window.Plotly && gd.data && gd.data.length >= 2) {
-            window.Plotly.restyle(gd, {x: [tx, px], y: [ty, py]}, [0, 1]);
-        }
-        let label = "not tracked";
-        if (live) {
-            let v = 0;
-            if (i > 0 && track.run[i - 1] === track.run[i]) {
-                const dt = ts[i] - ts[i - 1];
-                v = Math.hypot(track.x[i] - track.x[i - 1], track.y[i] - track.y[i - 1]) / dt;
-            }
-            label = "x " + track.x[i].toFixed(1) + " y " + track.y[i].toFixed(1) + " m · " +
-                    (v * 3.6).toFixed(1) + " km/h" + (track.interp[i] ? " · bridged" : "");
-        }
-        if (!boxOn || !live) { return [hidden, label]; }
-        const b = track.b[i];
-        return [{
-            position: "absolute", pointerEvents: "none", boxSizing: "border-box",
-            left: b[0] + "%", top: b[1] + "%", width: (b[2] - b[0]) + "%",
-            height: (b[3] - b[1]) + "%",
-            border: "2px " + (track.interp[i] ? "dashed " : "solid ") + "#ffd43b",
-            borderRadius: "3px",
-        }, label];
-    }
-    """,
-    Output("review-box", "style"),
-    Output("review-pos", "children"),
-    Input("review-time", "data"),
-    Input("review-box-on", "checked"),
-    State("review-track", "data"),
-)
-
-
-clientside_callback(
-    """
-    function(t, on, ball, events) {
-        const hidden = {display: "none"};
-        const host = document.getElementById("review-minimap");
-        const gd = host ? host.querySelector(".js-plotly-plot") : null;
-        const now = (t && t.t) || 0;
-        if (events && gd && window.Plotly && gd.data && gd.data.length >= 3) {
-            const bx = [], by = [];
-            for (let k = 0; k < events.t.length; k++) {
-                if (events.kind[k] === "bounce" && events.cx[k] !== null &&
-                    events.t[k] <= now && events.t[k] >= now - 3) {
-                    bx.push(events.cx[k]); by.push(events.cy[k]);
-                }
-            }
-            window.Plotly.restyle(gd, {x: [bx], y: [by]}, [2]);
-        }
-        if (!on || !ball || !ball.t.length) { return ["", hidden]; }
-        const ts = ball.t;
-        let lo = 0, hi = ts.length - 1, i = -1;
-        while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            if (ts[mid] <= now + 1e-3) { i = mid; lo = mid + 1; } else { hi = mid - 1; }
-        }
-        if (i < 0 || now - ts[i] > 0.1) { return ["", hidden]; }
-        const pts = [];
-        for (let k = i; k >= 0 && ts[k] >= now - 0.4; k--) {
-            if (k < i && ts[k + 1] - ts[k] > 0.1) { break; }
-            pts.push(ball.x[k] + "," + ball.y[k]);
-        }
-        const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" ' +
-            'preserveAspectRatio="none"><polyline points="' + pts.join(" ") +
-            '" fill="none" stroke="#d8f5a2" stroke-opacity="0.7" stroke-width="2" ' +
-            'vector-effect="non-scaling-stroke"/><circle cx="' + ball.x[i] + '" cy="' +
-            ball.y[i] + '" r="0.6" fill="none" stroke="#e8590c" stroke-width="2" ' +
-            'vector-effect="non-scaling-stroke"/></svg>';
-        return ["data:image/svg+xml;utf8," + encodeURIComponent(svg),
-                {position: "absolute", inset: 0, width: "100%", height: "100%",
-                 pointerEvents: "none", display: "block"}];
-    }
-    """,
-    Output("review-ball", "src"),
-    Output("review-ball", "style"),
-    Input("review-time", "data"),
-    Input("review-ball-on", "checked"),
-    State("review-ball-store", "data"),
-    State("review-events", "data"),
 )
 
 
@@ -991,64 +846,6 @@ def _place_machine(click, placing, session_id):
     except ValueError as exc:
         msg = f"Ball machine placed. {exc} Process the session again afterwards."
     return f"Ball machine at ({x:.1f}, {y:.1f}) m, placed by you.", False, notification(msg)
-
-
-clientside_callback(
-    """
-    function(t, on, shots, prevId) {
-        const hidden = {display: "none"};
-        const nu = window.dash_clientside.no_update;
-        const now = (t && t.t) || 0;
-        let i = -1;
-        if (shots) {
-            for (let k = shots.t0.length - 1; k >= 0; k--) {
-                if (shots.t0[k] <= now + 0.05) {
-                    if (now <= shots.t1[k] + LINGER) { i = k; }
-                    break;
-                }
-            }
-        }
-        const host = document.getElementById("review-minimap");
-        const gd = host ? host.querySelector(".js-plotly-plot") : null;
-        const id = i >= 0 ? shots.id[i] : null;
-        if (gd && window.Plotly && gd.data && gd.data.length >= 4 && id !== prevId) {
-            const lx = [], ly = [], txt = [];
-            if (i >= 0 && shots.cx[i] !== null) {
-                lx.push(shots.cx[i]); ly.push(shots.cy[i]);
-                txt.push(shots.v[i] !== null ? shots.v[i] + " km/h" : "");
-            }
-            window.Plotly.restyle(gd, {x: [lx], y: [ly], text: [txt]}, [3]);
-        }
-        const idOut = id === prevId ? nu : id;
-        if (i < 0) { return ["", hidden, "", hidden, idOut]; }
-        const label = (shots.v[i] !== null ? shots.v[i] +
-            (shots.e[i] !== null ? " ± " + shots.e[i] : "") + " km/h" : "speed ?") +
-            " · " + shots.o[i].replace("_", " ");
-        const labelStyle = {position: "absolute", left: "1%", top: "1.5%", padding: "2px 8px",
-            borderRadius: "4px", background: "rgba(0,0,0,0.6)", color: "#fff",
-            font: "600 14px system-ui, sans-serif", pointerEvents: "none"};
-        const path = shots.path[i];
-        if (!on || !path.length) { return ["", hidden, label, labelStyle, idOut]; }
-        const pts = path.map(p => p[0] + "," + p[1]).join(" ");
-        const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" ' +
-            'preserveAspectRatio="none"><polyline points="' + pts + '" fill="none" ' +
-            'stroke="PATH" stroke-opacity="0.9" stroke-width="2" stroke-dasharray="6 3" ' +
-            'vector-effect="non-scaling-stroke"/></svg>';
-        return ["data:image/svg+xml;utf8," + encodeURIComponent(svg),
-                {position: "absolute", inset: 0, width: "100%", height: "100%",
-                 pointerEvents: "none", display: "block"}, label, labelStyle, idOut];
-    }
-    """.replace("LINGER", str(LINGER_S)).replace("PATH", PATH_COLOR),
-    Output("review-shotpath", "src"),
-    Output("review-shotpath", "style"),
-    Output("review-shot-label", "children"),
-    Output("review-shot-label", "style"),
-    Output("review-shot-id", "data"),
-    Input("review-time", "data"),
-    Input("review-shot-on", "checked"),
-    State("review-shots", "data"),
-    State("review-shot-id", "data"),
-)
 
 
 clientside_callback(
@@ -1137,22 +934,9 @@ clientside_callback(
 )
 
 
-# Skeleton overlay: the browser asks for the pose of the 8 s block it's playing in (a block
-# key changes only when playback leaves the block), the server sends that block's keypoints.
-clientside_callback(
-    """
-    function(t, on) {
-        if (!on) { return null; }
-        const k = Math.floor(((t && t.t) || 0) / SKEL_BLOCK_S);
-        return k;
-    }
-    """.replace("SKEL_BLOCK_S", "8"),
-    Output("review-skel-key", "data"),
-    Input("review-time", "data"),
-    Input("review-skel-on", "checked"),
-)
-
-
+# Skeleton overlay: review_frame.js asks for the pose of the block playback is in (it writes
+# review-skel-key only when playback leaves the block), the server sends that block's
+# keypoints.
 @callback(
     Output("review-skel", "data"),
     Input("review-skel-key", "data"),
@@ -1169,17 +953,26 @@ def _skeleton_block(key, session_id):
     video = session.load_config().video
     if video is None:
         return no_update
-    t0 = key * 8.0
+    t0 = key * SKEL_BLOCK_S
     return sw_view.skeleton_store(
-        session, t0 - 0.5, t0 + 8.5, video.display_width, video.display_height
+        session, t0 - 0.5, t0 + SKEL_BLOCK_S + 0.5, video.display_width, video.display_height
     )
 
 
+# Redraw the overlays when a toggle flips or a skeleton block arrives (playback redraws them
+# on every frame anyway; this covers a paused video).
 clientside_callback(
-    sw_view.SKELETON_JS,
-    Output("review-skel-img", "src"),
-    Output("review-skel-img", "style"),
-    Input("review-time", "data"),
+    """
+    function() {
+        if (window.svFrameRefresh) { window.svFrameRefresh("review-video"); }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("review-frame-sink", "data"),
     Input("review-skel", "data"),
+    Input("review-overlay-on", "checked"),
+    Input("review-box-on", "checked"),
+    Input("review-ball-on", "checked"),
     Input("review-skel-on", "checked"),
+    Input("review-shot-on", "checked"),
 )

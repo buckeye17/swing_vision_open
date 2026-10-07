@@ -126,7 +126,12 @@ def layout(session_id: str | None = None, **_):
             controls=True,
             preload="auto",
             style={"width": "100%", "display": "block", "background": "#000", "borderRadius": 8},
-            **{"data-sv-player": "1", "data-fps": f"{data.fps}", "data-time-store": "sw-time"},
+            **{
+                "data-sv-player": "1",
+                "data-fps": f"{data.fps}",
+                "data-frame": "swings",  # the skeleton: assets/swings_frame.js
+                "data-frame-config": f'{{"edges": {sv.SKELETON_EDGES_JSON}}}',
+            },
         )
     else:
         player = dmc.Alert("The playback proxy isn't ready yet.", color="blue")
@@ -249,7 +254,6 @@ def layout(session_id: str | None = None, **_):
             dcc.Store(id="sw-selected", data=first),
             dcc.Store(id="sw-version", data=0),
             dcc.Store(id="sw-edits-version", data=0),
-            dcc.Store(id="sw-time"),
             dcc.Store(id="sw-seek"),
             dcc.Store(id="sw-sink"),
             dcc.Store(id="sw-skel"),
@@ -482,11 +486,17 @@ clientside_callback(
     prevent_initial_call=True,
 )
 
+# The skeleton follows playback in assets/swings_frame.js; redraw it when the pose data or
+# the toggle changes (a paused video doesn't redraw by itself).
 clientside_callback(
-    sv.SKELETON_JS,
-    Output("sw-skel-img", "src"),
-    Output("sw-skel-img", "style"),
-    Input("sw-time", "data"),
+    """
+    function() {
+        if (window.svFrameRefresh) { window.svFrameRefresh("sw-video"); }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("sw-sink", "data", allow_duplicate=True),
     Input("sw-skel", "data"),
     Input("sw-skel-on", "checked"),
+    prevent_initial_call="initial_duplicate",
 )

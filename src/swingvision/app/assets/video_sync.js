@@ -1,16 +1,18 @@
 /*
- * Video ⇄ Dash sync for <video data-sv-player> elements.
+ * Playback sync for <video data-sv-player> elements: overlays, timeline cursor, keys.
  *
- * - Publishes {t, paused, duration} to the dcc.Store named in data-time-store
- *   (throttled to ~10 Hz while playing, immediately on seek/pause).
- * - Moves the cursor (shapes[0]) of the dcc.Graph named in data-timeline.
+ * - On every frame, calls window.svFrame[name](video, force) for the renderer named in
+ *   data-frame (the page's overlays, e.g. review_frame.js), and moves a cursor line over the
+ *   dcc.Graph named in data-timeline. svFrameRefresh(videoId) redraws one now (for a page's
+ *   toggles and late-arriving data while paused).
+ *   Playback time deliberately never goes through a Dash store: each Dash update re-checks
+ *   every component on the page, and at 10 Hz on a long session that stalled the video.
  * - Keyboard: Space play/pause, J/L ±5 s, K pause, ←/→ one frame, Shift+←/→ 1 s,
  *   N/P next/previous segment when the page put segment start times (a JSON list) in the
  *   video's data-segments attribute.
  */
 (function () {
     "use strict";
-    const PUBLISH_MS = 100;
 
     function timelineDiv(video) {
         const id = video.dataset.timeline;
@@ -19,42 +21,64 @@
         return host ? host.querySelector(".js-plotly-plot") : null;
     }
 
+    // The cursor is a plain div over the plot, placed with the x axis's own mapping. A
+    // Plotly.relayout of a shape redraws the whole timeline (~1 s on a long session), which
+    // at 10 Hz starved the video until playback froze.
     function moveCursor(video) {
         const gd = timelineDiv(video);
-        if (!gd || !window.Plotly || !gd.layout || !gd.layout.shapes) return;
-        const t = video.currentTime;
-        window.Plotly.relayout(gd, {"shapes[0].x0": t, "shapes[0].x1": t});
+        const fl = gd && gd._fullLayout;
+        const xa = fl && fl.xaxis;
+        if (!xa || !xa.l2p || !fl._size) return;
+        gd._svVideo = video;
+        if (!gd.dataset.svCursorBound && gd.on) {
+            gd.dataset.svCursorBound = "1";
+            // Zoom, pan and resize move the axis: put the cursor back where the video is.
+            const follow = () => { if (gd._svVideo) moveCursor(gd._svVideo); };
+            ["plotly_afterplot", "plotly_relayout", "plotly_relayouting"].forEach((ev) =>
+                gd.on(ev, follow));
+        }
+        let line = gd.querySelector(":scope > .sv-cursor");
+        if (!line) {
+            if (getComputedStyle(gd).position === "static") gd.style.position = "relative";
+            line = document.createElement("div");
+            line.className = "sv-cursor";
+            gd.appendChild(line);
+        }
+        const x = xa.l2p(video.currentTime);
+        line.style.display = x >= 0 && x <= xa._length ? "block" : "none";
+        line.style.left = `${xa._offset + x}px`;
+        line.style.top = `${fl._size.t}px`;
+        line.style.height = `${fl._size.h}px`;
     }
+
+    function frame(video, force) {
+        const name = video.dataset.frame;
+        const render = name && window.svFrame && window.svFrame[name];
+        if (render) render(video, force);
+        moveCursor(video);
+    }
+
+    window.svFrameRefresh = (id) => {
+        const video = document.getElementById(id);
+        if (video) frame(video, true);
+    };
 
     function bind(video) {
         if (video.dataset.svBound) return;
         video.dataset.svBound = "1";
-        let last = 0;
-
-        const publish = (force) => {
-            const now = performance.now();
-            if (!force && now - last < PUBLISH_MS) return;
-            last = now;
-            const store = video.dataset.timeStore;
-            if (store && window.dash_clientside && window.dash_clientside.set_props) {
-                window.dash_clientside.set_props(store, {
-                    data: {t: video.currentTime, paused: video.paused, duration: video.duration},
-                });
-            }
-            moveCursor(video);
-        };
+        const tick = (force) => frame(video, force);
 
         const loop = () => {
             if (!document.body.contains(video) || video.paused) return;
-            publish(false);
+            tick(false);
             requestAnimationFrame(loop);
         };
 
         video.addEventListener("play", () => requestAnimationFrame(loop));
         // rAF is throttled in hidden/background views; timeupdate (~4 Hz) keeps things moving.
-        video.addEventListener("timeupdate", () => publish(false));
+        video.addEventListener("timeupdate", () => tick(false));
         ["seeked", "pause", "loadedmetadata"].forEach((ev) =>
-            video.addEventListener(ev, () => publish(true)));
+            video.addEventListener(ev, () => tick(true)));
     }
 
     function activeVideo() {

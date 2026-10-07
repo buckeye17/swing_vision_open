@@ -568,34 +568,6 @@ def skeleton_store(session, t0: float, t1: float, width: int, height: int) -> di
     return out
 
 
-#: Clientside: (time store, skeleton store, on) → [img src, img style]. Bones with a weak
-#: keypoint (confidence < 0.3) are left out.
-SKELETON_JS = (
-    """
-    function(t, skel, on) {
-        const hidden = {display: "none"};
-        if (on === false || !skel || !skel.t || !skel.t.length) { return ["", hidden]; }
-        const now = (t && t.t) || 0;
-        const ts = skel.t;
-        let lo = 0, hi = ts.length - 1, i = -1;
-        while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            if (ts[mid] <= now + 1e-3) { i = mid; lo = mid + 1; } else { hi = mid - 1; }
-        }
-        if (i < 0 || now - ts[i] > 0.05) { return ["", hidden]; }
-        const kp = skel.kp[i];
-        const edges = EDGES;
-        let d = "";
-        for (const [a, b] of edges) {
-            if (kp[3 * a + 2] < 0.3 || kp[3 * b + 2] < 0.3) { continue; }
-            d += "M" + kp[3 * a] + "," + kp[3 * a + 1] + "L" + kp[3 * b] + "," + kp[3 * b + 1];
-        }
-        const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" ' +
-            'preserveAspectRatio="none"><path d="' + d + '" fill="none" stroke="#74c0fc" ' +
-            'stroke-width="2.5" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>';
-        return ["data:image/svg+xml;utf8," + encodeURIComponent(svg),
-                {position: "absolute", inset: 0, width: "100%", height: "100%",
-                 pointerEvents: "none", display: "block"}];
-    }
-    """
-).replace("EDGES", str([list(e) for e in COCO_EDGES]))
+#: The skeleton's bones as JSON pairs of COCO keypoint indices, for the overlay drawn by
+#: ``assets/skeleton.js`` (bones with a keypoint below 0.3 confidence are left out).
+SKELETON_EDGES_JSON = str([list(e) for e in COCO_EDGES])
