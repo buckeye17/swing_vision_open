@@ -74,7 +74,7 @@ uses a confident pose-based serve or groundstroke to decide an unclear shot kind
 unseen contacts too. M5's segmentation results are unchanged on both sessions.
 
 *Since 2026-10-08 the default 2D model is ViTPose+-H (`vitpose-plus-huge`, Apache-2.0,
-3.6 GB), ≈4.2× slower in `pass2_pose`; the numbers on this page are ViTPose-B's. See
+3.6 GB), ≈3.5× slower in `pass2_pose`; the numbers on this page are ViTPose-B's. See
 [spikes/bigger-models.md](spikes/bigger-models.md).*
 
 Weights come from the model registry, pinned by SHA-256: `vitpose-base-simple`

@@ -222,7 +222,7 @@ def _ball_card(s):
 #: Pose models offered on the Settings page (registry names, see ``pose.pose2d.ARCHS``).
 POSE_MODELS = {
     "vitpose-plus-huge": "ViTPose+-H (recommended: steadiest keypoints)",
-    "vitpose-base-simple": "ViTPose-B (≈4× faster, noisier far player)",
+    "vitpose-base-simple": "ViTPose-B (≈3.5× faster, noisier far player)",
 }
 
 
@@ -242,8 +242,8 @@ def _pose_card(s):
             dmc.Title("Swing pose", order=4),
             dmc.Text(
                 "The pose network runs on every frame around each swing. ViTPose+-H costs about "
-                "an hour of GPU time per footage hour on an RTX A5000 laptop, ViTPose-B about "
-                "15 minutes. Changing it re-runs pose on sessions you reprocess.",
+                "55 GPU-minutes per footage hour on an RTX A5000 laptop, ViTPose-B about 15 "
+                "minutes. Changing it re-runs pose on sessions you reprocess.",
                 size="sm",
                 c="dimmed",
                 mb="sm",

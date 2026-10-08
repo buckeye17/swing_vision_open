@@ -366,8 +366,8 @@ def _show_step(step, video):
 
 
 #: Processing time per footage time on an RTX A5000 laptop, by pose model: the M7 overnight
-#: run took 1.8× with ViTPose-B; ViTPose+-H makes its pose stage ≈4.2× longer.
-PROCESSING_X_REALTIME = {"vitpose-base-simple": 1.8, "vitpose-plus-huge": 2.4}
+#: run took 1.8× with ViTPose-B; ViTPose+-H makes its pose stage ≈3.5× longer.
+PROCESSING_X_REALTIME = {"vitpose-base-simple": 1.8, "vitpose-plus-huge": 2.3}
 
 
 @callback(

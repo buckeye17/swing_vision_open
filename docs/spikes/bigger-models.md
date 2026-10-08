@@ -20,13 +20,34 @@ frame-to-frame jitter on the far player for every joint group, half of ViTPose-B
 swaps). ViTPose-B stays selectable in Settings → Swing pose. The other defaults (ball U-Net,
 MotionBERT-Lite, YOLO11m) are unchanged.
 
-* **Cost**: Oct 1's `pass2_pose` took 29 min (1,750 s for 61,782 frames, ≈35 crops/s with
-  decode) vs 6.9 min with ViTPose-B: ×4.2. Scaled to the M7 2-hour run, processing goes from
-  1.8× to ≈2.4× realtime (≈5 h 20 min instead of 3 h 53 min). GPU memory ≈6 GB at batch 8.
-* **Scores**: the real implementation reproduces the experiment exactly (keypoints within
-  0.005% of the crop height): near 96.3%, far 84.6% in daylight (81.0% with dusk), contact
-  within ±2 frames on every seen hit. That is a few swings below ViTPose-B (97.1% / 86.6%);
-  the far false forehands (8 → 14) are the place to look when the rules are next retuned.
+* **Cost**: `pass2_pose` took 29.2 min on Oct 1 (vs 6.9 with ViTPose-B) and 41.7 min on
+  Oct 4 (vs 13.6), ×3.5 over both: ≈35 crops/s with decode, ≈55 min per footage hour. Scaled
+  to the M7 2-hour run, processing goes from 1.8× to ≈2.3× realtime (≈5 h instead of
+  3 h 53 min). GPU memory ≈6 GB at batch 8.
+* **Correction.** The first Huge numbers (near 96.3%, far 84.6%) were confounded: during the
+  Oct 4 run the `auto` ball detector resolved to the experimental `ball-w64` trained that
+  evening, so `pass1_detect`, events and the pose windows were redone with it. Rerun on the
+  original ball events, with the same 89,646 pose frames as ViTPose-B: near 96.7%, far 83.3%
+  (79.9% with dusk). The keypoint comparison below was unaffected (same numbers on the clean
+  run).
+* **Stroke rules retuned** (same day). Huge's extra far errors were 9 "forehands" on Oct 4's
+  far block, where the server stands mostly above the top edge of the frame: mean keypoint
+  confidence 0.07–0.36, wrist speeds up to 126 m/s. No stroke is now called from a swing whose
+  mean keypoint confidence is below 0.5 (`StrokeParams.min_pose_conf`, the existing
+  `low_conf` flag); a serve with a toss is still decided first. No labeled stroke on either
+  session, side or model is below 0.6 (the lowest true-stroke pose quality is 0.75), and the
+  result is flat for thresholds 0.4–0.6.
+
+  | | near | far | far incl. dusk |
+  |---|---:|---:|---:|
+  | ViTPose-B, old rules | 97.1% | 86.6% | 80.4% |
+  | ViTPose+-H, old rules | 96.7% | 83.3% | 79.9% |
+  | ViTPose-B, new rules | 97.1% | 90.2% | 83.1% |
+  | **ViTPose+-H, new rules** | **96.7%** | **90.0%** | **85.1%** |
+
+  Of the 7 far false forehands left, 6 (all on Oct 1) are the same swings ViTPose-B gets
+  wrong: confident poses with impact sounds, not a pose-model effect. They are the next thing to
+  look at, ideally with groundstroke footage to check any rule against.
 * Settings saved before this change move to the new model once (`settings_version` 2): the
   pose model wasn't selectable before, so a stored `vitpose-base-simple` was a written-out
   default, not a choice.
@@ -69,22 +90,23 @@ M6 exit metric (daylight swings, 80 near and 21 far serves).
 
 | 2D / 3D model | Params (2D) | Crops/s (2D network, flip, FP16) | ≈ pose min per footage h | near strokes | far strokes | near contact ±2 f | far serve phases CV (fwd / follow) |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **ViTPose-B / MB-Lite** (default) | 86 M | **353** | **15** | **97.1%** | 86.6% | **100%** | 24% / 20% |
+| **ViTPose-B / MB-Lite** (default then) | 86 M | **353** | **15** | **97.1%** | 86.6% | **100%** | 24% / 20% |
 | ViTPose+-B / MB-Lite | 86 M + MoE | 290 | ≈16 | 96.9% | 82.3% | 100% | 12% / 23% |
 | ViTPose+-L / MB-Lite | 304 M + MoE | 109 | ≈28 | 96.7% | **87.2%** | 100% | 16% / 16% |
-| ViTPose+-H / MB-Lite | 632 M + MoE | 42 (batch ≤ 16) | ≈57 | 96.3% | 84.6% | 100% | 16% / **14%** |
+| ViTPose+-H / MB-Lite | 632 M + MoE | 42 (batch ≤ 16) | ≈55 | 96.7% | 83.3% | 100% | 16% / **13%** |
 | ViTPose-B / **MotionBERT (full)** | — | — | 15 | 96.6% | 83.9% | 68% | 17% / 20% |
 
 The pose-minutes column scales the measured 15 min/h (decode included) by the extra network
 time, at ≈120k pose frames per footage hour. With the dusk swings included
-(`--include-dark`), far strokes come out B 80.4%, B+ 79.7%, L 85.7%, H 81.0%.
+(`--include-dark`), far strokes come out B 80.4%, B+ 79.7%, L 85.7%, H 79.9%. All with the stroke rules of
+the time (before the confidence gate in *Decision*). The Huge row is the corrected rerun.
 
 **Downstream:** stroke accuracy and contact timing don't improve with model size. Near is
 saturated: its 10 missed serves are Oct 4 serves hit above the top of the frame, which no
 pose model can fix. Each far serve is worth 4.8 points, so the far column is ±1 serve
-between models. The far false strokes (non-strokes called forehand) actually *rise* with
-ViTPose+ (8 → 12–15) because its sharper far wrists trip the rule thresholds tuned on
-ViTPose-B.
+between models. The far false strokes (non-strokes called forehand) *rise* with ViTPose+
+(8 → 12–15): the bigger models place a confident-looking body on a player who is mostly out of
+the picture, and the rules called it a forehand (fixed by the confidence gate, see *Decision*).
 
 **MotionBERT (full, 3× the Lite parameters) is worse.** Near contact from the pose drops
 from 100% to 68% within ±2 frames. The released full checkpoint is the H36M fine-tune, not

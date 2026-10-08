@@ -643,12 +643,16 @@ def analyze(
         tol = 1.5 / fps
         rec["chain_in_order"] = all(b >= a - tol for a, b in itertools.pairwise(order))
     conf = pose.conf[idx]
-    rec["pose_quality"] = float(np.clip(np.mean(conf) / 0.8, 0, 1) * min(1.0, len(idx) / expected))
+    #: Mean keypoint confidence over the swing (not a SWINGS column; the stroke rules use it).
+    rec["pose_conf"] = float(np.mean(conf))
+    rec["pose_quality"] = float(
+        np.clip(rec["pose_conf"] / 0.8, 0, 1) * min(1.0, len(idx) / expected)
+    )
     if side is not None and side > 0:
         rec["flags"].append("far")
     if peak_v > p.max_plausible_speed:
         rec["flags"].append("implausible_speed")
-    if float(np.mean(conf)) < 0.5:
+    if rec["pose_conf"] < 0.5:
         rec["flags"].append("low_conf")
     return rec
 
@@ -772,6 +776,7 @@ def build_swings(
                 toss=rec.get("toss_height_m") is not None,
                 ball_contact=s.contact_source in ("hit", "audio"),
                 wrist_speed_avg=rec.get("wrist_speed_avg"),
+                pose_conf=rec.get("pose_conf"),
             )
             stroke, conf = st.classify_rules(f, sp)
             rec.update(

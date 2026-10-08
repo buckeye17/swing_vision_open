@@ -286,6 +286,8 @@ def _f(**kw) -> strokes.StrokeFeatures:
         ({"wrist_speed_avg": 1.0}, "other"),
         ({"ball_contact": False}, "other"),
         ({"off_above_head_m": 0.1}, "other"),
+        ({"pose_conf": 0.3}, "other"),  # a body the network guessed: no stroke
+        ({"pose_conf": 0.3, "arm_above_head_m": 0.3, "toss": True}, "serve"),  # toss first
     ],
 )
 def test_stroke_rules(kw, expected):

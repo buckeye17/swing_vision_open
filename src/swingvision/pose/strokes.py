@@ -8,7 +8,9 @@ Classes: serve, forehand, backhand, forehand_volley, backhand_volley, overhead, 
 * *other*: no ball was hit (no hit event, no impact sound: a shadow swing, picking up a
   ball), the racket wrist never gets fast or barely travels in the last 0.3 s before the
   contact (a dribble on the racket, a tap, catching the ball), or the other hand is up at the
-  head while the racket hand is low (a serve's toss and windup).
+  head while the racket hand is low (a serve's toss and windup), or the pose is too unsure to
+  read a stroke from (mean keypoint confidence below ``min_pose_conf``: a player mostly out of
+  the picture, where the network still places a body). A serve with a toss is decided first.
 * *serve* / *overhead*: the racket hand is above the head at contact. A serve has a toss (the
   other hand above the head before the contact; checked first, so a serve whose contact time
   is a little off still counts) or is hit from behind the baseline with no ball coming in;
@@ -66,6 +68,10 @@ class StrokeParams:
     #: The other hand this high relative to the head (m) while the racket hand is low: a
     #: toss.
     toss_hand_m: float = -0.1
+    #: Mean keypoint confidence over the swing below which no stroke is called (the swing's
+    #: ``low_conf`` flag). No labeled stroke has come close; ViTPose+-H's confident bodies on
+    #: a player above the top of the frame were called forehands.
+    min_pose_conf: float = 0.5
     #: Distance from the net (m) beyond which the player is behind the baseline (the far
     #: player's depth along the camera's axis is the least certain part of the pose).
     baseline_m: float = 10.8
@@ -96,6 +102,8 @@ class StrokeFeatures:
     ball_contact: bool = True
     #: The other hand's highest point near the contact, above the head (m).
     off_above_head_m: float = -1.0
+    #: Mean keypoint confidence over the swing.
+    pose_conf: float = 1.0
 
     def ball_vector(self) -> list[float]:
         return [
@@ -114,6 +122,7 @@ def features(
     toss: bool = False,
     wrist_speed_avg: float | None = None,
     ball_contact: bool = True,
+    pose_conf: float | None = None,
 ) -> StrokeFeatures:
     t = kin.t
     ic = int(np.argmin(np.abs(t - t_contact)))
@@ -141,6 +150,7 @@ def features(
         bounced=bounced,
         ball_contact=ball_contact,
         off_above_head_m=float(np.max(off_z - j[around, H["head"], 2])),
+        pose_conf=1.0 if pose_conf is None else pose_conf,
     )
 
 
@@ -154,6 +164,8 @@ def classify_rules(f: StrokeFeatures, p: StrokeParams | None = None) -> tuple[st
         return "serve", min(0.95, 0.65 + 0.15 * (behind + (f.incoming is False)))
     if not f.ball_contact:
         return "other", 0.6  # no hit, no impact sound: a shadow swing, picking up a ball
+    if f.pose_conf < p.min_pose_conf:
+        return "other", 0.5  # too unsure a pose to read a stroke from
     if f.wrist_speed_peak < p.other_max_speed or (
         f.wrist_speed_avg is not None and f.wrist_speed_avg < p.other_max_avg
     ):

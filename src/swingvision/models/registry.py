@@ -102,7 +102,7 @@ REGISTRY: dict[str, ModelSpec] = {
             sha256="0ecb49f1ab0b18cc2f18446b8100442cec88bd99dd53779ad5a7f8c71aa08506",
             license="Apache-2.0 (ViTPose+, usyd-community on Hugging Face)",
             task="pose2d (COCO-17, top-down)",
-            description="Default 2D pose: steadiest keypoints, ≈4× slower (ViTPose+-H, 256×192)",
+            description="Default 2D pose: steadiest keypoints, ≈3.5× slower (ViTPose+-H, 256×192)",
             size_mb=3597.7,
         ),
         ModelSpec(
