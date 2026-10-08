@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from platformdirs import user_config_dir, user_data_dir
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from swingvision.storage.fsutil import atomic_write_text
 
@@ -77,7 +77,7 @@ class ProcessingDefaults(BaseModel):
     #: 2D pose (``pass2_pose``): every frame from ``pose_before_s`` before to
     #: ``pose_after_s`` after each of the player's hits and each impact sound at least
     #: ``pose_onset_z`` strong (unseen contacts), on the player's box.
-    pose_model: str = "vitpose-base-simple"
+    pose_model: str = "vitpose-plus-huge"
     pose_before_s: float = 1.8
     pose_after_s: float = 1.2
     pose_onset_z: float = 15.0
@@ -87,7 +87,13 @@ class ProcessingDefaults(BaseModel):
     stroke_model: str = "auto"
 
 
+#: Bumped when a changed default must reach settings files saved before it (every save writes
+#: every field, so a file can't tell a default from a choice). 2: ViTPose+-H is the pose model.
+SETTINGS_VERSION = 2
+
+
 class AppSettings(BaseModel):
+    settings_version: int = SETTINGS_VERSION
     output_root: Path | None = None
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
@@ -100,6 +106,19 @@ class AppSettings(BaseModel):
     local_cache: bool = True
     cache_dir: Path | None = None  # default: <data_dir>/cache
     cache_max_gb: float = Field(20.0, ge=1.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate(cls, data):
+        if not isinstance(data, dict) or data.get("settings_version", 1) >= SETTINGS_VERSION:
+            return data
+        data = dict(data)
+        proc = data.get("processing")
+        # The pose model wasn't selectable before version 2: the old default was never chosen.
+        if isinstance(proc, dict) and proc.get("pose_model") == "vitpose-base-simple":
+            data["processing"] = {**proc, "pose_model": "vitpose-plus-huge"}
+        data["settings_version"] = SETTINGS_VERSION
+        return data
 
     @field_validator("output_root", mode="before")
     @classmethod

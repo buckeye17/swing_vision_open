@@ -365,8 +365,9 @@ def _show_step(step, video):
     return step, panes, step == 0, HIDDEN if last else {}, {} if last else HIDDEN, not video
 
 
-#: Processing time per footage time on an RTX A5000 laptop (M7 overnight run).
-PROCESSING_X_REALTIME = 1.8
+#: Processing time per footage time on an RTX A5000 laptop, by pose model: the M7 overnight
+#: run took 1.8× with ViTPose-B; ViTPose+-H makes its pose stage ≈4.2× longer.
+PROCESSING_X_REALTIME = {"vitpose-base-simple": 1.8, "vitpose-plus-huge": 2.4}
 
 
 @callback(
@@ -399,8 +400,10 @@ def _review(step, video, name, submode, profile_id, targets):
         ),
         fz="sm",
     )
-    hours = (video or {}).get("duration_s", 0) / 3600 * PROCESSING_X_REALTIME
-    auto = state.settings().processing.calibration_auto_accept_px is not None
+    p = state.settings().processing
+    x_realtime = PROCESSING_X_REALTIME.get(p.pose_model, max(PROCESSING_X_REALTIME.values()))
+    hours = (video or {}).get("duration_s", 0) / 3600 * x_realtime
+    auto = p.calibration_auto_accept_px is not None
     note = (
         "Processing continues on its own after court detection when the calibration fits well "
         "(Settings)."

@@ -46,6 +46,45 @@ def test_decode_heatmaps_subpixel():
     assert out[0, 0, 2] == pytest.approx(1.0, abs=0.05)
 
 
+def test_every_pose_architecture_is_registered():
+    from swingvision.models import registry
+
+    for name in pose2d.ARCHS:
+        assert registry.get(name).task.startswith("pose2d")
+        assert name in pose2d.ESTIMATORS
+    huge = pose2d.vitpose_config("vitpose-plus-huge")
+    assert huge.backbone_config.num_experts == 6
+    assert huge.backbone_config.out_indices == [32] and not huge.use_simple_decoder
+    assert huge.num_labels == 17
+
+
+def test_mixture_of_experts_pose_uses_the_coco_expert(monkeypatch):
+    torch = pytest.importorskip("torch")
+    from transformers import VitPoseBackboneConfig, VitPoseConfig, VitPoseForPoseEstimation
+
+    # A tiny two-expert ViTPose+ (no weights) run through VitPose2D's heatmap path.
+    backbone = VitPoseBackboneConfig(
+        hidden_size=32, num_hidden_layers=2, num_attention_heads=2, num_experts=2,
+        part_features=8, out_features=["stage2"], out_indices=[2],
+    )  # fmt: skip
+    model = VitPoseForPoseEstimation(
+        VitPoseConfig(backbone_config=backbone, use_simple_decoder=False, num_labels=17)
+    ).eval()
+    seen = []
+    forward = model.forward
+    monkeypatch.setattr(
+        model, "forward", lambda **kw: seen.append(kw.get("dataset_index")) or forward(**kw)
+    )
+    est = pose2d.VitPose2D.__new__(pose2d.VitPose2D)
+    est.model, est.moe, est.flip_test = model, True, True
+    est._mean = torch.tensor(pose2d.MEAN).view(1, 3, 1, 1)
+    est._std = torch.tensor(pose2d.STD).view(1, 3, 1, 1)
+    with torch.inference_mode():
+        hm = est._heatmaps(torch.rand(3, 3, pose2d.INPUT_H, pose2d.INPUT_W))
+    assert hm.shape == (3, 17, 64, 48)
+    assert len(seen) == 2 and all(d is not None and d.tolist() == [0, 0, 0] for d in seen)
+
+
 def test_crop_box_aspect_and_padding():
     box = np.array([100.0, 200.0, 180.0, 500.0])
     x0, y0, x1, y1 = pose2d.crop_box(box)

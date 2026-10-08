@@ -73,6 +73,10 @@ uses a confident pose-based serve or groundstroke to decide an unclear shot kind
 `practice_eval` (v2) takes the stroke from the segment, so target stroke filters work for
 unseen contacts too. M5's segmentation results are unchanged on both sessions.
 
+*Since 2026-10-08 the default 2D model is ViTPose+-H (`vitpose-plus-huge`, Apache-2.0,
+3.6 GB), ≈4.2× slower in `pass2_pose`; the numbers on this page are ViTPose-B's. See
+[spikes/bigger-models.md](spikes/bigger-models.md).*
+
 Weights come from the model registry, pinned by SHA-256: `vitpose-base-simple`
 (usyd-community, Apache-2.0, 344 MB) and `motionbert-lite` (MotionBERT-Lite in-the-wild
 checkpoint, Apache-2.0, 64 MB; the DSTformer model code is vendored in `pose/motionbert.py`).

@@ -42,14 +42,41 @@ def crop_box(box: np.ndarray) -> np.ndarray:
     return np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], axis=-1)
 
 
-def vitpose_config():
-    """The ``usyd-community/vitpose-base-simple`` architecture (weights come from the
-    registry, pinned by SHA-256)."""
+#: Architectures of the registry's ViTPose weights (``usyd-community/<name>`` on Hugging Face):
+#: backbone settings, decoder, and the crops per forward pass (Huge at 32 crops with flip test
+#: needs 17 GB; 8 runs as fast in 6 GB).
+ARCHS: dict[str, dict] = {
+    "vitpose-base-simple": {"backbone": {}, "layers": 12, "simple": True, "batch": 32},
+    # ViTPose+-H: a mixture-of-experts backbone shared across six datasets; expert 0 is COCO.
+    "vitpose-plus-huge": {
+        "backbone": {
+            "hidden_size": 1280,
+            "num_attention_heads": 16,
+            "num_experts": 6,
+            "part_features": 320,
+        },
+        "layers": 32,
+        "simple": False,
+        "batch": 8,
+    },
+}
+
+
+def vitpose_config(name: str = "vitpose-base-simple"):
+    """The architecture of a registry ViTPose model (weights come from the registry, pinned
+    by SHA-256)."""
     from transformers import VitPoseBackboneConfig, VitPoseConfig
 
-    backbone = VitPoseBackboneConfig(out_features=["stage12"], out_indices=[12])
+    arch = ARCHS[name]
+    n = arch["layers"]
+    backbone = VitPoseBackboneConfig(
+        num_hidden_layers=n, out_features=[f"stage{n}"], out_indices=[n], **arch["backbone"]
+    )
     return VitPoseConfig(
-        backbone_config=backbone, use_simple_decoder=True, scale_factor=4, num_labels=17
+        backbone_config=backbone,
+        use_simple_decoder=arch["simple"],
+        scale_factor=4,
+        num_labels=17,
     )
 
 
@@ -86,7 +113,7 @@ class VitPose2D:
         name: str = "vitpose-base-simple",
         device: str | None = None,
         flip_test: bool = True,
-        batch: int = 32,
+        batch: int | None = None,
         progress: Callable[[float], None] | None = None,
     ):
         import torch
@@ -99,9 +126,12 @@ class VitPose2D:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.half = self.device.startswith("cuda")
         self.flip_test = flip_test
-        self.batch = batch
+        self.batch = batch or ARCHS[name]["batch"]
         weights = registry.ensure(name, progress)
-        model = VitPoseForPoseEstimation(vitpose_config())
+        config = vitpose_config(name)
+        #: Mixture-of-experts backbones pick the COCO expert (dataset 0) on every crop.
+        self.moe = config.backbone_config.num_experts > 1
+        model = VitPoseForPoseEstimation(config)
         model.load_state_dict(load_file(str(weights)), strict=True)
         model = model.to(self.device)
         self.model = (model.half() if self.half else model.float()).eval()
@@ -126,11 +156,16 @@ class VitPose2D:
         )[0]
 
     def _heatmaps(self, x: torch.Tensor) -> torch.Tensor:
+        import torch
+
         dtype = next(self.model.parameters()).dtype
         x = ((x - self._mean) / self._std).to(dtype)
-        hm = self.model(pixel_values=x).heatmaps.float()
+        kw = {}
+        if self.moe:
+            kw["dataset_index"] = torch.zeros(len(x), dtype=torch.long, device=x.device)
+        hm = self.model(pixel_values=x, **kw).heatmaps.float()
         if self.flip_test:
-            hf = self.model(pixel_values=x.flip(-1)).heatmaps.float()
+            hf = self.model(pixel_values=x.flip(-1), **kw).heatmaps.float()
             hm = (hm + hf.flip(-1)[:, list(COCO_FLIP)]) / 2
         return hm
 
@@ -175,7 +210,7 @@ class VitPose2D:
 
 #: name → factory(**kwargs) of 2D pose estimators (tests register fakes).
 ESTIMATORS: dict[str, Callable[..., VitPose2D]] = {
-    "vitpose-base-simple": lambda **kw: VitPose2D("vitpose-base-simple", **kw)
+    name: lambda name=name, **kw: VitPose2D(name, **kw) for name in ARCHS
 }
 
 

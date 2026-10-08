@@ -89,3 +89,16 @@ def test_blank_output_root_means_unset():
 
     assert AppSettings.model_validate_json('{"output_root": ""}').output_root is None
     assert AppSettings.model_validate_json('{"output_root": "  "}').output_root is None
+
+
+def test_settings_saved_before_v2_move_to_the_new_pose_model():
+    from swingvision.settings import AppSettings
+
+    old = '{"processing": {"pose_model": "vitpose-base-simple", "person_model": "yolo11l"}}'
+    s = AppSettings.model_validate_json(old)
+    assert s.processing.pose_model == "vitpose-plus-huge"
+    assert s.processing.person_model == "yolo11l"  # other choices are kept
+    # Chosen after the change: kept.
+    s.processing.pose_model = "vitpose-base-simple"
+    again = AppSettings.model_validate_json(s.model_dump_json())
+    assert again.processing.pose_model == "vitpose-base-simple"

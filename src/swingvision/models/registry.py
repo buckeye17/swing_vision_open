@@ -22,6 +22,7 @@ ULTRALYTICS_RELEASES = (
 )
 HF = "https://huggingface.co"
 VITPOSE_REV = "a93ac0c67e0b7e2c55287d21d4c460c8f3c54d45"
+VITPOSE_PLUS_HUGE_REV = "9f36d7aec1800d23e97f10c2e74393aee92aa53f"
 MOTIONBERT_REV = "370a9196aa3c89198b134c82476143b01c0fb32c"
 
 
@@ -90,6 +91,19 @@ REGISTRY: dict[str, ModelSpec] = {
             task="pose2d (COCO-17, top-down)",
             description="2D pose on player crops (ViTPose-B, simple decoder, 256×192)",
             size_mb=343.7,
+        ),
+        ModelSpec(
+            name="vitpose-plus-huge",
+            filename="vitpose-plus-huge.safetensors",
+            urls=(
+                f"{HF}/usyd-community/vitpose-plus-huge/resolve/{VITPOSE_PLUS_HUGE_REV}/"
+                "model.safetensors",
+            ),
+            sha256="0ecb49f1ab0b18cc2f18446b8100442cec88bd99dd53779ad5a7f8c71aa08506",
+            license="Apache-2.0 (ViTPose+, usyd-community on Hugging Face)",
+            task="pose2d (COCO-17, top-down)",
+            description="Default 2D pose: steadiest keypoints, ≈4× slower (ViTPose+-H, 256×192)",
+            size_mb=3597.7,
         ),
         ModelSpec(
             name="motionbert-lite",

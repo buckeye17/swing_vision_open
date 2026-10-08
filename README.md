@@ -50,8 +50,9 @@ session from the **Library** when it's done.
 
 ### Processing overnight
 
-Processing takes about 1.8 hours per hour of footage on an RTX A5000 laptop (a 2-hour session
-took 3 h 53 min), so long sessions are best left to run overnight:
+Processing takes about 2.4 hours per hour of footage on an RTX A5000 laptop (a 2-hour session
+≈5 h 20 min; 3 h 53 min measured with the faster ViTPose-B pose model, which you can pick in
+**Settings → Swing pose**), so long sessions are best left to run overnight:
 
 1. In **Settings → Court calibration**, turn on *Continue without review when the fit is
    good*. Otherwise every job pauses after court detection until you confirm the calibration
@@ -199,7 +200,8 @@ with the targets projected into the video. Details in
 ### Swings: pose, phases, strokes
 
 Around every hit and every impact sound, the worker runs a pose network on the full-resolution
-crop of you (ViTPose, ≈15 GPU-minutes per footage hour), lifts the 2D skeleton to 3D
+crop of you (ViTPose+-H, ≈1 GPU-hour per footage hour; ViTPose-B in Settings is ≈4× faster
+with noisier far-player keypoints), lifts the 2D skeleton to 3D
 (MotionBERT), scales it to your height and places it on the court. From that it finds your
 swings — also those whose ball the tracker missed — and measures them:
 
@@ -224,9 +226,11 @@ beats them on sessions it didn't learn from). The session page has a *Skeleton* 
 the stroke of each shot.
 
 Accuracy, on the two serve-practice sessions (serves vs. everything else; no groundstroke
-footage yet): 97.1% of swings right for the near player, 86.6% for the far one in daylight
-(80.4% including dusk); the contact found from the pose alone was within 2 frames of the ball
-hit on every seen hit (39 near, only 3 far). Depth along the camera's line of sight is the least certain part of a single-camera 3D
+footage yet): 96.3% of swings right for the near player, 84.6% for the far one in daylight
+(81.0% including dusk); the contact found from the pose alone was within 2 frames of the ball
+hit on every seen hit (39 near, only 3 far). ViTPose-B scored slightly higher (97.1% /
+86.6%), a difference of a few swings, but ViTPose+-H's far-player keypoints jitter 15–30% less
+from frame to frame ([docs/spikes/bigger-models.md](docs/spikes/bigger-models.md)). Depth along the camera's line of sight is the least certain part of a single-camera 3D
 pose, especially for the far player: compare swings with your own rather than with absolute
 norms. Details in [docs/m6-swings.md](docs/m6-swings.md).
 

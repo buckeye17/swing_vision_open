@@ -100,6 +100,7 @@ def _players_card(s):
             + ("" if spec.available() else " · downloads on first use"),
         }
         for name, spec in REGISTRY.items()
+        if spec.task.startswith("person detection")
     ]
     return dmc.Paper(
         [
@@ -211,6 +212,49 @@ def _ball_card(s):
                     ),
                 ],
                 cols={"base": 1, "sm": 2},
+            ),
+        ],
+        p="lg",
+        withBorder=True,
+    )
+
+
+#: Pose models offered on the Settings page (registry names, see ``pose.pose2d.ARCHS``).
+POSE_MODELS = {
+    "vitpose-plus-huge": "ViTPose+-H (recommended: steadiest keypoints)",
+    "vitpose-base-simple": "ViTPose-B (≈4× faster, noisier far player)",
+}
+
+
+def _pose_card(s):
+    p = s.processing
+    opts = [
+        {
+            "value": name,
+            "label": label + ("" if REGISTRY[name].available() else " · downloads on first use"),
+        }
+        for name, label in POSE_MODELS.items()
+    ]
+    if p.pose_model not in POSE_MODELS:
+        opts.append({"value": p.pose_model, "label": p.pose_model})
+    return dmc.Paper(
+        [
+            dmc.Title("Swing pose", order=4),
+            dmc.Text(
+                "The pose network runs on every frame around each swing. ViTPose+-H costs about "
+                "an hour of GPU time per footage hour on an RTX A5000 laptop, ViTPose-B about "
+                "15 minutes. Changing it re-runs pose on sessions you reprocess.",
+                size="sm",
+                c="dimmed",
+                mb="sm",
+            ),
+            dmc.Select(
+                id="set-pose-model",
+                label="Pose model",
+                data=opts,
+                value=p.pose_model,
+                allowDeselect=False,
+                maw=420,
             ),
         ],
         p="lg",
@@ -441,6 +485,7 @@ def layout(**_):
                     ),
                     _players_card(s),
                     _ball_card(s),
+                    _pose_card(s),
                     _units_card(s),
                     _cache_card(s),
                     dmc.Paper(
@@ -515,6 +560,7 @@ def _browser_start(value):
     State("set-roi-beside", "value"),
     State("set-ball-detector", "value"),
     State("set-ball-sweep", "value"),
+    State("set-pose-model", "value"),
     State("set-units", "value"),
     State("set-cache-on", "checked"),
     State("set-cache-max", "value"),
@@ -537,6 +583,7 @@ def _save(
     roi_beside,
     ball_detector,
     ball_sweep,
+    pose_model,
     units,
     cache_on,
     cache_max,
@@ -599,6 +646,7 @@ def _save(
     s.processing.roi_beside_m = _roi_from_input(roi_beside, s.processing.roi_beside_m, shown)
     s.processing.ball_detector = ball_detector or s.processing.ball_detector
     s.processing.ball_sweep_hz = None if ball_sweep in (None, "full") else float(ball_sweep)
+    s.processing.pose_model = pose_model or s.processing.pose_model
     s.units = units if units in ("metric", "imperial") else s.units
     s.local_cache = bool(cache_on)
     s.cache_max_gb = max(1.0, float(cache_max or s.cache_max_gb))
