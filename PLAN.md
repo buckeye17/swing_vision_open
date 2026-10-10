@@ -53,7 +53,7 @@ A personal, local-first tennis video analysis tool. It ingests full-court footag
 | Feature | Notes |
 |---|---|
 | ✅ Multi-session statistics: the same stats over any selection of sessions (date range, practice/match, type, tags) | §7.13, M7a (done 2026-10-10). Brings the cross-session part of M11 forward |
-| Serve contact point vs the front foot's toe in the contact frame (forward, lateral, height), with speed and in % by contact point | §7.11, M7b. Needs a pose model with toe keypoints, run around each serve's contact |
+| ✅ Serve contact point vs the front foot's toe in the contact frame (forward, lateral, height), with speed and in % by contact point | §7.11, M7b (done 2026-10-10). Toe keypoints from RTMW-l (2D whole-body) around each serve's contact |
 | Speed calibration from net-tape serves | §7.12, M7c. Replaces the ±3% uncalibrated speed error with a measured one |
 
 ### Phase 2 — Match mode (human hitting partner)
@@ -117,6 +117,7 @@ Cross-session trends (the generic part arrives early, with M7a), annotated proxy
 | Court keypoints | ✅ Classical line detector: white top-hat → Hough → court-model hypothesis search → sub-pixel ridge refinement + full camera fit | M1: needs no training data and handles low corner cameras, wide lenses, partly visible courts, pickleball lines and neighboring courts. A keypoint CNN fine-tuned on confirmed calibrations stays an option if a view ever defeats it. See `docs/m1-court-calibration.md`. |
 | 2D pose | ✅ ViTPose+-H (HF `transformers` `VitPoseForPoseEstimation`, COCO expert of the MoE backbone) on 4K player crops, FP16 + flip test; ViTPose-B selectable | M6 shipped ViTPose-B (≈110–150 crops/s with decode). 2026-10-08: ViTPose+-H is the default for its steadier keypoints (far-player jitter −15–30%, half the left/right swaps), at ≈35 crops/s with decode (pose ≈55 min per footage hour, ×3.5); see `docs/spikes/bigger-models.md`. Weights pinned by SHA-256 in the registry. RTMPose via `rtmlib` stays the alternative. |
 | 3D lifting | ✅ MotionBERT-Lite (vendored DSTformer, Apache-2.0, in-the-wild checkpoint) | COCO-17 → H36M-17 joint mapping; confident joints snapped back onto their 2D rays (M6, see `docs/m6-swings.md`). |
+| Foot keypoints | ✅ RTMW-l 384×288 (OpenMMLab, COCO-WholeBody, Apache-2.0) through ONNX Runtime GPU (`onnxruntime-gpu` < 1.23: CUDA 12 builds) | M7b: only on frames around serve contacts. Best of four whole-body candidates on hand-labeled toe tips; no 3D foot model measured the toe's height well enough (`docs/spikes/m7b-toe-pose.md`). |
 | Audio onsets | `librosa` | Racket-impact sounds help confirm hits. |
 | Classical ML | `scikit-learn`, `lightgbm` | Bounce classifier, stroke classifier baseline. |
 | Optimization | `scipy.optimize.least_squares` | Camera calibration, 3D ball trajectory fits. |
@@ -193,7 +194,8 @@ swing_vision_open/
 │  │  ├─ outcomes.py            # point-ending reason + winner inference + confidence
 │  │  ├─ practice.py            # targets, accuracy metrics
 │  │  ├─ stats.py               # session + cross-session aggregates
-│  │  └─ aggregate.py           # session selection (SessionFilter) → one StatsData (M7a)
+│  │  ├─ aggregate.py           # session selection (SessionFilter) → one StatsData (M7a)
+│  │  └─ serve_stats.py         # serve contact bins, grid, findings, regression (M7b)
 │  ├─ scoring/
 │  │  ├─ formats.py             # MatchFormat config + presets
 │  │  └─ engine.py              # pure score state machine (server, ends, tiebreaks)
@@ -296,15 +298,15 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 12 | `ball_3d` | – | 1 | ✅ 3D fit of every flight between events (hit/bounce → bounce/net/hit): speeds, net clearance, apex, landing, spin sign, uncertainties; contact chained from the incoming flight; rejects hits not at the hitter → `ball/flights.parquet` |
 | 13 | `pass2_pose` | ✓ | 1 | ✅ 2D pose on 4K crops at full fps from 1.8 s before to 1.2 s after each of the player's hits and strong impact sounds (unseen contacts); sparse pose elsewhere not yet (nothing uses it) |
 | 14 | `pose3d` | ✓ | 1 | ✅ MotionBERT lifting, height scaling, court placement (rays + ground + tracked feet), joints snapped to their 2D rays |
-| 15 | `swings` | – | 1 | ✅ racket hand from the pose, swings at hits / speed peaks / impact sounds, contact from the pose, phases, kinematics, stroke (rules; learned model when validated), user corrections |
-| 15a | `serve_feet` | ✓ (light) | 1b | M7b: pose with toe keypoints (2D big toe, small toe, heel; 3D foot) on the server's crops around each serve's contact only (≈30 crops per serve) → `pose/serve_feet.parquet` |
-| 15b | `serve_contact` | – | 1b | M7b: contact frame (the last frame on the toss path) and the ball's 3D position there, the front toe in that frame, offsets in the hitter's frame with σ and flags → `pose/serve_contact.parquet`; reruns in-app after a toe or contact-frame edit |
+| 15 | `swings` | – | 1 | ✅ racket hand from the pose, swings at hits / speed peaks / impact sounds, contact from the pose, phases, kinematics, stroke (rules; learned model when validated), user corrections. ✅ M7b (v2): a serve's contact is its contact frame from the toss path (§7.11), toss fits kept in `swings.json` |
+| 15a | `serve_feet` | ✓ (light) | 1b | ✅ M7b: foot keypoints (ankle, big toe, small toe, heel × 2; RTMW-l) on the server's crops from 1.1 s before to 0.1 s after each serve's contact (≈75 crops per serve) → `pose/serve_feet.parquet`; keeps frames it already has, so a moved contact frame decodes only new ones |
+| 15b | `serve_contact` | – | 1b | ✅ M7b: the contact point (toss path in the contact frame, from `swings`), the front toe in that frame, offsets in the hitter's frame with σ and flags → `pose/serve_contact.parquet`; reruns in-app after a toe or contact-frame edit |
 | 15c | `speed_refs` | – | 1b | M7c: near-end serves that hit the net tape: both impact sounds, sound-delay-compensated flight time, contact → tape distance, reference vs fitted speed → `ball/speed_refs.parquet`. Accepted references feed the device's speed calibration in the library |
 | 16 | `shots` | – | 1 | ✅ join events + ball_3d + swings → `shots.parquet` (M4: events + ball_3d, line calls; M6: stroke, `is_serve`, `swing_id`). Runs after `swings`. M7c: applies the device's speed calibration (its version is in the config hash, so a new calibration reruns `shots` → `practice_eval` → `stats` only) |
 | 17 | `segments` | – | 1 (practice) / 2 (match) | ✅ Practice (M5): one segment per shot (seen hits, unseen contacts from landing + impact sound, toss + sound), feeds, serve/groundstroke, deuce/ad, blocks. Match: points (+ warm-up) |
 | 18 | `outcomes` + `scoring` | – | 2 | match only: point winner, reason, confidence, score log |
 | 19 | `practice_eval` | – | 1 | ✅ practice only: line calls (service box for serves), per-shot target hit/miss, distance, depth/width error, with the user's edits; rerun in-app after target/shot edits |
-| 20 | `stats` | – | 1 (session) / 2 (match stats) | ✅ session aggregates → `stats.json` (M7: shots and calls by stroke, speeds, depth, swings, movement); rerun in-app after edits. ✅ M7a: also writes `stats_records.parquet` (per-shot and per-swing records and one movement record, with session columns) for multi-session statistics. M7b: serve contact records (`serve_contact` joined with speed and the serve's call) |
+| 20 | `stats` | – | 1 (session) / 2 (match stats) | ✅ session aggregates → `stats.json` (M7: shots and calls by stroke, speeds, depth, swings, movement); rerun in-app after edits. ✅ M7a: also writes `stats_records.parquet` (per-shot and per-swing records and one movement record, with session columns) for multi-session statistics. ✅ M7b: serve contact records (`serve_contact` joined with speed and the serve's call) |
 
 **Calibration gating**: stages 4–5 run automatically. `court_auto` runs right after `ingest`, so the calibration can be reviewed while the proxy encodes. Unless the auto calibration passes the Settings threshold ("continue without review when line RMS < X px", off by default), `camera` stops the job with status `needs_action`; Jobs and the session page link to the Calibrate page, and confirming there re-queues the job. Stage 6 doesn't depend on calibration except for the court-ROI crop. The `camera` stage's fingerprint covers only the chosen camera, so re-confirming an unchanged calibration invalidates nothing; if the user later adjusts calibration, stages 7+ rerun on CPU in minutes. (The runner re-plans each stage just before running it, so a stage's config may read files that upstream stages or the user wrote.)
 
@@ -517,7 +519,9 @@ Speeds are calibrated against net-tape serves from M7c on (§7.12).
 
 ✅ Built in M5: landings in the hitter's frame (`rel_x/rel_y`), serves called against the diagonal service box, other shots against the singles court, close calls within 2σ; targets with a stroke filter (every stroke since M6, from the shot's swing); user edits (exclude, confirm, place landing) applied by `practice_eval`. Every target hit/miss on both sessions agrees with the target outline projected into the image (`scripts/m5_check_targets.py`).
 
-### 7.11 Serve contact point (M7b)
+### 7.11 Serve contact point (M7b) ✅
+
+Built 2026-10-10; details and measurements in `docs/m7b-serve-contact.md`, the model choice in `docs/spikes/m7b-toe-pose.md`. Differences: the toe comes from RTMW-l (2D whole-body, ONNX Runtime) with two measured offsets (the keypoint sits 2 cm above the sole, the shoe's tip is 2.8 cm ahead of it); no 3D foot model measured the toe's height well enough, so the on-ground test is 2D only (the toe's ground point stays within 3 cm over the 6 frames before the contact) and a lifted toe gets a ±5 cm height σ instead of a height; the release is where the toss's upward image speed peaks, not the tossing wrist; the contact frame is computed in `swings` (v2), so the swing's contact and everything downstream use it; contacts above the picture are also recognized from the player's usual contact height when no toss is seen; the toss's depth (≈ the forward axis) rests on gravity alone: a few cm per serve, plus ≈4 cm per 0.5% of camera-scale or clock error, shared by all serves; the Stats page states one finding per axis (the clearest bin); on the Swings page the contact numbers have their own panel and the toe is placed by a click on the contact frame's foot picture (not dragged); the profile's shoe length is library v5 (M7c's tables move to v6).
 
 Goal: for every serve, find where the ball was struck in 3D relative to the toe tip of the front foot **in the contact frame**. The front foot is the one opposite the racket hand: the right foot's toes for the left-handed user. Then show how serve speed and serve-in % change with that contact point. The front foot comes from the swing's `racket_hand` (pose-based, checked against the profile's handedness).
 
@@ -598,7 +602,7 @@ Today every speed carries a ±3% uncalibrated scale error (`SPEED_SCALE_ERROR`, 
 
 ### 7.13 Multi-session statistics (M7a) ✅
 
-Built as planned (2026-10-10); details and measurements in `docs/m7a-multi-session.md`. Differences: tags are read from the library when a selection is made (retagging needs no reprocessing), so the records file doesn't store them; the library also keeps `sessions.profile_id`; movement is a per-session record of sums and counts that pool exactly; the *calibrated speeds* option and the device column wait for M7c, serve-contact records for M7b; rolling accuracy stays on the Practice page, and the trend chart covers accuracy across sessions.
+Built as planned (2026-10-10); details and measurements in `docs/m7a-multi-session.md`. Differences: tags are read from the library when a selection is made (retagging needs no reprocessing), so the records file doesn't store them; the library also keeps `sessions.profile_id`; movement is a per-session record of sums and counts that pool exactly; the *calibrated speeds* option and the device column wait for M7c, serve-contact records came with M7b; rolling accuracy stays on the Practice page, and the trend chart covers accuracy across sessions.
 
 A generic way to compute **the same statistics the app already shows for one session** over any selection of sessions. The serve analysis (§7.11) is its first big user, but it covers every stat. The cross-session part of M11 becomes a view of it.
 
@@ -652,13 +656,13 @@ key outputs, fit RMS and flags.
 
 `movement.parquet`: `frame, t_s, player, x, y, vx, vy, speed, sigma_m, source (bbox|interp; pose from M6), run, bx0..by1`.
 
-`pose/serve_contact.parquet` (M7b, schema `SERVE_CONTACT`): `swing_id, shot_id, t_contact, t_contact_video, side, serve_side (deuce|ad), racket_hand, front_foot (left|right), frame_contact, toe_x, toe_y, toe_z, toe_sigma_m, toe_source (toe|heel_length|edit), toe_on_ground, toe_moved_m, toe_to_baseline_m, contact_x, contact_y, contact_z, contact_cov (list<float32>[9]), contact_source (toss_path|inferred|edit), forward_m, lateral_m, height_m, height_rel, forward/lateral/height_sigma_m, flags`. Also `pose/serve_feet.parquet`: 2D and 3D foot keypoints (big toe, small toe, heel × 2) per frame around each serve's contact.
+`pose/serve_contact.parquet` (✅ M7b, schema `SERVE_CONTACT`): `swing_id, shot_id, t_contact, frame_contact, contact_source (toss_path|inferred|edit), side, serve_side (deuce|ad), racket_hand, front_foot (left|right), toe_x, toe_y, toe_z, toe_sigma_m, toe_source (toe|heel_length|edit), toe_on_ground, toe_moved_m, toe_to_baseline_m, toe_px_x/y, contact_x, contact_y, contact_z, contact_cov (list<float32>[9], NaN without a contact), ball_px_x/y, forward_m, lateral_m, height_m, height_rel, forward/lateral/height_sigma_m, t_release, toss_points, toss_rms_px, flags` (the contact time is on the video clock; the audio clock waits for M7c). Also `pose/serve_feet.parquet` (schema `SERVE_FEET`): 2D foot keypoints (ankle, big toe, small toe, heel × 2) with scores per frame around each serve's contact.
 
-`stats_records.parquet` (✅ M7a, schema `STATS_RECORDS`): the per-session stats records after edits, one row per shot (with practice results; excluded shots flagged), per swing, and one movement row (frame, sample and time sums, distance, best speed, the folded heatmap, distance per 5 min), with `session_id, recorded_on, mode, practice_type, profile_id, device_key (M7c), calibration_by, speeds_calibrated (M7c)` and `kind`; serve contacts join with M7b. Read across sessions with `pyarrow.dataset`; tags come from the library.
+`stats_records.parquet` (✅ M7a, schema `STATS_RECORDS`): the per-session stats records after edits, one row per shot (with practice results; excluded shots flagged), per swing, and one movement row (frame, sample and time sums, distance, best speed, the folded heatmap, distance per 5 min), with `session_id, recorded_on, mode, practice_type, profile_id, device_key (M7c), calibration_by, speeds_calibrated (M7c)` and `kind`; ✅ M7b (records v2): one `serve` row per serve contact (offsets, σ, flags, joined with the serve's speed, call and exclusion). Read across sessions with `pyarrow.dataset`; tags come from the library.
 
 `ball/speed_refs.parquet` (M7c, schema `SPEED_REFS`): `ref_id, shot_id, swing_id, flight_id, t_racket_audio, t_tape_audio, snr_racket_db, snr_tape_db, contact_x/y/z, tape_x, tape_z, d_contact_m, d_tape_m, sound_speed_mps, dt_s, dt_sigma_s, path_m, path_sigma_m, v_ref_kmh, v_fit_kmh, ratio, ratio_sigma, img_vy, status (candidate|accepted|rejected), flags`.
 
-`library.sqlite` (✅ M7a, library v4: `session_tags`, `saved_views`, `sessions.recorded_on`, `sessions.profile_id`, backfilled from `session.json`; M7c, library v5, adds `devices (device_key, make, model, width, height, fps, label)`, `speed_calibrations (id, device_key, version, model (scalar|rolling_shutter), k, k_sigma, tau_s, n_refs, refs_json, created_at, active)`, `sessions.device_key`, `sessions.air_temp_c`).
+`library.sqlite` (✅ M7a, library v4: `session_tags`, `saved_views`, `sessions.recorded_on`, `sessions.profile_id`, backfilled from `session.json`; ✅ M7b, library v5: `profiles.shoe_length_m`; M7c, library v6, adds `devices (device_key, make, model, width, height, fps, label)`, `speed_calibrations (id, device_key, version, model (scalar|rolling_shutter), k, k_sigma, tau_s, n_refs, refs_json, created_at, active)`, `sessions.device_key`, `sessions.air_temp_c`).
 
 ---
 
@@ -700,9 +704,9 @@ Phase 2 adds: the match path in New session, appearance enrollment in Profiles, 
 
 Phase 1b adds (§7.11–§7.13):
 
-* **Stats**: a scope switch (this session / a selection of sessions by date range, practice/match, type, tags, …) for every section, with trends over sessions and saved views (M7a). A "Serve contact" section: top-down and side maps around the toe, speed and in % by contact bin, a forward × lateral grid, and a summary (M7b).
-* **Library**: session tags; open the selected sessions in Stats.
-* **Swings**: serve contact metrics; the contact frame (and the frames on either side) with the toe and contact-ball overlays; drag the toe or step the contact frame to correct them.
+* **Stats**: a scope switch (this session / a selection of sessions by date range, practice/match, type, tags, …) for every section, with trends over sessions and saved views (✅ M7a). A "Serve contact" section: top-down and side maps around the toe, speed and in % by contact bin, a forward × lateral grid, and a summary (✅ M7b).
+* **Library**: session tags; open the selected sessions in Stats (✅ M7a).
+* **Swings**: serve contact metrics; the contact frame (and the frames on either side) with the toe and contact-ball overlays; click to place the toe or step the contact frame to correct them (✅ M7b).
 * **Calibrate**: a Speed tab to review net-tape reference serves (clip, tape frame, waveforms with onsets, numbers, accept/reject).
 * **Settings**: a Speed calibration card (devices, factor ± σ, references, leave-one-out spread, diagnostics) and the default air temperature. The session page shows the air temperature and the device.
 
@@ -844,25 +848,23 @@ M7a comes first: the serve analysis needs more serves than one session holds. M7
   * With 50 synthetic sessions, the Stats page renders a selection in < 2 s (cached < 0.5 s): **0.67 s** (cached **0.33 s**) for 7,500 shots and 15,000 swings.
   * Both real sessions together on the Stats page; the CSV export matches the page: **2 sessions, 237 shots, 213 serves**; the export's row count, in % (35.8%) and speed median (138.2 km/h) equal the page's, also with the page filtered.
 
-#### M7b — Serve contact point
-* **Spike first**: a pose model with toe keypoints, on ≈40 near serves from both sessions with hand-labeled toe tips and contact frames.
-  * Candidates: 2D whole-body (RTMW via `rtmlib`, ViTPose-H whole-body ported), and for 3D an H3WB-trained whole-body lifter, an SMPL-X regressor (SMPLer-X, Multi-HMR), or MotionBERT plus a fitted foot.
-  * Compare toe error on the ground, toe-height error (on-ground test), speed, install footprint (ONNX Runtime GPU vs torch cu128) and license.
-  * Results in `docs/spikes/`. Pin the chosen weights in the registry.
-* Stages `serve_feet` (GPU) and `serve_contact` (contact frame from the toss path, contact point, toe in that frame, offsets, σ, flags); schemas `SERVE_CONTACT` and `SERVE_FEET`; serves' `swings.t_contact` from the contact frame; optional shoe length on the profile.
-* Stats page "Serve contact" section (any session selection, M7a); Swings page metrics and contact-frame overlays; toe and contact-frame edits; shots-export columns; `sv serves contact|eval`.
-* Ground truth in `training/serve_contact/<id>.json`: the contact frame (the last frame before the ball moves toward the net), the toe-tip pixel in that frame, and the ball pixel.
-* Exit criteria:
-  * Synthetic serves with a known toe and contact: offsets within 2 cm; contact frame exact.
-  * Contact frame vs the hand-labeled one: exact on ≥ 80%, within ±1 frame on ≥ 95% of near serves.
-  * Toe in the contact frame vs the hand-labeled toe tip (projected to the ground) on near serves: median ≤ 3 cm, 90% ≤ 6 cm. The on-ground test agrees with the labeler on ≥ 95%.
-  * Contact point: the reprojected ball is within 4 px (median, 4K) of the hand-labeled ball in the contact frame. Median forward σ ≤ 8 cm.
-  * Coverage: ≥ 85% of Oct 1's near-end serves with the contact in frame get offsets. Oct 4's above-the-frame serves are flagged `contact_above_frame`.
-  * The Stats page shows the maps and effect charts for both sessions together.
+#### M7b — Serve contact point ✅ (done 2026-10-10)
+* Spike (`docs/spikes/m7b-toe-pose.md`, `scripts/spikes/toe_pose_bench.py`): four whole-body pose models on 44 hand-labeled toe tips of near serves from both sessions. **RTMW-l** (ONNX Runtime, Apache-2.0, pinned in the registry) has the smallest spread; its toe keypoint sits 2 cm above the sole and 2.8 cm short of the shoe's tip (offsets fitted on Oct 1 hold on Oct 4). Neither 3D option (MotionBERT's ankle plus a fitted foot, RTMW3D's relative depth) measured the toe's height reliably: the on-ground test is 2D.
+* Stages `serve_feet` (GPU; keeps the frames it has, so a moved contact frame updates in the app) and `serve_contact`; `swings` v2 moves serves' contacts to the contact frame from the toss path (release at the peak upward image speed, toss grown frame by frame, the first detection leaving it ends the toss); schemas `SERVE_CONTACT`, `SERVE_FEET`; stats records v2 with serve rows; library v5 (profile shoe length); `analysis/serve_stats.py`.
+* Stats page "Serve contact" section (any selection), Swings page contact numbers, contact-frame crops with the toss path, contact ball and toe, corrections (step the frame, click the toe, reset; `edits.json` `serves`), `serve_*` columns in the shots export, a serve-contacts selection export, `sv serves contact|eval`.
+* Ground truth `training/serve_contact/<id>.json`: 56 contact frames (Oct 1), 44 toe tips (34 Oct 1, 10 Oct 4), 16 ball centers.
+* ✅ Exit criteria (details in `docs/m7b-serve-contact.md`):
+  * Synthetic serves with a known toe and contact: **noise-free: contact frame exact, offsets within 2 cm**. With 1 px detection noise the contact frame is exact for contacts up to 70% of the frame interval (±1 later), and the forward offset (along the camera's line of sight, from the toss's gravity alone) is off by 2.3 cm median, 4.8 cm at most, within its σ.
+  * Contact frame vs the hand-labeled one: **89.3% exact, 100% within ±1** (56 near serves).
+  * Toe vs the hand-labeled tip: **median 2.2 cm, 90% at 5.6 cm**; on-ground test agrees on **95.5%** (all labeled front toes are down).
+  * Contact point reprojected **2.9 px** (median) from the labeled ball; median forward σ **7.5 cm**.
+  * Coverage: **93.4%** (57/61) of Oct 1's near serves get offsets; **all 46** of Oct 4's near serves are flagged `contact_above_frame`.
+  * The Stats page shows the maps and effect charts for both sessions together (40 serves, Oct 4's contacts being above the picture).
+  * **Open items**: more serves and labels (the grid needs a few hundred serves); a serve-type tag; a real lifted-toe example; the absolute forward offset shares the camera scale / clock error until M7c measures it.
 
 #### M7c — Speed calibration from net-tape serves
 * **Spike first**: look for near-end serves that hit the tape in the existing footage (probably few). Measure the tape sound's SNR and how repeatable its onset is. If there are too few, record a calibration session: 30–40 serves aimed at the tape from the camera's end, from both courts.
-* Stage `speed_refs` (schema `SPEED_REFS`); library v5 (devices, speed calibrations, `sessions.device_key`, `sessions.air_temp_c`); `probe` reads the device tags; air temperature in New session and on the session page; the calibration applied in `shots`.
+* Stage `speed_refs` (schema `SPEED_REFS`); library v6 (devices, speed calibrations, `sessions.device_key`, `sessions.air_temp_c`); `probe` reads the device tags; air temperature in New session and on the session page; the calibration applied in `shots`.
 * UI: the Calibrate page Speed tab, the Settings card, and the calibrated/uncalibrated badges. CLI: `sv speed refs|calibrate|show`.
 * Exit criteria:
   * Synthetic: a serve rendered with a known clock error (+2%) and rolling shutter (15 ms readout), with audio clicks synthesized at the right sound delays. Δt is recovered within 0.5 ms and the factor within 0.3%.

@@ -4,7 +4,8 @@ A personal, local-first tennis video analysis tool. Point a fixed camera at the 
 a practice or a match, and let your NVIDIA GPU break the footage down. The roadmap and
 architecture are in [PLAN.md](PLAN.md).
 
-**Status: v0.1, the practice-mode MVP (milestones M0–M7).** The app ingests footage, builds a
+**Status: v0.1, the practice-mode MVP (milestones M0–M7), plus multi-session statistics (M7a)
+and the serve contact point (M7b).** The app ingests footage, builds a
 browser-playable proxy, detects audio onsets, finds the court and fits a full camera model
 (sub-pixel on real footage), checks whether the camera moved during the recording, and lets
 you review the calibration. It tracks you on the court (also at dusk) and reports your
@@ -17,7 +18,9 @@ targets you draw on the court. Every swing gets a 2D and 3D pose, its phases (pr
 forward swing, follow-through), body kinematics and a stroke type. A Stats page sums up a
 session, or any selection of sessions (by date, practice type, tags, ...), with trends over
 time (speeds by stroke, landing heatmaps, depth, movement) and exports the shots as CSV or
-Parquet. A 2-hour session processes unattended overnight. Match scoring arrives in M8–M10.
+Parquet. For serves from the camera's end it measures where you struck the ball relative to
+your front toe, in the frame of contact, and how that relates to serve speed and serve-in %.
+A 2-hour session processes unattended overnight. Match scoring arrives in M8–M10.
 
 ## Requirements
 
@@ -32,8 +35,9 @@ Parquet. A 2-hour session processes unattended overnight. Match scoring arrives 
 uv sync --extra nvdec
 ```
 
-This installs Python 3.12, PyTorch with CUDA 12.8, and the rest of the dependencies into
-`.venv`.
+This installs Python 3.12, PyTorch with CUDA 12.8, ONNX Runtime (CUDA 12, for the foot
+keypoints of the serve analysis), and the rest of the dependencies into `.venv`. Model weights
+download on first use.
 
 ## Run
 
@@ -236,6 +240,50 @@ the network is unsure of (a player mostly out of the picture). Depth along the c
 pose, especially for the far player: compare swings with your own rather than with absolute
 norms. Details in [docs/m6-swings.md](docs/m6-swings.md).
 
+### Serve contact point
+
+For every serve from the camera's end, the app finds where the ball was struck relative to the
+toe tip of your front foot (the foot opposite your racket hand), **in the frame of contact**:
+
+* **The contact frame** is the last frame in which the ball is still on its toss path. The
+  toss is fitted in 3D from the moment it leaves your hand; the first frame where the ball has
+  left that path (the racket takes it from about 1 m/s to 50 m/s in a frame) comes right after
+  the contact. When the racket hides the ball, the serve's first frames are traced back to the
+  toss. The contact point is the ball's position on the toss path in that frame, and a serve's
+  contact time, phases and metrics all use it.
+* **The toe** comes from a second pose network that knows the feet (RTMW, run only on the
+  frames around each serve, seconds per session): the front toe's tip in the contact frame,
+  on the ground when it stayed put before the contact. When the shoe hides the toe, it's
+  placed from the heel and your foot length (set a shoe length on your profile, or it's 15% of
+  your height).
+* **The offsets**: in front of the toe (toward the net), to your racket-arm side, and the
+  contact height, each with its uncertainty. The forward one runs along the camera's line of
+  sight, where one camera knows least: ± about 7 cm per serve.
+
+The **Stats** page's *Serve contact* section shows them for a session or any selection of
+sessions: a map from above around your toe (one dot per serve, coloured by speed, hollow for
+faults; click to watch it), a side view, speed and in % by where you hit it (bins of at least
+15 serves, with 95% intervals), a grid of 10 cm cells once there are enough serves, and a
+plain sentence when a zone really stands out (for instance *"Contacts 20–40 cm in front of
+the toe: +6 km/h and +12 points of in % vs. the rest"*), with a regression in the details.
+Filter by deuce or ad; serves from the far end, in the dark or with the contact above the
+picture are hidden unless you switch them on. Serve type (flat, slice, kick) isn't detected
+yet and changes both the toss and the result: compare like with like.
+
+On the **Swings** page a serve also shows its contact numbers and the contact frame with the
+frames on either side, cut around the ball (with the toss path and the contact point drawn
+in) and around your front foot (with the toe). If the contact frame is off, step it with
+*Earlier* / *Later*; if the toe is wrong, click the toe tip in the middle picture; *Reset*
+undoes both. The session updates in a few seconds, and your corrections count as ground truth
+for `uv run sv serves eval`.
+
+Accuracy on the user's footage: the contact frame matches the one picked by eye on 89% of 56
+serves (100% within a frame), the toe is 2.2 cm from the hand-labeled tip (median; 90% within
+5.6 cm), and the contact point lands 2.9 px from the ball in the picture. Oct 4's serves, hit
+above the top of the picture, are flagged and left out. Recording tip: keep your toss and
+contact inside the picture (see the recording guide). Details in
+[docs/m7b-serve-contact.md](docs/m7b-serve-contact.md).
+
 ### Stats and export
 
 The **Stats** page (button on the session, Practice and Swings pages; *Stats* in the Library
@@ -252,14 +300,16 @@ row menu) sums up one session:
 * **Strokes**: calls, speed, depth (short of the service line for serves, of the baseline
   for the rest), share of deep groundstrokes, swing count and wrist speed per stroke.
 * **Movement**: where you spent your time and the distance you covered every 5 minutes.
+* **Serve contact**: where you struck your serves relative to your front toe, and what that did
+  to speed and in % (see above).
 
 Filter by stroke and end. In practice sessions the numbers use your corrections from the
 Practice page (shots marked *not a practice shot* are left out unless you include them).
 Click a shot (a speed dot or a landing) to watch it: its session opens a second before it.
 
 **Export** (top right) downloads the session's shots (every shot record with its practice
-result: call after your corrections, target, excluded), practice shots or swings, as CSV or
-Parquet (Parquet keeps the units). `uv run sv export <session-id> --format parquet` does the
+result: call after your corrections, target, excluded; serves also with their contact point
+vs the toe), practice shots or swings, as CSV or Parquet (Parquet keeps the units). `uv run sv export <session-id> --format parquet` does the
 same from the command line.
 
 **Many sessions.** *Stats* in the navigation (or *Sessions…* at the top of a session's Stats
@@ -278,8 +328,8 @@ when only the statistics are stale, otherwise as a job).
 * The filters are in the address bar, so a view can be bookmarked; *Save view* keeps it in
   the library under a name.
 * **Tags**: *Tags…* in a session's Library menu (e.g. “new racket”, “indoor”).
-* **Export** downloads the shots (or swings) shown, with each session's name, date, type and
-  tags.
+* **Export** downloads the shots (or swings, or serve contacts) shown, with each session's
+  name, date, type and tags.
 
 From the command line, `uv run sv stats --from 2026-10-01 --to 2026-10-31 --type serve
 --tag "new racket"` prints the same numbers (`--trend in_pct` adds them per session, `--out
@@ -288,9 +338,10 @@ shots.csv` exports), and `uv run sv tags <session-id> indoor clay` sets a sessio
 ### Profiles
 
 Create a profile for yourself on **Profiles** (name, handedness, one- or two-handed
-backhand, height) and pick it when creating a session (or on the session page). Height
-places you correctly when your feet are out of frame and scales the 3D swing analysis;
-handedness is the fallback when the footage doesn't show which hand holds the racket.
+backhand, height, optionally your shoe length) and pick it when creating a session (or on the
+session page). Height places you correctly when your feet are out of frame and scales the 3D
+swing analysis; handedness is the fallback when the footage doesn't show which hand holds the
+racket; the shoe length places your toe on serves where the shoe hides it.
 
 ## When something goes wrong
 
@@ -345,6 +396,8 @@ uv run python scripts/m5_check_targets.py <session-id> --sets builtin  # target 
 uv run sv swings show <session-id>     # strokes, phases, wrist speed (--all: also non-strokes)
 uv run sv swings eval                  # strokes, contact timing, phase spread vs labels (M6)
 uv run sv train strokes my-strokes     # learned stroke classifier from labels + corrections
+uv run sv serves contact <session-id>  # serve contact points vs the front toe (--all: flagged too)
+uv run sv serves eval                  # contact frames, toes, contact points vs labels (M7b)
 uv run sv export <session-id> --what shots --format csv   # shots | practice | swings, csv | parquet
 uv run sv stats --from 2026-10-01 --type serve --tag indoor --trend in_pct  # many sessions
 uv run sv tags <session-id> "new racket" indoor   # set a session's tags (--clear removes them)
@@ -366,6 +419,9 @@ How you record matters more than any setting in the app. In order of importance:
   picture), and **some sky above the far baseline**: a serve's toss and contact that leave
   the top of the frame get no speed and are found only from the landing and the sound.
 * Keep yourself in the picture head to toe at both ends: swing analysis needs to see you.
+* **Serve analysis**: serve from the camera's end, and leave room above you so the toss and
+  the contact stay inside the picture (about 3.5 m above the near baseline): a contact above
+  the top edge gets no contact point.
 * Make it rigid. A phone on a pole that sags or sways is handled (the drift check calibrates
   the minutes where it moved separately), but a steady camera is better.
 
@@ -416,9 +472,11 @@ src/swingvision/
   ball/              ball detectors, frame-rate schedules, linking, events (M3),
                      3D flight physics and fitting (M4)
   analysis/          shot records (M4); practice segmentation, targets, accuracy (M5);
-                     session statistics and exports (M7); multi-session selections (M7a)
-  pose/              2D pose, 3D lifting and placement, kinematics, swings, strokes (M6)
-  training/          labels, labeling helpers, training, benchmark, evaluation (M3, M6)
+                     session statistics and exports (M7); multi-session selections (M7a);
+                     serve contact statistics (M7b)
+  pose/              2D pose, 3D lifting and placement, kinematics, swings, strokes (M6);
+                     foot keypoints, toss path, serve contact point (M7b)
+  training/          labels, labeling helpers, training, benchmark, evaluation (M3, M6, M7b)
   models/            pretrained weights registry (URLs, SHA-256, licenses)
   pipeline/          stage framework, DAG runner, worker process, stages/
   app/               Dash + Mantine UI (pages/, components/, assets/)
