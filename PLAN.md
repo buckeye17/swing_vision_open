@@ -54,7 +54,7 @@ A personal, local-first tennis video analysis tool. It ingests full-court footag
 |---|---|
 | ✅ Multi-session statistics: the same stats over any selection of sessions (date range, practice/match, type, tags) | §7.13, M7a (done 2026-10-10). Brings the cross-session part of M11 forward |
 | ✅ Serve contact point vs the front foot's toe in the contact frame (forward, lateral, height), with speed and in % by contact point | §7.11, M7b (done 2026-10-10). Toe keypoints from RTMW-l (2D whole-body) around each serve's contact |
-| Speed calibration from net-tape serves | §7.12, M7c. Replaces the ±3% uncalibrated speed error with a measured one |
+| Speed calibration from net-tape serves | §7.12, M7c (built 2026-10-10; the real-data criterion waits for a calibration session: the footage has 2 tape hits). Replaces the ±3% uncalibrated speed error with a measured one |
 
 ### Phase 2 — Match mode (human hitting partner)
 
@@ -180,7 +180,7 @@ swing_vision_open/
 │  │  ├─ trajectory.py          # outlier rejection, gap fill, sub-tracks
 │  │  ├─ events.py              # hit / bounce / net candidates + classifiers + audio
 │  │  ├─ physics.py             # 3D flight fit (drag + optional Magnus) → speed etc.
-│  │  └─ speed_refs.py          # net-tape reference serves, per-device speed calibration (M7c)
+│  │  └─ speed_refs.py          # ✅ net-tape reference serves, per-device speed calibration (M7c)
 │  ├─ pose/
 │  │  ├─ pose2d.py  lift3d.py   # ViTPose crops, MotionBERT lifting, world placement
 │  │  ├─ kinematics.py          # joint angles, segment rotations, angular velocities
@@ -301,8 +301,8 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 15 | `swings` | – | 1 | ✅ racket hand from the pose, swings at hits / speed peaks / impact sounds, contact from the pose, phases, kinematics, stroke (rules; learned model when validated), user corrections. ✅ M7b (v2): a serve's contact is its contact frame from the toss path (§7.11), toss fits kept in `swings.json` |
 | 15a | `serve_feet` | ✓ (light) | 1b | ✅ M7b: foot keypoints (ankle, big toe, small toe, heel × 2; RTMW-l) on the server's crops from 1.1 s before to 0.1 s after each serve's contact (≈75 crops per serve) → `pose/serve_feet.parquet`; keeps frames it already has, so a moved contact frame decodes only new ones |
 | 15b | `serve_contact` | – | 1b | ✅ M7b: the contact point (toss path in the contact frame, from `swings`), the front toe in that frame, offsets in the hitter's frame with σ and flags → `pose/serve_contact.parquet`; reruns in-app after a toe or contact-frame edit |
-| 15c | `speed_refs` | – | 1b | M7c: near-end serves that hit the net tape: both impact sounds, sound-delay-compensated flight time, contact → tape distance, reference vs fitted speed → `ball/speed_refs.parquet`. Accepted references feed the device's speed calibration in the library |
-| 16 | `shots` | – | 1 | ✅ join events + ball_3d + swings → `shots.parquet` (M4: events + ball_3d, line calls; M6: stroke, `is_serve`, `swing_id`). Runs after `swings`. M7c: applies the device's speed calibration (its version is in the config hash, so a new calibration reruns `shots` → `practice_eval` → `stats` only) |
+| 15c | `speed_refs` | – | 1b | ✅ M7c: near-end serves that hit the net tape: the session's audio/video offset, both impact sounds, sound-delay-compensated flight time, contact → tape distance, reference vs fitted speed (lets refitted to the break) → `ball/speed_refs.parquet`, `ball/speed_refs.json`; reruns in-app after a review (≈6 s per footage hour). Accepted references feed the device's speed calibration in the library |
+| 16 | `shots` | – | 1 | ✅ join events + ball_3d + swings → `shots.parquet` (M4: events + ball_3d, line calls; M6: stroke, `is_serve`, `swing_id`). Runs after `swings`. ✅ M7c (v3): applies the device's speed calibration (the calibration in use is in the config hash, so a new calibration reruns `shots` → `practice_eval` → `stats` only) |
 | 17 | `segments` | – | 1 (practice) / 2 (match) | ✅ Practice (M5): one segment per shot (seen hits, unseen contacts from landing + impact sound, toss + sound), feeds, serve/groundstroke, deuce/ad, blocks. Match: points (+ warm-up) |
 | 18 | `outcomes` + `scoring` | – | 2 | match only: point winner, reason, confidence, score log |
 | 19 | `practice_eval` | – | 1 | ✅ practice only: line calls (service box for serves), per-shot target hit/miss, distance, depth/width error, with the user's edits; rerun in-app after target/shot edits |
@@ -561,6 +561,8 @@ Goal: for every serve, find where the ball was struck in 3D relative to the toe 
 
 ### 7.12 Speed calibration from net-tape serves (M7c)
 
+Built 2026-10-10; details and measurements in `docs/m7c-speed-calibration.md`, the footage spike in `docs/spikes/m7c-tape-sound.md`. The synthetic criterion is met; the real one needs a calibration session (the 3.5 h of footage hold two tape hits, both lets). Differences: the phone's audio runs ≈100 ms behind its video, so each session's offset is measured from its serves' racket cracks before the sounds are searched (racket ±20 ms, tape ±25 ms); the onset rule is a causal high-pass, a rectified 0.25 ms mean and the rising edge through k and 2k × the floor extrapolated to the floor (a zero-phase filter rang ahead of a crack; a plain threshold fires later on a quieter tick); a let is refitted like a net serve up to the break (a change point in the image track) because `ball_3d`'s fit through the break is bent; each onset is ±1 ms (measured), not ±0.3 ms, so a reference is good to ≈2%; a readout time is applied per flight in `shots` (first order) instead of inside the `ball_3d` fits; a calibration no tighter than the 3% bound isn't applied; feed speeds take the session's factor; the device key includes the lens, and a video without a model tag gets no device.
+
 Today every speed carries a ±3% uncalibrated scale error (`SPEED_SCALE_ERROR`, M4), and the radar comparison is still open. A serve from the camera's end that hits the net tape gives a reference speed that doesn't depend on the video clock, ball-detection timing, rolling shutter, or the fit's contact prior.
 
 * **Time from sound.** The racket impact and the tape impact are both sharp sounds on the same audio clock, so the audio/video offset cancels out.
@@ -602,14 +604,14 @@ Today every speed carries a ±3% uncalibrated scale error (`SPEED_SCALE_ERROR`, 
 
 ### 7.13 Multi-session statistics (M7a) ✅
 
-Built as planned (2026-10-10); details and measurements in `docs/m7a-multi-session.md`. Differences: tags are read from the library when a selection is made (retagging needs no reprocessing), so the records file doesn't store them; the library also keeps `sessions.profile_id`; movement is a per-session record of sums and counts that pool exactly; the *calibrated speeds* option and the device column wait for M7c, serve-contact records came with M7b; rolling accuracy stays on the Practice page, and the trend chart covers accuracy across sessions.
+Built as planned (2026-10-10); details and measurements in `docs/m7a-multi-session.md`. Differences: tags are read from the library when a selection is made (retagging needs no reprocessing), so the records file doesn't store them; the library also keeps `sessions.profile_id`; movement is a per-session record of sums and counts that pool exactly; the *calibrated speeds* option and the device filter came with M7c, serve-contact records with M7b; rolling accuracy stays on the Practice page, and the trend chart covers accuracy across sessions.
 
 A generic way to compute **the same statistics the app already shows for one session** over any selection of sessions. The serve analysis (§7.11) is its first big user, but it covers every stat. The cross-session part of M11 becomes a view of it.
 
 * **Selection** (`analysis/aggregate.py`, `SessionFilter`), resolved against `library.sqlite`:
   * recording date range: the video's `creation_time` from `probe`, falling back to the session's creation date;
   * mode (practice / match) and practice type (self-feed, ball machine, serve). Match sessions show up as soon as Phase 2 creates them, since `sessions.mode` already exists;
-  * profile ("me"), recording device (M7c), and user tags on sessions (new: e.g. "new racket", "indoor");
+  * profile ("me"), recording device (✅ M7c), and user tags on sessions (new: e.g. "new racket", "indoor");
   * explicit include / exclude of sessions;
   * quality options: only sessions with confirmed calibration, only calibrated speeds.
 * **One data path for one or many sessions.**
@@ -637,7 +639,8 @@ flight_id, frame_contact, t_contact, stroke_type, stroke_conf, is_serve, serve_n
 contact_x, contact_y, contact_height, side (-1 near | +1 far), end_kind,
 landing_x, landing_y, landing_sigma_m, landing_source (bounce|fit), landing_in,
 landing_margin_m, landing_zone, speed_racket_kmh, speed_net_kmh, speed_avg_kmh,
-speed_bounce_kmh, speed_sigma_kmh, net_clearance_m, apex_m, spin_sign, flight_time_s,
+speed_bounce_kmh, speed_sigma_kmh, speed_factor, speed_scale_err, speed_calibration (M7c),
+net_clearance_m, apex_m, spin_sign, flight_time_s,
 outcome (in|out_long|out_wide|net|own_side|unknown; winner etc. with match mode),
 swing_id, fit_rms_px, quality_flags
 ```
@@ -658,11 +661,11 @@ key outputs, fit RMS and flags.
 
 `pose/serve_contact.parquet` (✅ M7b, schema `SERVE_CONTACT`): `swing_id, shot_id, t_contact, frame_contact, contact_source (toss_path|inferred|edit), side, serve_side (deuce|ad), racket_hand, front_foot (left|right), toe_x, toe_y, toe_z, toe_sigma_m, toe_source (toe|heel_length|edit), toe_on_ground, toe_moved_m, toe_to_baseline_m, toe_px_x/y, contact_x, contact_y, contact_z, contact_cov (list<float32>[9], NaN without a contact), ball_px_x/y, forward_m, lateral_m, height_m, height_rel, forward/lateral/height_sigma_m, t_release, toss_points, toss_rms_px, flags` (the contact time is on the video clock; the audio clock waits for M7c). Also `pose/serve_feet.parquet` (schema `SERVE_FEET`): 2D foot keypoints (ankle, big toe, small toe, heel × 2) with scores per frame around each serve's contact.
 
-`stats_records.parquet` (✅ M7a, schema `STATS_RECORDS`): the per-session stats records after edits, one row per shot (with practice results; excluded shots flagged), per swing, and one movement row (frame, sample and time sums, distance, best speed, the folded heatmap, distance per 5 min), with `session_id, recorded_on, mode, practice_type, profile_id, device_key (M7c), calibration_by, speeds_calibrated (M7c)` and `kind`; ✅ M7b (records v2): one `serve` row per serve contact (offsets, σ, flags, joined with the serve's speed, call and exclusion). Read across sessions with `pyarrow.dataset`; tags come from the library.
+`stats_records.parquet` (✅ M7a, schema `STATS_RECORDS`): the per-session stats records after edits, one row per shot (with practice results; excluded shots flagged), per swing, and one movement row (frame, sample and time sums, distance, best speed, the folded heatmap, distance per 5 min), with `session_id, recorded_on, mode, practice_type, profile_id, device_key (✅ M7c), calibration_by, speeds_calibrated (✅ M7c)` and `kind`; ✅ M7c (records v3): `speed_scale_err` per shot; ✅ M7b (records v2): one `serve` row per serve contact (offsets, σ, flags, joined with the serve's speed, call and exclusion). Read across sessions with `pyarrow.dataset`; tags come from the library.
 
-`ball/speed_refs.parquet` (M7c, schema `SPEED_REFS`): `ref_id, shot_id, swing_id, flight_id, t_racket_audio, t_tape_audio, snr_racket_db, snr_tape_db, contact_x/y/z, tape_x, tape_z, d_contact_m, d_tape_m, sound_speed_mps, dt_s, dt_sigma_s, path_m, path_sigma_m, v_ref_kmh, v_fit_kmh, ratio, ratio_sigma, img_vy, status (candidate|accepted|rejected), flags`.
+`ball/speed_refs.parquet` (✅ M7c, schema `SPEED_REFS`): `ref_id, shot_id, swing_id, flight_id, t_contact, t_cross, t_racket_audio, t_tape_audio, onsets_by (auto|user), t_racket_pred_audio, t_tape_pred_audio, snr_racket_db, snr_tape_db, contact_x/y/z, tape_x, tape_z, d_contact_m, d_tape_m, sound_speed_mps, dt_s, dt_sigma_s, path_m, path_sigma_m, v_ref_kmh, v_fit_kmh, ratio, ratio_sigma, img_vy, rs_rate, clearance_m, end_kind, av_offset_s, status (candidate|accepted|rejected), source (auto|user), flags`. Reviews in `edits.json` (`speed_refs`) and as ground truth in `training/speed_refs/<id>.json`.
 
-`library.sqlite` (✅ M7a, library v4: `session_tags`, `saved_views`, `sessions.recorded_on`, `sessions.profile_id`, backfilled from `session.json`; ✅ M7b, library v5: `profiles.shoe_length_m`; M7c, library v6, adds `devices (device_key, make, model, width, height, fps, label)`, `speed_calibrations (id, device_key, version, model (scalar|rolling_shutter), k, k_sigma, tau_s, n_refs, refs_json, created_at, active)`, `sessions.device_key`, `sessions.air_temp_c`).
+`library.sqlite` (✅ M7a, library v4: `session_tags`, `saved_views`, `sessions.recorded_on`, `sessions.profile_id`, backfilled from `session.json`; ✅ M7b, library v5: `profiles.shoe_length_m`; ✅ M7c, library v6: `devices (device_key, make, model, lens, width, height, fps, label, created_at)`, `speed_calibrations (id, device_key, version, model (scalar|rolling_shutter), k, k_sigma, tau_s, tau_sigma_s, n_refs, loo_sd, refs_json, diagnostics_json, created_at, active)`, `sessions.device_key`, `sessions.air_temp_c`, backfilled from `session.json`; older sessions get their device from a re-probe at app start).
 
 ---
 
@@ -707,8 +710,8 @@ Phase 1b adds (§7.11–§7.13):
 * **Stats**: a scope switch (this session / a selection of sessions by date range, practice/match, type, tags, …) for every section, with trends over sessions and saved views (✅ M7a). A "Serve contact" section: top-down and side maps around the toe, speed and in % by contact bin, a forward × lateral grid, and a summary (✅ M7b).
 * **Library**: session tags; open the selected sessions in Stats (✅ M7a).
 * **Swings**: serve contact metrics; the contact frame (and the frames on either side) with the toe and contact-ball overlays; click to place the toe or step the contact frame to correct them (✅ M7b).
-* **Calibrate**: a Speed tab to review net-tape reference serves (clip, tape frame, waveforms with onsets, numbers, accept/reject).
-* **Settings**: a Speed calibration card (devices, factor ± σ, references, leave-one-out spread, diagnostics) and the default air temperature. The session page shows the air temperature and the device.
+* **Calibrate**: a Speed tab to review net-tape reference serves (clip, tape frame, waveforms with onsets, numbers, accept/reject) (✅ M7c; also the device's calibration with *Update calibration*, the session's choice of calibration and its air temperature).
+* **Settings**: a Recording devices card (devices, factor ± σ per version, references, leave-one-out spread, diagnostics; rename, merge, active version) (✅ M7c). The air temperature is entered in New session and on the session page (no default in Settings: 20 °C).
 
 ### 9.3 Event/edit plumbing
 
@@ -862,15 +865,16 @@ M7a comes first: the serve analysis needs more serves than one session holds. M7
   * The Stats page shows the maps and effect charts for both sessions together (40 serves, Oct 4's contacts being above the picture).
   * **Open items**: more serves and labels (the grid needs a few hundred serves); a serve-type tag; a real lifted-toe example; the absolute forward offset shares the camera scale / clock error until M7c measures it.
 
-#### M7c — Speed calibration from net-tape serves
-* **Spike first**: look for near-end serves that hit the tape in the existing footage (probably few). Measure the tape sound's SNR and how repeatable its onset is. If there are too few, record a calibration session: 30–40 serves aimed at the tape from the camera's end, from both courts.
-* Stage `speed_refs` (schema `SPEED_REFS`); library v6 (devices, speed calibrations, `sessions.device_key`, `sessions.air_temp_c`); `probe` reads the device tags; air temperature in New session and on the session page; the calibration applied in `shots`.
-* UI: the Calibrate page Speed tab, the Settings card, and the calibrated/uncalibrated badges. CLI: `sv speed refs|calibrate|show`.
-* Exit criteria:
-  * Synthetic: a serve rendered with a known clock error (+2%) and rolling shutter (15 ms readout), with audio clicks synthesized at the right sound delays. Δt is recovered within 0.5 ms and the factor within 0.3%.
-  * Real: ≥ 8 accepted references on one device. Leave-one-out spread ≤ 1.5% (1 SD); factor σ ≤ 1%. No significant trend with speed or image motion, or else step 3 of §7.12 is built and removes it.
-  * The Shots card shows calibrated speeds with the measured uncertainty, and `docs/m4-ball-3d.md` is updated.
+#### M7c — Speed calibration from net-tape serves (built 2026-10-10; the real-data criterion waits for a calibration session)
+* ✅ **Spike** (`docs/spikes/m7c-tape-sound.md`, `scripts/spikes/tape_sound_spike.py`): in 3.5 h of footage (Oct 1, Oct 4, and the 62-minute Oct 6 serve session, new here) **two tape hits**, both lets on Oct 6, ticks of 24 and 42 dB over the floor (the racket crack 37 dB). Onsets repeat to 0.25–0.75 ms (tape) and ≈1.35 ms (racket crack). The phone's audio runs ≈100 ms behind its video; 8 of 48 clear serves have a ≥ 15 dB transient in the tape window, so review is required. **Too few: record a calibration session**: 30–40 serves aimed at the tape from the camera's end, from both courts.
+* ✅ Stage `speed_refs` (schema `SPEED_REFS`, `ball/speed_refs.py`); library v6 (devices, speed calibrations, `sessions.device_key`, `sessions.air_temp_c`); `probe` reads the device tags; air temperature in New session, on the session page and the Speed tab; the calibration applied in `shots` (v3), carried by practice results and stats records (v3); Stats filters by device and calibrated speeds.
+* ✅ UI: the Calibrate page Speed tab, the Settings card (Recording devices), and the calibrated/uncalibrated badges. CLI: `sv speed refs|calibrate|show`.
+* Exit criteria (details in `docs/m7c-speed-calibration.md`):
+  * ✅ Synthetic: a serve rendered with a known clock error (+2%) and rolling shutter (15 ms readout), with audio clicks synthesized at the right sound delays. Δt is recovered within 0.5 ms and the factor within 0.3%: **Δt within 0.43 ms (median 0.10 ms), factor within 0.12%** (5 seeds × 10 serves, net-ending serves and lets; also without the clock error or the readout).
+  * Real: ≥ 8 accepted references on one device. Leave-one-out spread ≤ 1.5% (1 SD); factor σ ≤ 1%. No significant trend with speed or image motion, or else step 3 of §7.12 is built and removes it: **not met yet, 2 references** (ratios 1.034 ± 0.020, 1.012 ± 0.017; left unreviewed for the user). Needs the calibration session. Step 3 (a readout time) is built and is chosen only when the references show the trend.
+  * ✅ The Shots card shows calibrated speeds with the measured uncertainty (*Calibrated · device · ±x%*; checked with a test calibration in a scratch library, `test_calibrated_shots`), and `docs/m4-ball-3d.md` is updated.
   * **Open item stays**: a radar-gun comparison is still the independent check.
+  * **Open items**: record and review the calibration session, then `sv speed calibrate`; the measured audio/video offset (≈100 ms) could also move `events`' sound-based contacts (the M6 open item).
 
 ### Phase 2 — Match mode
 

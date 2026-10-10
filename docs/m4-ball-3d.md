@@ -98,15 +98,24 @@ Its bounce → bounce flights still serve the scale check below.
   spinning ball differs from wind-tunnel values. A 0.46 would mean speeds 20% too high *if*
   C_d were really 0.55, which gravity and the direct distance / time comparison rule out.
 
-### Uncalibrated speed error shown in the app
+### Speed error shown in the app; calibration (M7c)
 
-Until a radar or ball-machine session calibrates the speeds, every speed in the app and in
-`sv shots` is shown as `value ± error`, with error = `SPEED_SCALE_ERROR` (3%, in
-`analysis/shots.py`) × speed + 2 × the shot's fit σ. The 3% bounds what every speed would
+Since M7c, speeds are calibrated per recording device from serves that hit the net tape
+([m7c-speed-calibration.md](m7c-speed-calibration.md)): two impact sounds on one clock and two
+well-calibrated points give a reference speed, and every speed of the device is multiplied by
+the factor fitted from the accepted references. On synthetic serves with a 2% clock error and a
+15 ms rolling shutter the factor comes back within 0.12%; the user's footage so far has two
+such serves (ratios 1.034 and 1.012, i.e. fitted speeds 1–3% low, consistent with the drag
+bias and gravity checks below), too few to calibrate: a calibration session is needed.
+
+Every speed in the app and in `sv shots` is shown as `value ± error`, with error = the bound
+every speed shares (`speed_scale_err`: 2σ of the device's calibration, or uncalibrated
+`SPEED_SCALE_ERROR`, 3%, in `analysis/shots.py`) × speed + 2 × the shot's fit σ. The 3% bounds what every speed would
 share: the gravity checks (+0.6%, +1.5%), the drag model's ≈1% bias in the synthetic tests,
-and rolling shutter (< 1%). Typical results: serves from the camera's end ± 7-15 km/h
-(5-10%), far-end shots more. The Shots card carries an *Uncalibrated speeds* badge and a note
-explaining this; the median and fastest speeds are labeled the same way.
+and rolling shutter (< 1%). Typical uncalibrated results: serves from the camera's
+end ± 7-15 km/h (5-10%), far-end shots more. The Shots card carries an *Uncalibrated · ±3%*
+badge (*Calibrated · device · ±x%* with a calibration) and a note explaining it; the median and
+fastest speeds are labeled the same way.
 
 ## Pipeline
 
@@ -165,10 +174,13 @@ hits rejected.
 
 ## Limitations and follow-ups
 
-* **No radar / ball-machine reference** yet (see above).
-* **Rolling shutter** is not modelled: a phone sensor reads rows over ≈10-20 ms, which shifts
-  a fast ball's apparent time by up to that much between the top and bottom of the frame.
-  For a serve moving a third of the frame height over 0.5 s that's < 1% of its speed.
+* **No radar / ball-machine reference** yet (see above); the net-tape calibration (M7c) is the
+  in-app reference, a radar gun stays the independent check.
+* **Rolling shutter** is not modelled in the fits: a phone sensor reads rows over ≈10-20 ms,
+  which shifts a fast ball's apparent time by up to that much between the top and bottom of
+  the frame. For a serve moving a third of the frame height over 0.5 s that's < 1% of its
+  speed. M7c's calibration measures it (a readout time, only if the references show a trend)
+  and corrects speeds per flight.
 * **Shots ending in the dark** (the Oct 1 session after 23 min) often lose the ball before
   the bounce: their speed comes from a weaker fit, and they are flagged `speed_uncertain`
   above 5% σ (10% for flights with a detected end).

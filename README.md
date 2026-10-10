@@ -4,8 +4,8 @@ A personal, local-first tennis video analysis tool. Point a fixed camera at the 
 a practice or a match, and let your NVIDIA GPU break the footage down. The roadmap and
 architecture are in [PLAN.md](PLAN.md).
 
-**Status: v0.1, the practice-mode MVP (milestones M0–M7), plus multi-session statistics (M7a)
-and the serve contact point (M7b).** The app ingests footage, builds a
+**Status: v0.1, the practice-mode MVP (milestones M0–M7), plus multi-session statistics (M7a),
+the serve contact point (M7b) and speed calibration from serves that hit the net tape (M7c).** The app ingests footage, builds a
 browser-playable proxy, detects audio onsets, finds the court and fits a full camera model
 (sub-pixel on real footage), checks whether the camera moved during the recording, and lets
 you review the calibration. It tracks you on the court (also at dusk) and reports your
@@ -20,6 +20,7 @@ session, or any selection of sessions (by date, practice type, tags, ...), with 
 time (speeds by stroke, landing heatmaps, depth, movement) and exports the shots as CSV or
 Parquet. For serves from the camera's end it measures where you struck the ball relative to
 your front toe, in the frame of contact, and how that relates to serve speed and serve-in %.
+Serves that clip the net tape calibrate your phone's speeds from the racket and tape sounds.
 A 2-hour session processes unattended overnight. Match scoring arrives in M8–M10.
 
 ## Requirements
@@ -156,11 +157,11 @@ numbers and a side view of its flight, *Shot path* draws the fitted flight on th
 court map marks every landing, and the timeline has a row of shot speeds. `uv run sv shots
 <session-id>` prints the same list.
 
-Speeds are **not calibrated** against a radar gun or a ball machine yet, and the app says so:
-every speed is shown as `value ± error`, where the error is 3% (the bound on a shared scale
-error, from the gravity checks below) plus twice the shot's own fit uncertainty, e.g.
-*139 ± 10 km/h* for a serve from the camera's end. The Shots card explains this; `sv shots`
-prints the same note.
+Every speed is shown as `value ± error`: the error every speed shares plus twice the shot's own
+fit uncertainty, e.g. *139 ± 10 km/h* for a serve from the camera's end. Until your phone's
+speeds are calibrated (below) the shared part is 3% (the bound from the gravity checks below)
+and the Shots card says *Uncalibrated · ±3%*; with a calibration it says *Calibrated · your
+phone · ±x%* and speeds carry the correction. `sv shots` prints the same note.
 
 Accuracy: on synthetic flights, speeds come out within 3% for shots from the camera's end
 (within 5% for a far-court hitter); on real footage, flights refitted with gravity left free
@@ -284,6 +285,34 @@ above the top of the picture, are flagged and left out. Recording tip: keep your
 contact inside the picture (see the recording guide). Details in
 [docs/m7b-serve-contact.md](docs/m7b-serve-contact.md).
 
+### Speed calibration
+
+Serves from the camera's end that hit the net tape are speed references: the racket crack and
+the tape tick are on the same (audio) clock, the contact (from the toss) and the tape are in the
+best-calibrated part of the picture, so the time and distance between them give a speed that
+doesn't depend on the video's clock or the 3D fit. The app finds such serves (the ball reaching
+the tape, then dropping into the net or carrying on as a let, with a sharp tick where the ball
+meets the tape), and you review them on the session's **Calibration → Speed** tab: the clip at
+¼ speed, the frames at the tape zoomed in, the waveform around each sound with its onset (drag
+the red line to move it, or nudge it by 0.1 ms) and the numbers. **Accept** a clear tape hit,
+**Reject** a net-mesh hit (a dull sound, the net bellying back) or a sound that isn't the tape;
+*Mark a serve as a tape hit* for one it missed.
+
+Calibrations are kept per phone and recording mode (read from the video file: make, model, lens,
+resolution, frame rate). With 3 or more accepted references, **Update calibration** fits the
+factor every speed of that device is multiplied by, with its uncertainty, and brings the
+device's sessions up to date; at least 8 references are recommended (each is good to ≈2%).
+**Settings → Recording devices** renames devices, merges two that are the same phone, and
+picks the active version; a session can also use no calibration or a particular one (Speed
+tab). Enter the **air temperature** in New session or on the session page if you can: it sets
+the speed of sound (20 °C is assumed; ±10 °C moves speeds by ≈0.2%).
+
+Recording one: a few minutes of serves aimed at the net tape from the camera's end, from both
+courts, in quiet surroundings (other courts' balls and footsteps get in the way). The footage so
+far has just two tape hits in 3.5 hours, both lets, so a dedicated session is the way to get
+there. On synthetic serves (a 2% clock error, a rolling shutter) the factor comes back within
+0.12%. Details in [docs/m7c-speed-calibration.md](docs/m7c-speed-calibration.md).
+
 ### Stats and export
 
 The **Stats** page (button on the session, Practice and Swings pages; *Stats* in the Library
@@ -398,6 +427,9 @@ uv run sv swings eval                  # strokes, contact timing, phase spread v
 uv run sv train strokes my-strokes     # learned stroke classifier from labels + corrections
 uv run sv serves contact <session-id>  # serve contact points vs the front toe (--all: flagged too)
 uv run sv serves eval                  # contact frames, toes, contact points vs labels (M7b)
+uv run sv speed refs <session-id> --temp 18   # net-tape reference serves (--accept/--reject <id>)
+uv run sv speed calibrate --session <session-id>   # fit the session's device's speed calibration
+uv run sv speed show                   # recording devices and their speed calibrations
 uv run sv export <session-id> --what shots --format csv   # shots | practice | swings, csv | parquet
 uv run sv stats --from 2026-10-01 --type serve --tag indoor --trend in_pct  # many sessions
 uv run sv tags <session-id> "new racket" indoor   # set a session's tags (--clear removes them)
@@ -422,6 +454,8 @@ How you record matters more than any setting in the app. In order of importance:
 * **Serve analysis**: serve from the camera's end, and leave room above you so the toss and
   the contact stay inside the picture (about 3.5 m above the near baseline): a contact above
   the top edge gets no contact point.
+* **Speed calibration**: a few minutes of serves aimed at the net tape from the camera's end,
+  in quiet surroundings, and the air temperature noted in the session.
 * Make it rigid. A phone on a pole that sags or sways is handled (the drift check calibrates
   the minutes where it moved separately), but a steady camera is better.
 
