@@ -64,6 +64,34 @@ def register_routes(server: Flask) -> None:
             max_age=0,
         )
 
+    @server.route("/export-selection/<what>.<fmt>")
+    def export_selection(what: str, fmt: str):
+        """A selection of sessions' shot or swing records (M7a). Query: the Stats page's
+        filter (``analysis.aggregate.SessionFilter``) plus ``groups``, ``end`` and
+        ``excluded``, the page's shot filters."""
+        from swingvision.analysis import aggregate as agg
+        from swingvision.analysis import export as ex
+        from swingvision.analysis import stats as st
+
+        if what not in ex.SELECTION_EXPORTS or fmt not in ex.FORMATS:
+            abort(404)
+        lib = state.library()
+        if lib is None:
+            abort(404)
+        args = request.args.to_dict()
+        flt = agg.SessionFilter.from_query(args)
+        sel = agg.select(lib, flt, include_excluded=args.get("excluded") == "1")
+        groups = [g for g in args.get("groups", "").split(",") if g]
+        rows = st.filter_records(sel.data.records, groups or None, args.get("end"))
+        data = ex.selection_bytes(sel.data, what, fmt, rows)
+        return send_file(
+            io.BytesIO(data),
+            mimetype="text/csv" if fmt == "csv" else "application/vnd.apache.parquet",
+            as_attachment=True,
+            download_name=f"stats_{len(sel.data.sessions)}-sessions_{what}.{fmt}",
+            max_age=0,
+        )
+
     @server.route("/labeling/frame/<session_id>/<clip_id>/<int:frame>.jpg")
     def labeling_frame(session_id: str, clip_id: str, frame: int):
         """A region of a cached labeling frame at full resolution (query: x0, y0, w, h)."""

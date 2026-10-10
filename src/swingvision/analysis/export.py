@@ -4,6 +4,9 @@
 (call after your corrections, target, excluded) in ``practice_*`` columns. ``practice`` and
 ``swings`` are the session's files as they are. Parquet keeps the units in the field
 metadata; CSV joins list values with ``|``.
+
+A selection of sessions (M7a) exports the statistics records the Stats page shows
+(:func:`selection_table`): one row per shot or per swing, with the session's columns.
 """
 
 from __future__ import annotations
@@ -15,7 +18,9 @@ import pyarrow.compute as pc
 import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
 
+from swingvision.analysis import stats as st
 from swingvision.storage import tables
+from swingvision.storage.schemas import STATS_RECORDS
 from swingvision.storage.session import Session
 
 EXPORTS = {
@@ -113,3 +118,48 @@ def export_bytes(session: Session, what: str, fmt: str) -> bytes:
 
 def filename(session: Session, what: str, fmt: str) -> str:
     return f"{session.path.name}_{what}.{fmt}"
+
+
+# ---------------------------------------------------------------------------
+# Selections of sessions (M7a)
+# ---------------------------------------------------------------------------
+
+SELECTION_EXPORTS = {"shots": "Shots", "swings": "Swings"}
+#: Session columns first, then the record's own.
+_SESSION_EXPORT = (
+    pa.field("session_id", pa.string()),
+    pa.field("session", pa.string()),
+    *(STATS_RECORDS.field(n) for n in ("recorded_on", "mode", "practice_type", "profile_id")),
+    pa.field("tags", pa.list_(pa.string())),
+    *(STATS_RECORDS.field(n) for n in ("calibration_by",)),
+)
+
+
+def selection_table(data: st.StatsData, what: str, records: list[dict] | None = None) -> pa.Table:
+    """The selection's shot (or swing) records with session columns. ``records``: the shot
+    records the page shows (after its stroke / end filters), default all of them."""
+    if what not in SELECTION_EXPORTS:
+        raise ExportError(f"Unknown export {what!r}; choose shots or swings")
+    if what == "shots":
+        rows, own = (data.records if records is None else records), ("t", "side", *st.SHOT_FIELDS)
+    else:
+        rows, own = data.swings, ("t", "side", *st.SWING_FIELDS)
+    schema = pa.schema([*_SESSION_EXPORT, *(STATS_RECORDS.field(n) for n in own)])
+    info = {s["session_id"]: s for s in data.sessions}
+    out = []
+    for r in rows:
+        s = info[r["session_id"]]
+        out.append(
+            {"session_id": s["session_id"], "session": s["name"],
+             **{k: s.get(k) for k in ("recorded_on", "mode", "practice_type", "profile_id",
+                                      "calibration_by")},
+             "tags": s.get("tags") or [], **{k: r.get(k) for k in own}}
+        )  # fmt: skip
+    return pa.Table.from_pylist(out, schema=schema)
+
+
+def selection_bytes(data: st.StatsData, what: str, fmt: str, records=None) -> bytes:
+    if fmt not in FORMATS:
+        raise ExportError(f"Unknown format {fmt!r}; choose csv or parquet")
+    table = selection_table(data, what, records)
+    return to_csv(table) if fmt == "csv" else to_parquet(table)

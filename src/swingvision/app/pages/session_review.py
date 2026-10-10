@@ -436,7 +436,18 @@ def _minimap_card(track: dict | None, machine, is_machine: bool, extra_traces=No
     )
 
 
-def layout(session_id: str | None = None, **_):
+def _start_fragment(t: str | None) -> str:
+    """A media fragment that opens the video at ``t`` (a little before it, to see the shot
+    coming)."""
+    try:
+        start = max(0.0, float(t) - 1.0) if t is not None else None
+    except ValueError:
+        return ""
+    return "" if start is None else f"#t={start:.2f}"
+
+
+def layout(session_id: str | None = None, t: str | None = None, **_):
+    """``t``: start playback at this time (s), e.g. from a shot clicked on the Stats page."""
     if state.settings().output_root is None:
         return dmc.Container([page_header("Session"), no_output_root_alert()], size="xl", px=0)
     found = state.session_for(session_id or "")
@@ -500,7 +511,7 @@ def layout(session_id: str | None = None, **_):
     if has_proxy:
         player = html.Video(
             id="review-video",
-            src=f"/media/{config.id}/proxy.mp4",
+            src=f"/media/{config.id}/proxy.mp4" + _start_fragment(t),
             controls=True,
             preload="auto",
             style={"width": "100%", "display": "block", "background": "#000", "borderRadius": 8},

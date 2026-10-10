@@ -1,4 +1,5 @@
-"""SQLite library in the output root: sessions index, job queue, profiles, worker heartbeat.
+"""SQLite library in the output root: sessions index, job queue, profiles, worker heartbeat,
+session tags and saved Stats views.
 
 The app (many Flask threads) and the worker process both use this file, so every
 operation opens a short-lived connection in WAL mode. Long-running processes hold one more
@@ -114,6 +115,25 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE jobs ADD COLUMN action TEXT;
     """,
+    # v4: multi-session statistics (M7a): when a session was recorded and whose it is
+    # (backfilled from session.json, see ``_backfill_v4``), user tags, saved Stats views
+    """
+    ALTER TABLE sessions ADD COLUMN recorded_on TEXT;
+    ALTER TABLE sessions ADD COLUMN profile_id TEXT;
+    CREATE TABLE session_tags (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (session_id, tag)
+    );
+    CREATE INDEX session_tags_tag_idx ON session_tags(tag);
+    CREATE TABLE saved_views (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        query TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 
@@ -123,6 +143,37 @@ def now_iso() -> str:
 
 def parse_iso(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
+
+
+def recording_time(creation_time: str | None, created_at: str | datetime | None = None):
+    """When a session was recorded, in local time (ISO, seconds): the video's
+    ``creation_time`` (UTC from the phone), else when the session was created."""
+    for value in (creation_time, created_at):
+        if not value:
+            continue
+        try:
+            dt = (
+                value
+                if isinstance(value, datetime)
+                else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            )
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+    return None
+
+
+def clean_tags(tags) -> list[str]:
+    """Tags as stored: trimmed, inner whitespace collapsed, no commas (they separate tags in
+    URLs), no empties or duplicates."""
+    out: list[str] = []
+    for t in tags or []:
+        t = " ".join(str(t).replace(",", " ").split())
+        if t and t.lower() not in (o.lower() for o in out):
+            out.append(t)
+    return out
 
 
 @dataclass
@@ -198,8 +249,29 @@ class Library:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             for i, script in enumerate(MIGRATIONS[version:], start=version + 1):
                 conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {i};\nCOMMIT;")
+                if i == 4:
+                    self._backfill_v4(conn)
         _ready.add(self.path)
         return self
+
+    def _backfill_v4(self, conn: sqlite3.Connection) -> None:
+        """Recording time and profile of existing sessions, from their ``session.json``."""
+        rows = conn.execute("SELECT id, dir_name, created_at FROM sessions").fetchall()
+        for row in rows:
+            path = self.root / "sessions" / row["dir_name"] / "session.json"
+            try:
+                cfg = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cfg = {}
+            when = recording_time(
+                (cfg.get("video") or {}).get("creation_time"),
+                cfg.get("created_at") or row["created_at"],
+            )
+            profile = (cfg.get("players") or {}).get("me_profile_id")
+            conn.execute(
+                "UPDATE sessions SET recorded_on = ?, profile_id = ? WHERE id = ?",
+                (when, profile, row["id"]),
+            )
 
     def keep_open(self) -> Library:
         """Hold a connection open for the rest of the process (see the module docstring)."""
@@ -227,12 +299,15 @@ class Library:
         source_path: str,
         source_hash: str,
         duration_s: float | None,
+        recorded_on: str | None = None,
+        profile_id: str | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO sessions (id, name, dir_name, created_at, updated_at, mode, submode,
-                                         source_path, source_hash, duration_s)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                         source_path, source_hash, duration_s, recorded_on,
+                                         profile_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     id,
                     name,
@@ -244,6 +319,8 @@ class Library:
                     source_path,
                     source_hash,
                     duration_s,
+                    recorded_on or recording_time(None, created_at),
+                    profile_id,
                 ),
             )
 
@@ -275,6 +352,71 @@ class Library:
     def delete_session(self, session_id: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+    # -- session tags (M7a) ------------------------------------------------------
+    def set_session_tags(self, session_id: str, tags) -> list[str]:
+        """Replace a session's tags; returns them as stored (see :func:`clean_tags`)."""
+        tags = clean_tags(tags)
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM session_tags WHERE session_id = ?", (session_id,))
+            conn.executemany(
+                "INSERT INTO session_tags (session_id, tag) VALUES (?, ?)",
+                [(session_id, t) for t in tags],
+            )
+            conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now_iso(), session_id))
+        return tags
+
+    def session_tags(self, session_id: str) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT tag FROM session_tags WHERE session_id = ? ORDER BY tag COLLATE NOCASE",
+                (session_id,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def tags_by_session(self) -> dict[str, list[str]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id, tag FROM session_tags ORDER BY tag COLLATE NOCASE"
+            ).fetchall()
+        out: dict[str, list[str]] = {}
+        for sid, tag in rows:
+            out.setdefault(sid, []).append(tag)
+        return out
+
+    def all_tags(self) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT tag FROM session_tags ORDER BY tag COLLATE NOCASE"
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    # -- saved Stats views (M7a) ----------------------------------------------------
+    def save_view(self, id: str, name: str, query: str) -> None:
+        """Insert or replace a saved view (``query``: the Stats page's URL query string)."""
+        ts = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO saved_views (id, name, query, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name = excluded.name, query = excluded.query,
+                       updated_at = excluded.updated_at""",
+                (id, name, query, ts, ts),
+            )
+
+    def list_views(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM saved_views ORDER BY name COLLATE NOCASE").fetchall()
+        return [dict(r) for r in rows]
+
+    def get_view(self, view_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM saved_views WHERE id = ?", (view_id,)).fetchone()
+        return dict(row) if row else None
+
+    def delete_view(self, view_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM saved_views WHERE id = ?", (view_id,))
 
     # -- jobs ------------------------------------------------------------------
     def enqueue_job(

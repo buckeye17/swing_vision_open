@@ -14,8 +14,9 @@ on the court) and net contacts. Every shot gets a 3D flight: speed off the racke
 and before the bounce, net clearance, height, landing spot and line call. Practice sessions
 are cut into one clip per shot (feed, hit, landing), grouped into blocks, and scored against
 targets you draw on the court. Every swing gets a 2D and 3D pose, its phases (preparation,
-forward swing, follow-through), body kinematics and a stroke type. A Stats page sums up each
-session (speeds by stroke, landing heatmaps, depth, movement) and exports the shots as CSV or
+forward swing, follow-through), body kinematics and a stroke type. A Stats page sums up a
+session, or any selection of sessions (by date, practice type, tags, ...), with trends over
+time (speeds by stroke, landing heatmaps, depth, movement) and exports the shots as CSV or
 Parquet. A 2-hour session processes unattended overnight. Match scoring arrives in M8–M10.
 
 ## Requirements
@@ -254,11 +255,35 @@ row menu) sums up one session:
 
 Filter by stroke and end. In practice sessions the numbers use your corrections from the
 Practice page (shots marked *not a practice shot* are left out unless you include them).
+Click a shot (a speed dot or a landing) to watch it: its session opens a second before it.
 
 **Export** (top right) downloads the session's shots (every shot record with its practice
 result: call after your corrections, target, excluded), practice shots or swings, as CSV or
 Parquet (Parquet keeps the units). `uv run sv export <session-id> --format parquet` does the
 same from the command line.
+
+**Many sessions.** *Stats* in the navigation (or *Sessions…* at the top of a session's Stats
+page, or *Open in Stats* for the sessions you tick in the Library) shows the same page over a
+selection of sessions: everything adds up, and the distance chart shows each session. Pick
+the sessions by recording date, mode, practice type, player, tags (a session needs all the
+tags you pick), name them one by one, or leave some out; *Only court calibrations you
+confirmed* drops sessions whose calibration was accepted automatically. The panel says how
+many sessions, shots, serves and swings match. Sessions processed before this version have
+no statistics records yet: *Update their statistics* brings them up to date (in a second
+when only the statistics are stale, otherwise as a job).
+
+* **Over time**: any headline number (in %, on target %, speed, depth, wrist speed,
+  distance, ...) per session against its recording date, with the 95% interval and how many
+  shots it rests on. Click a point to open that session's stats.
+* The filters are in the address bar, so a view can be bookmarked; *Save view* keeps it in
+  the library under a name.
+* **Tags**: *Tags…* in a session's Library menu (e.g. “new racket”, “indoor”).
+* **Export** downloads the shots (or swings) shown, with each session's name, date, type and
+  tags.
+
+From the command line, `uv run sv stats --from 2026-10-01 --to 2026-10-31 --type serve
+--tag "new racket"` prints the same numbers (`--trend in_pct` adds them per session, `--out
+shots.csv` exports), and `uv run sv tags <session-id> indoor clay` sets a session's tags.
 
 ### Profiles
 
@@ -321,6 +346,9 @@ uv run sv swings show <session-id>     # strokes, phases, wrist speed (--all: al
 uv run sv swings eval                  # strokes, contact timing, phase spread vs labels (M6)
 uv run sv train strokes my-strokes     # learned stroke classifier from labels + corrections
 uv run sv export <session-id> --what shots --format csv   # shots | practice | swings, csv | parquet
+uv run sv stats --from 2026-10-01 --type serve --tag indoor --trend in_pct  # many sessions
+uv run sv tags <session-id> "new racket" indoor   # set a session's tags (--clear removes them)
+uv run sv sessions                     # sessions with their recording dates and tags
 uv run sv relink <session-id> E:\footage\practice.mp4     # the video moved
 ```
 
@@ -388,7 +416,7 @@ src/swingvision/
   ball/              ball detectors, frame-rate schedules, linking, events (M3),
                      3D flight physics and fitting (M4)
   analysis/          shot records (M4); practice segmentation, targets, accuracy (M5);
-                     session statistics and exports (M7)
+                     session statistics and exports (M7); multi-session selections (M7a)
   pose/              2D pose, 3D lifting and placement, kinematics, swings, strokes (M6)
   training/          labels, labeling helpers, training, benchmark, evaluation (M3, M6)
   models/            pretrained weights registry (URLs, SHA-256, licenses)

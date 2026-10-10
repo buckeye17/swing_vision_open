@@ -185,6 +185,11 @@ class Session:
         return self.path / "stats.json"
 
     @property
+    def stats_records_path(self) -> Path:
+        """The records the statistics are computed from, for multi-session stats (M7a)."""
+        return self.path / "stats_records.parquet"
+
+    @property
     def pose_dir(self) -> Path:
         return self.path / "pose"
 

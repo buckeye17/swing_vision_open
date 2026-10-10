@@ -31,6 +31,7 @@ PAGE_MODULES = [
 
 NAV = [
     ("Library", "/", "tabler:books", "exact"),
+    ("Stats", "/stats", "tabler:chart-bar", "exact"),
     ("New session", "/new", "tabler:video-plus", "exact"),
     ("Jobs", "/jobs", "tabler:list-check", "exact"),
     ("Profiles", "/profiles", "tabler:users", "exact"),

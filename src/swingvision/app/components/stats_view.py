@@ -1,7 +1,14 @@
-"""Stats page pieces (M7): KPIs, speed by stroke, landing heatmap, depth, strokes table,
-movement. Everything is drawn from :mod:`swingvision.analysis.stats` records."""
+"""Stats page pieces (M7, M7a): KPIs, speed by stroke, landing heatmap, depth, strokes
+table, movement, trends over sessions. Everything is drawn from
+:mod:`swingvision.analysis.stats` records, for one session or a selection of them.
+
+Shots on the charts carry their session and time (``customdata``: ``[..., session_id, t]``),
+so a click opens the session at that moment.
+"""
 
 from __future__ import annotations
+
+from datetime import datetime
 
 import dash_mantine_components as dmc
 import numpy as np
@@ -45,17 +52,28 @@ def fmt_t(t: float | None) -> str:
     return f"{m}:{t - 60 * m:04.1f}"
 
 
-def filtered(records: list[dict], groups: list[str] | None, end: str | None) -> list[dict]:
-    out = []
-    for r in records:
-        if groups and r["group"] not in groups:
-            continue
-        if end == "near" and r["side"] != -1:
-            continue
-        if end == "far" and r["side"] != 1:
-            continue
-        out.append(r)
+def short_labels(sessions: list[dict]) -> dict[str, str]:
+    """Session id → a short hover prefix (``Oct 1 · ``) when there are several sessions."""
+    if len(sessions) <= 1:
+        return {}
+    out = {}
+    for s in sessions:
+        when = s.get("recorded_on")
+        try:
+            dt = datetime.fromisoformat(when) if when else None
+        except ValueError:
+            dt = None
+        day = f"{dt:%b} {dt.day}" if dt else (s.get("name") or s["session_id"])
+        out[s["session_id"]] = f"{day} · "
     return out
+
+
+def _where(r: dict, labels: dict[str, str]) -> str:
+    return labels.get(r.get("session_id"), "") + fmt_t(r["t"])
+
+
+def filtered(records: list[dict], groups: list[str] | None, end: str | None) -> list[dict]:
+    return st.filter_records(records, groups, end)
 
 
 def _layout(fig: go.Figure, height: int, **axes) -> go.Figure:
@@ -86,10 +104,14 @@ def empty_figure(text: str, height: int = 260) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 
-def kpis(records: list[dict], movement: dict):
+def kpis(records: list[dict], movement: dict, sessions: list[dict] | None = None):
     u = units.current()
     s = st.summarize_shots(records)
-    items = [
+    items = []
+    if sessions is not None and len(sessions) != 1:
+        video = sum(x.get("duration_s") or 0.0 for x in sessions)
+        items.append(stat_tile("Sessions", str(len(sessions)), f"{fmt_duration(video)} of video"))
+    items += [
         stat_tile("Shots", str(s["n"]), f"{s['n_seen']} with the contact seen"),
         stat_tile("In", pct(s["in_pct"]), f"{s['n_in']} of {s['n_called']} called"),
         stat_tile("Net", pct(s["net_pct"]), f"{s['n_net']} shots"),
@@ -119,8 +141,9 @@ def kpis(records: list[dict], movement: dict):
 # ---------------------------------------------------------------------------
 
 
-def speed_figure(records: list[dict]) -> go.Figure:
+def speed_figure(records: list[dict], labels: dict[str, str] | None = None) -> go.Figure:
     """Speed off the racket per stroke: a box per stroke with every shot as a dot."""
+    labels = labels or {}
     rows = [r for r in records if r["speed_ok"]]
     if not rows:
         return empty_figure("No shot speeds yet (the ball's contact must be seen).")
@@ -142,7 +165,12 @@ def speed_figure(records: list[dict]) -> go.Figure:
                 line={"color": group_color(g), "width": 2},
                 fillcolor="rgba(0,0,0,0)",
                 customdata=[
-                    [fmt_t(r["t"]), "" if e is None else f" ± {u.speed(e):.0f}"]
+                    [
+                        _where(r, labels),
+                        "" if e is None else f" ± {u.speed(e):.0f}",
+                        r.get("session_id"),
+                        r["t"],
+                    ]
                     for r, e in zip(rs, errs, strict=True)
                 ],
                 hovertemplate=(
@@ -164,8 +192,11 @@ def speed_figure(records: list[dict]) -> go.Figure:
     )
 
 
-def landing_figure(records: list[dict], view: str = "heat") -> go.Figure:
+def landing_figure(
+    records: list[dict], view: str = "heat", labels: dict[str, str] | None = None
+) -> go.Figure:
     """Landings seen from the hitter's end (both ends folded onto one picture)."""
+    labels = labels or {}
     rows = [r for r in records if r["rel_x"] is not None and r["outcome"] != "own_side"]
     fig = court_figure(height=460)
     fig.update_yaxes(range=[-4.0, VIEW_Y])  # the opponent's half, where shots land
@@ -211,7 +242,8 @@ def landing_figure(records: list[dict], view: str = "heat") -> go.Figure:
                 y=y,
                 mode="markers",
                 marker={"color": "white", "size": 4, "opacity": 0.8},
-                text=[f"{fmt_t(r['t'])} · {group_label(r['group'])}" for r in rows],
+                text=[f"{_where(r, labels)} · {group_label(r['group'])}" for r in rows],
+                customdata=[[r.get("session_id"), r["t"]] for r in rows],
                 hovertemplate="%{text}<extra></extra>",
             )
         )
@@ -234,7 +266,8 @@ def landing_figure(records: list[dict], view: str = "heat") -> go.Figure:
                     "symbol": ["circle" if i else "circle-open" for i in ins],
                     "line": {"color": "white", "width": 1},
                 },
-                text=[f"{fmt_t(r['t'])} · {group_label(g)} · {r['outcome']}" for r in rs],
+                text=[f"{_where(r, labels)} · {group_label(g)} · {r['outcome']}" for r in rs],
+                customdata=[[r.get("session_id"), r["t"]] for r in rs],
                 hovertemplate="%{text}<extra></extra>",
             )
         )
@@ -326,6 +359,9 @@ def depth_figure(records: list[dict]) -> go.Figure:
 
 
 def distance_figure(dist: dict) -> go.Figure:
+    """Distance covered per 5 minutes of one session, or per session for several."""
+    if dist.get("per") == "session":
+        return _distance_per_session(dist)
     if not dist["t"]:
         return empty_figure("No player tracking yet.", 200)
     u = units.current()
@@ -434,4 +470,124 @@ def strokes_table(records: list[dict], swings: dict[str, dict]):
             fz="sm",
         ),
         type="auto",
+    )
+
+
+def _distance_per_session(dist: dict) -> go.Figure:
+    if not dist["distance_m"]:
+        return empty_figure("No player tracking yet.", 200)
+    u = units.current()
+    fig = go.Figure(
+        go.Bar(
+            x=dist["label"],
+            y=u.len(list(dist["distance_m"])),
+            marker={"color": "#ffd43b", "cornerradius": 4},
+            customdata=[
+                [fmt_duration(s), sid]
+                for s, sid in zip(dist["tracked_s"], dist["session_id"], strict=True)
+            ],
+            hovertemplate=f"%{{x}}: %{{y:,.0f}} {u.len_unit} in %{{customdata[0]}} tracked"
+            "<extra></extra>",
+        )
+    )
+    return _layout(
+        fig,
+        220,
+        showlegend=False,
+        xaxis={"fixedrange": True, "showgrid": False, "tickangle": -30, "automargin": True},
+        yaxis={"title": f"{u.len_unit} per session", "fixedrange": True, "gridcolor": GRID},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Trends over sessions (M7a)
+# ---------------------------------------------------------------------------
+
+#: KPIs whose values are fractions (shown in %).
+RATE_KPIS = frozenset(k for k, (_label, kind) in st.TREND_KPIS.items() if kind == "rate")
+
+
+def trend_value(kpi: str, v: float | None, u: units.Units) -> float | None:
+    """A trend value in display units (rates in %)."""
+    if v is None:
+        return None
+    if kpi in RATE_KPIS:
+        return 100.0 * v
+    if kpi == "speed_median":
+        return u.speed(v)
+    if kpi in ("depth_mean", "distance_m"):
+        return u.len(v)
+    if kpi == "wrist_speed":
+        return u.limb_speed(v)
+    return v
+
+
+def trend_unit(kpi: str, u: units.Units) -> str:
+    if kpi in RATE_KPIS:
+        return "%"
+    if kpi == "speed_median":
+        return u.speed_unit
+    if kpi in ("depth_mean", "distance_m"):
+        return u.len_unit
+    if kpi == "wrist_speed":
+        return u.limb_speed_unit
+    return ""
+
+
+def trend_figure(points: list[dict], kpi: str) -> go.Figure:
+    """One KPI per session against its recording date, with n and the 95% interval.
+
+    ``customdata[3]`` is the session id (a click opens that session's stats)."""
+    pts = [p for p in points if p["value"] is not None]
+    if not pts:
+        return empty_figure("Nothing to show for this selection yet.", 280)
+    u = units.current()
+    unit = trend_unit(kpi, u)
+    label = st.TREND_KPIS[kpi][0]
+    y = [trend_value(kpi, p["value"], u) for p in pts]
+    lo = [trend_value(kpi, p["lo"], u) for p in pts]
+    hi = [trend_value(kpi, p["hi"], u) for p in pts]
+    n_name = "minutes tracked" if kpi == "distance_m" else "n"
+    dated = all(p["recorded_on"] for p in pts)
+    ci = ["" if a is None else f" (95%: {a:.1f}–{b:.1f})" for a, b in zip(lo, hi, strict=True)]
+    fig = go.Figure(
+        go.Scatter(
+            x=[p["recorded_on"] for p in pts] if dated else [p["label"] for p in pts],
+            y=y,
+            mode="lines+markers",
+            line={"color": "rgba(255,212,59,0.45)", "width": 1.5},
+            marker={"color": "#ffd43b", "size": 9, "line": {"color": "white", "width": 1}},
+            error_y={
+                "type": "data",
+                "symmetric": False,
+                "array": [0 if b is None else b - v for b, v in zip(hi, y, strict=True)],
+                "arrayminus": [0 if a is None else v - a for a, v in zip(lo, y, strict=True)],
+                "color": "rgba(255,212,59,0.6)",
+                "thickness": 1.5,
+                "width": 4,
+                "visible": any(a is not None for a in lo),
+            },
+            customdata=[
+                [p["label"], p["n"], c, p["session_id"]] for p, c in zip(pts, ci, strict=True)
+            ],
+            hovertemplate=(
+                f"%{{customdata[0]}}<br>{label}: %{{y:.1f}} {unit}%{{customdata[2]}}"
+                f"<br>{n_name}: %{{customdata[1]}}<extra></extra>"
+            ),
+        )
+    )
+    xaxis = {"fixedrange": True, "showgrid": False}
+    if dated:
+        xaxis.update(type="date", title="recorded", tickformat="%b %-d", hoverformat="%b %-d %H:%M")
+    return _layout(
+        fig,
+        280,
+        showlegend=False,
+        xaxis=xaxis,
+        yaxis={
+            "title": f"{label} ({unit})" if unit else label,
+            "fixedrange": True,
+            "gridcolor": GRID,
+            "rangemode": "tozero" if kpi in RATE_KPIS else "normal",
+        },
     )

@@ -52,7 +52,7 @@ A personal, local-first tennis video analysis tool. It ingests full-court footag
 
 | Feature | Notes |
 |---|---|
-| Multi-session statistics: the same stats over any selection of sessions (date range, practice/match, type, tags) | §7.13, M7a. Brings the cross-session part of M11 forward |
+| ✅ Multi-session statistics: the same stats over any selection of sessions (date range, practice/match, type, tags) | §7.13, M7a (done 2026-10-10). Brings the cross-session part of M11 forward |
 | Serve contact point vs the front foot's toe in the contact frame (forward, lateral, height), with speed and in % by contact point | §7.11, M7b. Needs a pose model with toe keypoints, run around each serve's contact |
 | Speed calibration from net-tape serves | §7.12, M7c. Replaces the ±3% uncalibrated speed error with a measured one |
 
@@ -304,7 +304,7 @@ Each stage declares `name`, `VERSION`, `depends_on`, and config keys. It writes 
 | 17 | `segments` | – | 1 (practice) / 2 (match) | ✅ Practice (M5): one segment per shot (seen hits, unseen contacts from landing + impact sound, toss + sound), feeds, serve/groundstroke, deuce/ad, blocks. Match: points (+ warm-up) |
 | 18 | `outcomes` + `scoring` | – | 2 | match only: point winner, reason, confidence, score log |
 | 19 | `practice_eval` | – | 1 | ✅ practice only: line calls (service box for serves), per-shot target hit/miss, distance, depth/width error, with the user's edits; rerun in-app after target/shot edits |
-| 20 | `stats` | – | 1 (session) / 2 (match stats) | ✅ session aggregates → `stats.json` (M7: shots and calls by stroke, speeds, depth, swings, movement); rerun in-app after edits. M7a: also writes `stats_records.parquet` (per-shot, per-swing and per-serve records with session columns) for multi-session statistics. M7b: serve contact records (`serve_contact` joined with speed and the serve's call) |
+| 20 | `stats` | – | 1 (session) / 2 (match stats) | ✅ session aggregates → `stats.json` (M7: shots and calls by stroke, speeds, depth, swings, movement); rerun in-app after edits. ✅ M7a: also writes `stats_records.parquet` (per-shot and per-swing records and one movement record, with session columns) for multi-session statistics. M7b: serve contact records (`serve_contact` joined with speed and the serve's call) |
 
 **Calibration gating**: stages 4–5 run automatically. `court_auto` runs right after `ingest`, so the calibration can be reviewed while the proxy encodes. Unless the auto calibration passes the Settings threshold ("continue without review when line RMS < X px", off by default), `camera` stops the job with status `needs_action`; Jobs and the session page link to the Calibrate page, and confirming there re-queues the job. Stage 6 doesn't depend on calibration except for the court-ROI crop. The `camera` stage's fingerprint covers only the chosen camera, so re-confirming an unchanged calibration invalidates nothing; if the user later adjusts calibration, stages 7+ rerun on CPU in minutes. (The runner re-plans each stage just before running it, so a stage's config may read files that upstream stages or the user wrote.)
 
@@ -596,7 +596,9 @@ Today every speed carries a ±3% uncalibrated scale error (`SPEED_SCALE_ERROR`, 
   * With a calibration, `SPEED_SCALE_ERROR` is replaced by the calibration's σ, and the *Uncalibrated speeds* badge becomes *Calibrated (device, ±x%)*.
 * **Side benefit:** each reference also measures the audio/video offset precisely (audio contact vs video contact). That helps the M6 open item about sound-based contacts.
 
-### 7.13 Multi-session statistics (M7a)
+### 7.13 Multi-session statistics (M7a) ✅
+
+Built as planned (2026-10-10); details and measurements in `docs/m7a-multi-session.md`. Differences: tags are read from the library when a selection is made (retagging needs no reprocessing), so the records file doesn't store them; the library also keeps `sessions.profile_id`; movement is a per-session record of sums and counts that pool exactly; the *calibrated speeds* option and the device column wait for M7c, serve-contact records for M7b; rolling accuracy stays on the Practice page, and the trend chart covers accuracy across sessions.
 
 A generic way to compute **the same statistics the app already shows for one session** over any selection of sessions. The serve analysis (§7.11) is its first big user, but it covers every stat. The cross-session part of M11 becomes a view of it.
 
@@ -652,11 +654,11 @@ key outputs, fit RMS and flags.
 
 `pose/serve_contact.parquet` (M7b, schema `SERVE_CONTACT`): `swing_id, shot_id, t_contact, t_contact_video, side, serve_side (deuce|ad), racket_hand, front_foot (left|right), frame_contact, toe_x, toe_y, toe_z, toe_sigma_m, toe_source (toe|heel_length|edit), toe_on_ground, toe_moved_m, toe_to_baseline_m, contact_x, contact_y, contact_z, contact_cov (list<float32>[9]), contact_source (toss_path|inferred|edit), forward_m, lateral_m, height_m, height_rel, forward/lateral/height_sigma_m, flags`. Also `pose/serve_feet.parquet`: 2D and 3D foot keypoints (big toe, small toe, heel × 2) per frame around each serve's contact.
 
-`stats_records.parquet` (M7a, schema `STATS_RECORDS`): the per-session stats records (shots with practice results, swings, serve contacts) after edits, with `session_id, recorded_on, mode, practice_type, profile_id, device_key, tags`; read across sessions with `pyarrow.dataset`.
+`stats_records.parquet` (✅ M7a, schema `STATS_RECORDS`): the per-session stats records after edits, one row per shot (with practice results; excluded shots flagged), per swing, and one movement row (frame, sample and time sums, distance, best speed, the folded heatmap, distance per 5 min), with `session_id, recorded_on, mode, practice_type, profile_id, device_key (M7c), calibration_by, speeds_calibrated (M7c)` and `kind`; serve contacts join with M7b. Read across sessions with `pyarrow.dataset`; tags come from the library.
 
 `ball/speed_refs.parquet` (M7c, schema `SPEED_REFS`): `ref_id, shot_id, swing_id, flight_id, t_racket_audio, t_tape_audio, snr_racket_db, snr_tape_db, contact_x/y/z, tape_x, tape_z, d_contact_m, d_tape_m, sound_speed_mps, dt_s, dt_sigma_s, path_m, path_sigma_m, v_ref_kmh, v_fit_kmh, ratio, ratio_sigma, img_vy, status (candidate|accepted|rejected), flags`.
 
-`library.sqlite` (M7a, library v4: `session_tags`, `saved_views`, `sessions.recorded_on`; M7c, library v5, adds `devices (device_key, make, model, width, height, fps, label)`, `speed_calibrations (id, device_key, version, model (scalar|rolling_shutter), k, k_sigma, tau_s, n_refs, refs_json, created_at, active)`, `sessions.device_key`, `sessions.air_temp_c`).
+`library.sqlite` (✅ M7a, library v4: `session_tags`, `saved_views`, `sessions.recorded_on`, `sessions.profile_id`, backfilled from `session.json`; M7c, library v5, adds `devices (device_key, make, model, width, height, fps, label)`, `speed_calibrations (id, device_key, version, model (scalar|rolling_shutter), k, k_sigma, tau_s, n_refs, refs_json, created_at, active)`, `sessions.device_key`, `sessions.air_temp_c`).
 
 ---
 
@@ -830,17 +832,17 @@ Each milestone ends with tests passing, a demo on real footage, and a short READ
 
 M7a comes first: the serve analysis needs more serves than one session holds. M7b and M7c are independent of each other. Serve-contact statistics compare serves with each other, so they don't need calibrated speeds, but they use them once M7c exists.
 
-#### M7a — Multi-session statistics
+#### M7a — Multi-session statistics ✅ (done 2026-10-10)
 * `analysis/aggregate.py` (`SessionFilter`: recording date range, mode, practice type, profile, tags, include/exclude, quality options).
 * The `stats` stage also writes `stats_records.parquet`. Selections read the records with `pyarrow.dataset` into the same `StatsData` as a single session.
 * Library v4: `sessions.recorded_on` (backfilled from the probe's `creation_time`), session tags, saved views.
 * Summaries generalized for many sessions; per-session-over-date trend charts.
 * Stats page scope switch, filter panel with match counts, filters in the URL, saved views; "Open in Stats" for selected sessions in the Library; selection export; `sv stats --from/--to/--mode/--type/--tag`.
-* Exit criteria:
-  * For a selection of one session, every number equals the single-session Stats page (a test runs every summary both ways).
-  * Synthetic multi-session libraries: counts, rates and means equal those computed from the pooled raw records. Date, mode, type and tag filters select exactly the expected sessions.
-  * With 50 synthetic sessions, the Stats page renders a selection in < 2 s (cached < 0.5 s).
-  * Both real sessions together on the Stats page; the CSV export matches the page.
+* ✅ Exit criteria (details in `docs/m7a-multi-session.md`):
+  * For a selection of one session, every number equals the single-session Stats page (a test runs every summary both ways): **identical** records, summaries, trends and rendered page on 4 synthetic and both real sessions.
+  * Synthetic multi-session libraries: counts, rates and means equal those computed from the pooled raw records. Date, mode, type and tag filters select exactly the expected sessions: **met** (movement pooled exactly too; player, include/exclude and the quality option also checked).
+  * With 50 synthetic sessions, the Stats page renders a selection in < 2 s (cached < 0.5 s): **0.67 s** (cached **0.33 s**) for 7,500 shots and 15,000 swings.
+  * Both real sessions together on the Stats page; the CSV export matches the page: **2 sessions, 237 shots, 213 serves**; the export's row count, in % (35.8%) and speed median (138.2 km/h) equal the page's, also with the page filtered.
 
 #### M7b — Serve contact point
 * **Spike first**: a pose model with toe keypoints, on ≈40 near serves from both sessions with hand-labeled toe tips and contact frames.

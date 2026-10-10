@@ -1,8 +1,10 @@
-"""Library: all sessions in the output folder."""
+"""Library: all sessions in the output folder. Sessions can be tagged, and a selection of
+them opened together in Stats (M7a)."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 
 import dash
 import dash_mantine_components as dmc
@@ -59,6 +61,54 @@ def layout(relink: str | None = None, **_):
                 mb="lg",
             ),
             dcc.Interval(id="lib-poll", interval=3000),
+            dcc.Store(id="lib-selected", data=[]),
+            dmc.Group(
+                [
+                    dmc.Text(id="lib-sel-text", size="sm", c="dimmed"),
+                    dmc.Anchor(
+                        dmc.Button(
+                            "Open in Stats",
+                            id="lib-open-stats-btn",
+                            size="xs",
+                            variant="default",
+                            disabled=True,
+                            leftSection=icon("tabler:chart-bar", 14),
+                        ),
+                        id="lib-open-stats",
+                        href="/stats",
+                    ),
+                ],
+                justify="flex-end",
+                gap="sm",
+                mb="xs",
+            ),
+            dcc.Store(id="lib-tags-id"),
+            dmc.Modal(
+                id="lib-tags-modal",
+                title="Session tags",
+                children=dmc.Stack(
+                    [
+                        dmc.Text(
+                            "Tags group sessions for Stats, e.g. “new racket” or “indoor”.",
+                            size="sm",
+                            c="dimmed",
+                        ),
+                        dmc.TagsInput(
+                            id="lib-tags-input",
+                            placeholder="Type a tag, press Enter",
+                            clearable=True,
+                            splitChars=[","],
+                        ),
+                        dmc.Group(
+                            [
+                                dmc.Button("Cancel", id="lib-tags-cancel", variant="default"),
+                                dmc.Button("Save", id="lib-tags-save"),
+                            ],
+                            justify="flex-end",
+                        ),
+                    ]
+                ),
+            ),
             dcc.Store(id="lib-delete-id"),
             dcc.Store(id="lib-sig"),
             dcc.Store(id="lib-relink-id", data=relink),
@@ -181,7 +231,7 @@ def _metrics(root, s: dict, u: units.Units) -> list:
     ]
 
 
-def _row(root, s: dict, u: units.Units):
+def _row(root, s: dict, u: units.Units, tags: list[str], selected: bool):
     mode = s["mode"].capitalize()
     if s["submode"]:
         mode += f" · {PRACTICE_SUBMODE_LABELS.get(s['submode'], s['submode'])}"
@@ -206,6 +256,11 @@ def _row(root, s: dict, u: units.Units):
                         "Stats",
                         href=f"/stats/{sid}",
                         leftSection=icon("tabler:chart-bar", 14),
+                    ),
+                    dmc.MenuItem(
+                        "Tags…",
+                        id={"type": "lib-tags", "index": sid},
+                        leftSection=icon("tabler:tags", 14),
                     ),
                     dmc.MenuItem(
                         "Export shots (CSV)",
@@ -259,8 +314,19 @@ def _row(root, s: dict, u: units.Units):
         if s["mode"] == "practice":
             links.append(("Practice", f"/practice/{sid}"))
         links.append(("Stats", f"/stats/{sid}"))
+    recorded = (s.get("recorded_on") or "")[:10]
+    when = f"recorded {recorded}" if recorded else f"created {fmt_time(s['created_at'])}"
     return dmc.TableTr(
         [
+            dmc.TableTd(
+                dmc.Checkbox(
+                    id={"type": "lib-check", "index": sid},
+                    checked=selected,
+                    size="xs",
+                    **{"aria-label": f"Select {s['name']}"},
+                ),
+                w=28,
+            ),
             dmc.TableTd(
                 dmc.Anchor(
                     dmc.Image(
@@ -282,11 +348,17 @@ def _row(root, s: dict, u: units.Units):
                             s["name"], href=f"/session/{sid}", fw=600, c="var(--mantine-color-text)"
                         ),
                         dmc.Text(
-                            f"{mode} · {fmt_duration(s['duration_s'])} · "
-                            f"created {fmt_time(s['created_at'])}",
+                            f"{mode} · {fmt_duration(s['duration_s'])} · {when}",
                             size="sm",
                             c="dimmed",
                         ),
+                        dmc.Group(
+                            [dmc.Badge(t, variant="light", color="gray", size="sm") for t in tags],
+                            gap=4,
+                            mt=2,
+                        )
+                        if tags
+                        else None,
                         dmc.Group(
                             [
                                 dmc.Anchor(
@@ -316,8 +388,9 @@ def _row(root, s: dict, u: units.Units):
     Output("lib-sig", "data"),
     Input("lib-poll", "n_intervals"),
     State("lib-sig", "data"),
+    State("lib-selected", "data"),
 )
-def _render(_, last_sig):
+def _render(_, last_sig, selected):
     lib = state.library()
     if lib is None:
         return no_output_root_alert(), None
@@ -331,10 +404,10 @@ def _render(_, last_sig):
     )
     if sig == last_sig:
         return no_update, no_update
-    return _table(lib.root, sessions), sig
+    return _table(lib.root, sessions, lib.tags_by_session(), set(selected or [])), sig
 
 
-def _table(root, sessions: list[dict]):
+def _table(root, sessions: list[dict], tags: dict | None = None, selected: set | None = None):
     if not sessions:
         return dmc.Paper(
             dmc.Stack(
@@ -353,6 +426,7 @@ def _table(root, sessions: list[dict]):
     head = dmc.TableThead(
         dmc.TableTr(
             [
+                dmc.TableTh(""),
                 dmc.TableTh(""),
                 dmc.TableTh("Session"),
                 dmc.TableTh("Shots", ta="right"),
@@ -395,7 +469,21 @@ def _table(root, sessions: list[dict]):
             dmc.Paper(
                 dmc.TableScrollContainer(
                     dmc.Table(
-                        [head, dmc.TableTbody([_row(root, s, u) for s in sessions])],
+                        [
+                            head,
+                            dmc.TableTbody(
+                                [
+                                    _row(
+                                        root,
+                                        s,
+                                        u,
+                                        (tags or {}).get(s["id"], []),
+                                        s["id"] in (selected or set()),
+                                    )
+                                    for s in sessions
+                                ]
+                            ),
+                        ],
                         highlightOnHover=True,
                         verticalSpacing="sm",
                         horizontalSpacing="md",
@@ -528,3 +616,58 @@ def _relink(result, sid):
     if state.OPTIONS.start_worker:
         ensure_worker(s.output_root)
     return notification(msg, icon_name="tabler:link"), 0
+
+
+@callback(
+    Output("lib-selected", "data"),
+    Output("lib-sel-text", "children"),
+    Output("lib-open-stats", "href"),
+    Output("lib-open-stats-btn", "disabled"),
+    Input({"type": "lib-check", "index": ALL}, "checked"),
+    State({"type": "lib-check", "index": ALL}, "id"),
+)
+def _selection(checked, ids):
+    """Selected sessions open together in Stats."""
+    chosen = [i["index"] for i, c in zip(ids or [], checked or [], strict=False) if c]
+    if not chosen:
+        return [], "Select sessions to see their statistics together.", "/stats", True
+    text = f"{len(chosen)} session{'s' if len(chosen) > 1 else ''} selected"
+    return chosen, text, "/stats?sessions=" + quote(",".join(chosen), safe=","), False
+
+
+@callback(
+    Output("lib-tags-id", "data"),
+    Output("lib-tags-modal", "opened"),
+    Output("lib-tags-input", "value"),
+    Output("lib-tags-input", "data"),
+    Input({"type": "lib-tags", "index": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def _open_tags(_clicks):
+    trig = ctx.triggered_id
+    lib = state.library()
+    if not isinstance(trig, dict) or not ctx.triggered[0]["value"] or lib is None:
+        return no_update, no_update, no_update, no_update
+    sid = trig["index"]
+    return sid, True, lib.session_tags(sid), lib.all_tags()
+
+
+@callback(
+    Output("notify", "sendNotifications", allow_duplicate=True),
+    Output("lib-tags-modal", "opened", allow_duplicate=True),
+    Output("lib-poll", "n_intervals", allow_duplicate=True),
+    Input("lib-tags-save", "n_clicks"),
+    Input("lib-tags-cancel", "n_clicks"),
+    State("lib-tags-id", "data"),
+    State("lib-tags-input", "value"),
+    prevent_initial_call=True,
+)
+def _save_tags(save, _cancel, sid, tags):
+    if ctx.triggered_id != "lib-tags-save" or not save or not sid:
+        return no_update, False, no_update
+    try:
+        stored = services.set_session_tags(state.settings(), sid, tags or [])
+    except ValueError as exc:
+        return notification(str(exc), color="red"), False, no_update
+    text = ", ".join(stored) if stored else "no tags"
+    return notification(f"Tags saved: {text}.", icon_name="tabler:tags"), False, 0

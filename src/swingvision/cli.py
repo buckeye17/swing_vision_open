@@ -160,8 +160,131 @@ def sessions() -> None:
     """List sessions in the library."""
     from swingvision import services
 
-    for s in services.open_library(load_settings()).list_sessions():
-        typer.echo(f"{s['id']}  {s['status']:<12} {s['mode']:<9} {s['name']}")
+    lib = services.open_library(load_settings())
+    tags = lib.tags_by_session()
+    for s in lib.list_sessions():
+        when = (s.get("recorded_on") or "")[:10] or "-"
+        tag = f"  [{', '.join(tags[s['id']])}]" if s["id"] in tags else ""
+        typer.echo(f"{s['id']}  {when}  {s['status']:<12} {s['mode']:<9} {s['name']}{tag}")
+
+
+@app.command()
+def tags(
+    session_id: str,
+    tag: Annotated[list[str] | None, typer.Argument(help="The session's new tags")] = None,
+    clear: Annotated[bool, typer.Option(help="Remove all tags")] = False,
+) -> None:
+    """Show or set a session's tags (they select sessions for multi-session stats)."""
+    from swingvision import services
+
+    settings = load_settings()
+    if tag or clear:
+        try:
+            services.set_session_tags(settings, session_id, [] if clear else list(tag or []))
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    current = services.open_library(settings).session_tags(session_id)
+    typer.echo(", ".join(current) if current else "(no tags)")
+
+
+@app.command()
+def stats(
+    session: Annotated[
+        list[str] | None, typer.Option("--session", "-s", help="Only these sessions")
+    ] = None,
+    date_from: Annotated[
+        str | None, typer.Option("--from", help="Recorded on or after (YYYY-MM-DD)")
+    ] = None,
+    date_to: Annotated[str | None, typer.Option("--to", help="Recorded on or before")] = None,
+    mode: Annotated[list[str] | None, typer.Option(help="practice | match")] = None,
+    practice_type: Annotated[
+        list[str] | None, typer.Option("--type", help="self_feed | ball_machine | serve")
+    ] = None,
+    tag: Annotated[list[str] | None, typer.Option(help="Sessions with all of these tags")] = None,
+    profile: Annotated[list[str] | None, typer.Option(help="Player profile ids")] = None,
+    exclude: Annotated[list[str] | None, typer.Option(help="Leave these sessions out")] = None,
+    user_calibration: Annotated[
+        bool, typer.Option(help="Only court calibrations confirmed by hand")
+    ] = False,
+    view: Annotated[str | None, typer.Option(help="A view saved on the Stats page")] = None,
+    stroke: Annotated[list[str] | None, typer.Option(help="Only these strokes")] = None,
+    trend: Annotated[
+        str | None, typer.Option(help="Also print a KPI per session (e.g. in_pct)")
+    ] = None,
+    out: Annotated[
+        Path | None, typer.Option(help="Also export the shots shown (.csv or .parquet)")
+    ] = None,
+) -> None:
+    """Statistics over a selection of sessions: the Stats page's numbers (M7a)."""
+    from swingvision import services
+    from swingvision.analysis import aggregate as agg
+    from swingvision.analysis import export as ex
+    from swingvision.analysis import stats as st
+
+    lib = services.open_library(load_settings())
+    if view:
+        found = [v for v in lib.list_views() if view.lower() in (v["id"], v["name"].lower())]
+        if not found:
+            raise typer.BadParameter(f"No saved view {view!r}")
+        flt = agg.SessionFilter.from_query(found[0]["query"])
+    else:
+        flt = agg.SessionFilter.make(
+            date_from=date_from, date_to=date_to, modes=mode, practice_types=practice_type,
+            profiles=profile, tags=tag, include=session, exclude=exclude,
+            user_calibration=user_calibration,
+        )  # fmt: skip
+    sel = agg.select(lib, flt)
+    data = sel.data
+    rows = st.filter_records(data.records, stroke or None, None)
+
+    def num(v, fmt: str, unit: str = "") -> str:
+        return "-" if v is None else format(v, fmt) + unit
+
+    def pct(v) -> str:
+        return "-" if v is None else f"{v:.0%}"
+
+    for s in data.sessions:
+        typer.echo(f"{s['session_id']}  {(s['recorded_on'] or '-')[:10]}  {s['name']}")
+    for note in data.notes:
+        typer.echo(f"Note: {note}")
+    c = sel.counts()
+    typer.echo(f"\n{c['sessions']} sessions, {c['shots']} shots, {c['serves']} serves")
+    s = st.summarize_shots(rows)
+    typer.echo(
+        f"Shots {s['n']} ({s['n_seen']} with the contact seen); in {pct(s['in_pct'])} of "
+        f"{s['n_called']} called, net {pct(s['net_pct'])}; speed median "
+        f"{num(s['speed_median'], '.0f', ' km/h')}, fastest {num(s['speed_max'], '.0f', ' km/h')} "
+        f"({s['n_speed']} speeds, uncalibrated); on target {pct(s['target_pct'])} of "
+        f"{s['n_targeted']}"
+    )
+    swings = st.summarize_swings(data.swings)
+    typer.echo(
+        f"\n{'stroke':<16}{'shots':>6}{'in':>6}{'net':>6}{'km/h':>7}{'depth m':>9}{'swings':>8}"
+    )
+    for g, gs in st.by_group(rows).items():
+        typer.echo(
+            f"{st.GROUP_LABELS[g]:<16}{gs['n']:>6}{pct(gs['in_pct']):>6}{pct(gs['net_pct']):>6}"
+            f"{num(gs['speed_median'], '.0f'):>7}{num(gs['depth_mean'], '.2f'):>9}"
+            f"{swings.get(g, {}).get('n', '-'):>8}"
+        )
+    m = st.summarize_movement(data)
+    if m:
+        typer.echo(
+            f"\nMoved {m['distance_m']:,.0f} m in {m['tracked_s'] / 60:.0f} min tracked "
+            f"({m['coverage']:.0%} coverage); top speed {m['max_speed_mps']:.1f} m/s"
+        )
+    if trend:
+        if trend not in st.TREND_KPIS:
+            raise typer.BadParameter(f"Choose a trend from {', '.join(st.TREND_KPIS)}")
+        typer.echo(f"\n{st.TREND_KPIS[trend][0]} per session:")
+        sw = [x for x in data.swings if not stroke or x["stroke_type"] in stroke]
+        for p in st.trend(data, trend, rows, sw):
+            ci = "" if p["lo"] is None else f"  [{p['lo']:.3g}, {p['hi']:.3g}]"
+            typer.echo(f"  {p['label']:<40} n={p['n']:<5} {num(p['value'], '.3g')}{ci}")
+    if out is not None:
+        fmt = "parquet" if out.suffix.lower() == ".parquet" else "csv"
+        out.write_bytes(ex.selection_bytes(data, "shots", fmt, rows))
+        typer.echo(f"\nWrote {out}")
 
 
 @app.command()

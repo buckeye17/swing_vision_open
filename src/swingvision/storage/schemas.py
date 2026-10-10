@@ -789,6 +789,72 @@ SWINGS = table_schema(
     ],
 )
 
+# ---------------------------------------------------------------------------
+# Statistics records (PLAN.md §7.13)
+# ---------------------------------------------------------------------------
+
+#: The records a session's statistics are computed from (``stats``), after the user's edits:
+#: one row per shot, per swing, and one movement row. Read across sessions with
+#: ``pyarrow.dataset`` (``analysis.aggregate``). Numbers are float64 so a round trip through
+#: this file changes nothing.
+STATS_RECORDS = table_schema(
+    "stats_records",
+    1,
+    [
+        field("session_id", pa.string(), None, nullable=False),
+        field("recorded_on", pa.string(), None, "Recording start, local time (ISO)"),
+        field("mode", pa.string(), None, "practice | match"),
+        field("practice_type", pa.string(), None, "self_feed | ball_machine | serve"),
+        field("profile_id", pa.string(), None, "The player's profile ('me')"),
+        field("device_key", pa.string(), None, "Recording device (M7c)"),
+        field("calibration_by", pa.string(), None, "Court calibration accepted by: user | auto"),
+        field("speeds_calibrated", pa.bool_(), None, "Speeds carry a device calibration (M7c)"),
+        field("kind", pa.string(), None, "shot | swing | movement", nullable=False),
+        field("t", pa.float64(), "s", "Contact time (shots, swings)"),
+        field("side", pa.int8(), None, "Hitter's half: -1 near, +1 far"),
+        # Shots
+        field("shot_id", pa.int32(), None, "shots.parquet row (null: contact not seen)"),
+        field("segment_id", pa.int32(), None, "Practice shot segment"),
+        field("group", pa.string(), None, "Stroke group: serve | forehand | ... | unknown"),
+        field("speed_kmh", pa.float64(), "km/h", "Speed off the racket"),
+        field("speed_sigma_kmh", pa.float64(), "km/h"),
+        field("speed_ok", pa.bool_(), None, "The speed is certain enough to count"),
+        field("landing_x", pa.float64(), "m", "Landing on the court (after edits)"),
+        field("landing_y", pa.float64(), "m"),
+        field("rel_x", pa.float64(), "m", "Landing in the hitter's frame"),
+        field("rel_y", pa.float64(), "m"),
+        field("outcome", pa.string(), None, "in | out_long | out_wide | net | unknown"),
+        field("net_clearance_m", pa.float64(), "m"),
+        field("spin_sign", pa.int8(), None),
+        field("contact_seen", pa.bool_(), None),
+        field("excluded", pa.bool_(), None, "Marked 'not a practice shot'"),
+        field("in_target", pa.bool_(), None, "Landed in an applicable target (null: n/a)"),
+        # Swings
+        field("swing_id", pa.int32(), None),
+        field("stroke_type", pa.string(), None, "The swing's stroke (after edits)"),
+        field("wrist_speed_peak", pa.float64(), "m/s"),
+        field("forward_s", pa.float64(), "s"),
+        field("contact_height_m", pa.float64(), "m"),
+        field("chain_in_order", pa.bool_(), None),
+        # Movement: what pooled movement figures need (sums and counts, not just ratios)
+        field("processed_frames", pa.int64(), None),
+        field("lit_frames", pa.int64(), None),
+        field("dark_frames", pa.int64(), None),
+        field("tracked_lit_frames", pa.int64(), None, "Usable frames with the player tracked"),
+        field("tracked_s", pa.float64(), "s"),
+        field("distance_m", pa.float64(), "m"),
+        field("max_speed_mps", pa.float64(), "m/s", "Best 0.5 s running speed"),
+        field("n_samples", pa.int64(), None, "Movement samples"),
+        field("n_moving", pa.int64(), None, "Samples at running speed"),
+        field("moving_speed_sum", pa.float64(), "m/s", "Sum of the speeds of those samples"),
+        field("n_near", pa.int64(), None, "Samples on the near half"),
+        field("n_runs", pa.int64(), None, "Tracked runs"),
+        field("heatmap_s", pa.list_(pa.float64()), "s", "Time per cell, both ends folded"),
+        field("distance_bins_m", pa.list_(pa.float64()), "m", "Distance per bin of video"),
+        field("distance_bin_s", pa.float64(), "s"),
+    ],
+)
+
 SCHEMAS: dict[str, pa.Schema] = {
     "audio_onsets": AUDIO_ONSETS,
     "pass1_frames": PASS1_FRAMES,
@@ -807,4 +873,5 @@ SCHEMAS: dict[str, pa.Schema] = {
     "pose2d": POSE2D,
     "pose3d": POSE3D,
     "swings": SWINGS,
+    "stats_records": STATS_RECORDS,
 }

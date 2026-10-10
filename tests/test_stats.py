@@ -147,8 +147,9 @@ def test_stats_stage_export_and_page(players_settings, ball_video):  # noqa: F81
     )
     page["layout"](session_id=config.id)
     page["layout"](session_id="nope")
-    out = stats_page._render([], "all", False, "heat", config.id)
-    assert len(out) == 5
+    out = stats_page._render({"session": config.id}, [], "all", False, "heat")
+    assert len(out) == 11
+    assert session.stats_records_path.exists()
     client = app.server.test_client()
     r = client.get(f"/export/{config.id}/shots.csv")
     assert r.status_code == 200 and b"shot_id" in r.data

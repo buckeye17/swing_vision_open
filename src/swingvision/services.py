@@ -11,7 +11,7 @@ from pathlib import Path
 
 from swingvision.io.probe import probe_video, source_info
 from swingvision.settings import AppSettings
-from swingvision.storage.library import Library, now_iso
+from swingvision.storage.library import Library, now_iso, recording_time
 from swingvision.storage.schemas import (
     MatchConfig,
     Mode,
@@ -90,6 +90,8 @@ def create_session(
         source_path=source.path,
         source_hash=source.fast_hash,
         duration_s=video.duration_s,
+        recorded_on=recording_time(video.creation_time, config.created_at),
+        profile_id=me_profile_id,
     )
     return session
 
@@ -272,6 +274,7 @@ def delete_profile(settings: AppSettings, profile_id: str) -> int:
             changed = True
         if changed:
             session.save_config(config)
+            library.update_session(row["id"], profile_id=config.players.me_profile_id)
             cleared += 1
     library.delete_profile(profile_id)
     return cleared
@@ -286,6 +289,7 @@ def set_session_player(settings: AppSettings, session_id: str, profile_id: str |
     config = session.load_config()
     config.players.me_profile_id = profile_id or None
     session.save_config(config)
+    open_library(settings).update_session(session_id, profile_id=profile_id or None)
 
 
 # ---------------------------------------------------------------------------
@@ -433,3 +437,27 @@ def save_target_set(
 
 def delete_target_set(settings: AppSettings, set_id: str) -> None:
     open_library(settings).delete_target_set(set_id)
+
+
+# ---------------------------------------------------------------------------
+# Session tags and saved Stats views (M7a)
+# ---------------------------------------------------------------------------
+
+
+def set_session_tags(settings: AppSettings, session_id: str, tags: list[str]) -> list[str]:
+    library = open_library(settings)
+    if library.get_session(session_id) is None:
+        raise ValueError(f"Unknown session {session_id}")
+    return library.set_session_tags(session_id, tags)
+
+
+def save_view(settings: AppSettings, name: str, query: str) -> str:
+    """Save a Stats view (its URL query) under a name; one with the same name is replaced."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("A view needs a name.")
+    library = open_library(settings)
+    same = [r for r in library.list_views() if r["name"].lower() == name.lower()]
+    view_id = same[0]["id"] if same else secrets.token_hex(4)
+    library.save_view(view_id, name, query.lstrip("?"))
+    return view_id
