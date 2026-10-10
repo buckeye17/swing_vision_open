@@ -27,8 +27,10 @@ from dash import (
 from swingvision import services
 from swingvision.analysis import aggregate as agg
 from swingvision.analysis import export as ex
+from swingvision.analysis import serve_stats as ssv
 from swingvision.analysis import stats as st
 from swingvision.app import state, units
+from swingvision.app.components import serve_view
 from swingvision.app.components import stats_view as sv
 from swingvision.app.components.court_diagram import heatmap_figure
 from swingvision.app.components.shots_view import uncalibrated_badge
@@ -157,6 +159,7 @@ def _body(trends: bool):
                 span=12,
             )
         )
+    cols.append(dmc.GridCol(_serve_card(), span=12))
     cols += [
         dmc.GridCol(
             _card(
@@ -194,6 +197,61 @@ def _body(trends: bool):
         ),
     ]
     return dmc.Grid(cols, gutter="md")
+
+
+def _serve_card():
+    """Serve contact point vs the front toe (M7b)."""
+    filters = dmc.Group(
+        [
+            dmc.SegmentedControl(
+                id="st-sv-side",
+                value="all",
+                data=[
+                    {"value": "all", "label": "Both sides"},
+                    {"value": "deuce", "label": "Deuce"},
+                    {"value": "ad", "label": "Ad"},
+                ],
+                size="xs",
+            ),
+            dmc.Switch(id="st-sv-near", label="Near end only", size="xs", checked=True),
+            dmc.Switch(id="st-sv-flagged", label="Hide flagged", size="xs", checked=True),
+        ],
+        gap="md",
+    )
+
+    def panel(title: str, graph: str, span):
+        return dmc.GridCol([dmc.Text(title, size="xs", fw=600), _graph(graph)], span=span)
+
+    half = {"base": 12, "md": 6}
+    return _card(
+        "Serve contact",
+        filters,
+        html.Div(id="st-sv-summary", style={"marginTop": 8}),
+        dmc.Grid(
+            [
+                panel("From above", "st-sv-top", half),
+                panel("From the side", "st-sv-side-fig", half),
+                panel(
+                    "Speed (top) and in % (bottom) by where you hit it: bins of at least "
+                    f"{ssv.MIN_BIN} serves, with 95% intervals",
+                    "st-sv-effects",
+                    12,
+                ),
+                panel(
+                    f"In % and median speed per 10 cm cell (cells with at least {ssv.MIN_CELL} "
+                    "serves)",
+                    "st-sv-grid",
+                    12,
+                ),
+            ],
+            gutter="sm",
+        ),
+        hint="Where the ball was struck relative to your front foot's toe tip, in the frame of "
+        "contact: forward toward the net, sideways toward your racket arm. Dots: one serve each, "
+        "coloured by speed, hollow for faults; hover for the uncertainty, click to watch it. "
+        "Serves from the camera's end; flagged ones (far end, contact above the picture, toss "
+        "not seen, in the dark) are hidden unless you switch them on.",
+    )
 
 
 def _scope_switch(value: str, other_ok: bool):
@@ -579,7 +637,7 @@ def _selection_export(query: str, groups, end, excluded, has_rows: bool):
             ),
             dmc.MenuDropdown(
                 [
-                    dmc.MenuLabel("The shots shown (stroke and end filters apply)"),
+                    dmc.MenuLabel("The records shown (the stroke and end filters apply to shots)"),
                     *items,
                 ]
             ),
@@ -646,6 +704,47 @@ def _render(scope, groups, end, excluded, view):
         sv.distance_figure(st.distance_series(data)),
         _count_text(sel),
         exports,
+    )
+
+
+@callback(
+    Output("st-sv-summary", "children"),
+    Output("st-sv-top", "figure"),
+    Output("st-sv-side-fig", "figure"),
+    Output("st-sv-effects", "figure"),
+    Output("st-sv-grid", "figure"),
+    Input("st-scope", "data"),
+    Input("st-excluded", "checked"),
+    Input("st-sv-side", "value"),
+    Input("st-sv-near", "checked"),
+    Input("st-sv-flagged", "checked"),
+)
+def _serves(scope, excluded, side, near, hide_flagged):
+    data, _sel = _load(scope, excluded)
+    if data is None:
+        return (no_update,) * 5
+    if not any(r.get("forward_m") is not None for r in data.serves):
+        text = dmc.Text(
+            "No serve contact points: they need serves from the camera's end with the toss "
+            "and the contact in the picture.",
+            size="sm",
+            c="dimmed",
+        )
+        return text, *(sv.empty_figure("No serve contact points.", h) for h in (380, 380, 300, 300))
+    rows = ssv.select(
+        data.serves,
+        None if side in (None, "all") else side,
+        near_only=bool(near),
+        hide_flagged=bool(hide_flagged),
+    )
+    allrows = [r for r in data.serves if r.get("forward_m") is not None]
+    labels = sv.short_labels(data.sessions)
+    return (
+        serve_view.summary(rows, allrows),
+        serve_view.top_figure(rows, labels),
+        serve_view.side_figure(rows, labels),
+        serve_view.effect_figure(rows),
+        serve_view.grid_figure(rows),
     )
 
 
@@ -723,7 +822,7 @@ clientside_callback(
 # a session (trend point, distance bar) opens that session's stats.
 clientside_callback(
     """
-    function(speed, land, trend, dist) {
+    function(speed, land, trend, dist, svTop, svSide) {
         const nu = window.dash_clientside.no_update;
         const trig = dash_clientside.callback_context.triggered;
         if (!trig.length || !trig[0].value) { return nu; }
@@ -737,6 +836,9 @@ clientside_callback(
         if (id === "st-landings" && cd[0]) {
             return "/session/" + cd[0] + "?t=" + Number(cd[1]).toFixed(2);
         }
+        if ((id === "st-sv-top" || id === "st-sv-side-fig") && cd[1]) {
+            return "/session/" + cd[1] + "?t=" + (Number(cd[2]) - 1.5).toFixed(2);
+        }
         if (id === "st-trend" && cd[3]) { return "/stats/" + cd[3]; }
         if (id === "st-distance" && cd[1]) { return "/stats/" + cd[1]; }
         return nu;
@@ -747,6 +849,8 @@ clientside_callback(
     Input("st-landings", "clickData"),
     Input("st-trend", "clickData"),
     Input("st-distance", "clickData"),
+    Input("st-sv-top", "clickData"),
+    Input("st-sv-side-fig", "clickData"),
     prevent_initial_call=True,
 )
 

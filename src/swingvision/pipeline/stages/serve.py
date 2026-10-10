@@ -9,12 +9,14 @@ it); ``serve_contact`` reads that stage's toss contacts and adds the toe.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 from collections.abc import Callable
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from swingvision.ball.flights import detected_points
 from swingvision.court import calibration as calib
@@ -115,6 +117,59 @@ def feet_windows(session) -> list[list[float]]:
     return out
 
 
+#: A window counts as already done when the frames kept from the last run leave no gap
+#: longer than this (s) in it.
+REUSE_GAP_S = 0.05
+#: Missing frames up to this long (s) in all make ``serve_feet`` light enough to run in the
+#: app (a contact frame or two moved by the user).
+LIGHT_S = 0.6
+
+
+def feet_basis(session) -> dict:
+    """What the stored keypoints were computed from: reusable only while this matches."""
+    from swingvision.pipeline.stage import read_manifest
+
+    mv = read_manifest(session, "movement") or {}
+    return {
+        "model": ft.DEFAULT_MODEL,
+        "padding": ft.PADDING,
+        "movement": mv.get("fingerprint"),
+    }
+
+
+def _stored_feet(session) -> pa.Table | None:
+    """The last run's keypoints, if they were computed the way this run would."""
+    from swingvision.storage.fsutil import read_json
+
+    side = session.serve_feet_path.with_suffix(".json")
+    if not session.serve_feet_path.exists() or not side.exists():
+        return None
+    try:
+        if read_json(side).get("basis") != feet_basis(session):
+            return None
+    except (OSError, ValueError):
+        return None
+    return tables.read_table(session.serve_feet_path).sort_by("t_s")
+
+
+def _gaps(t: np.ndarray, a: float, b: float) -> list[tuple[float, float]]:
+    """The parts of [a, b) the stored frames (times ``t``, sorted) don't cover."""
+    tt = t[(t >= a) & (t < b)]
+    edges = np.r_[a, tt, b]
+    out = []
+    for lo, hi in itertools.pairwise(edges):
+        if hi - lo > REUSE_GAP_S:
+            # The frames at lo and hi are kept; decode strictly between them.
+            out.append((float(lo) + (1e-4 if lo > a else 0.0), float(hi)))
+    return out
+
+
+def _missing_s(session, windows: list[list[float]]) -> float:
+    old = _stored_feet(session)
+    t = old.column("t_s").to_numpy() if old is not None else np.zeros(0)
+    return float(sum(hi - lo for a, b in windows for lo, hi in _gaps(t, a, b)))
+
+
 class ServeFeetStage(Stage):
     """Toe, heel and ankle keypoints around each serve's contact (PLAN.md §6 #15a)."""
 
@@ -139,16 +194,34 @@ class ServeFeetStage(Stage):
         return [session.serve_feet_path]
 
     def light(self, session, config, settings):
-        return not feet_windows(session)  # no serves: nothing to decode
+        # No serves, or only a few frames to add to the last run's (a corrected contact).
+        return _missing_s(session, feet_windows(session)) <= LIGHT_S
 
     def run(self, ctx: StageContext):
+        from swingvision.storage.fsutil import atomic_write_json
+
         session, info = ctx.session, ctx.config.video
         assert info is not None, "ingest must run first"
         windows = feet_windows(session)
         boxes = box_track(me_movement(session))
+        old = _stored_feet(session)
+        old_t = old.column("t_s").to_numpy() if old is not None else np.zeros(0)
         rows: list[tuple] = []
+        todo = []
+        reused = 0
+        for wi, (a, b) in enumerate(windows):
+            if old is not None:
+                keep = old.filter(
+                    pc.and_(pc.greater_equal(old.column("t_s"), a), pc.less(old.column("t_s"), b))
+                )
+                for r in keep.to_pylist():
+                    kp = np.asarray(r["kp"], np.float32).reshape(len(ft.FOOT), 3)
+                    rect = np.array([r["x0"], r["y0"], r["x1"], r["y1"]], np.float32)
+                    rows.append((r["frame"], r["t_s"], wi, kp, rect))
+                reused += keep.num_rows
+            todo += [(wi, lo, hi) for lo, hi in _gaps(old_t, a, b)]
         decoder = None
-        if windows:
+        if todo:
             ctx.progress(0.0, f"Loading {ft.DEFAULT_MODEL}")
             est = ft.FootPose(
                 progress=lambda f: ctx.progress(0.0, f"Downloading {ft.DEFAULT_MODEL} {f:.0%}")
@@ -156,9 +229,9 @@ class ServeFeetStage(Stage):
             source = open_source(_source_path(ctx), info, ctx.settings.processing.decode_backend)
             decoder = source.backend
             with source:
-                for wi, (a, b) in enumerate(windows):
+                for n, (wi, a, b) in enumerate(todo):
                     ctx.check_cancel()
-                    ctx.progress(wi / len(windows), f"Serve {wi + 1}/{len(windows)}")
+                    ctx.progress(n / len(todo), f"Serve {n + 1}/{len(todo)}")
                     pending: list[tuple] = []
                     for f in source.frames(a, b):
                         box = boxes.at(f.t_s)
@@ -172,8 +245,17 @@ class ServeFeetStage(Stage):
                             (fi, t, wi, k, r) for (fi, t, _, r), k in zip(pending, kp, strict=True)
                         ]
         session.pose_dir.mkdir(parents=True, exist_ok=True)
+        rows.sort(key=lambda r: r[1])
         tables.write_table(_feet_table(rows), session.serve_feet_path, SERVE_FEET)
-        return {"serves": len(windows), "frames": len(rows), "decoder": decoder}
+        atomic_write_json(
+            session.serve_feet_path.with_suffix(".json"), {"basis": feet_basis(session)}
+        )
+        return {
+            "serves": len(windows),
+            "frames": len(rows),
+            "reused_frames": reused,
+            "decoder": decoder,
+        }
 
 
 def _feet_table(rows: list[tuple]) -> pa.Table:

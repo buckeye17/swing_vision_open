@@ -6,7 +6,9 @@
 metadata; CSV joins list values with ``|``.
 
 A selection of sessions (M7a) exports the statistics records the Stats page shows
-(:func:`selection_table`): one row per shot or per swing, with the session's columns.
+(:func:`selection_table`): one row per shot, per swing or per serve contact (M7b), with the
+session's columns. The shots export carries each serve's contact point vs the toe in
+``serve_*`` columns.
 """
 
 from __future__ import annotations
@@ -53,6 +55,28 @@ PRACTICE_COLUMNS = (
 )
 
 
+#: Serve contact columns added to the shots export (as ``serve_<name>``, M7b).
+SERVE_COLUMNS = (
+    "frame_contact",
+    "contact_source",
+    "serve_side",
+    "forward_m",
+    "lateral_m",
+    "height_m",
+    "height_rel",
+    "forward_sigma_m",
+    "lateral_sigma_m",
+    "height_sigma_m",
+    "toe_x",
+    "toe_y",
+    "toe_source",
+    "toe_on_ground",
+    "toe_to_baseline_m",
+    "toe_moved_m",
+    "flags",
+)
+
+
 class ExportError(ValueError):
     pass
 
@@ -74,7 +98,23 @@ def export_table(session: Session, what: str) -> pa.Table:
     table = tables.read_table(path)
     if what == "shots" and session.practice_path.exists():
         table = _with_practice(table, tables.read_table(session.practice_path))
+    if what == "shots" and session.serve_contact_path.exists():
+        table = _with_serves(table, tables.read_table(session.serve_contact_path))
     return table
+
+
+def _with_serves(shots: pa.Table, contacts: pa.Table) -> pa.Table:
+    """Left-join each serve's contact point vs the toe (by ``shot_id``)."""
+    rows = contacts.select(["shot_id", *SERVE_COLUMNS]).to_pylist()
+    by_shot = {r["shot_id"]: r for r in rows if r["shot_id"] is not None}
+    ids = shots.column("shot_id").to_pylist()
+    for name in SERVE_COLUMNS:
+        f = contacts.schema.field(name)
+        values = [by_shot[i][name] if i in by_shot else None for i in ids]
+        shots = shots.append_column(
+            pa.field(f"serve_{name}", f.type, metadata=f.metadata), pa.array(values, f.type)
+        )
+    return shots
 
 
 def _with_practice(shots: pa.Table, practice: pa.Table) -> pa.Table:
@@ -124,7 +164,7 @@ def filename(session: Session, what: str, fmt: str) -> str:
 # Selections of sessions (M7a)
 # ---------------------------------------------------------------------------
 
-SELECTION_EXPORTS = {"shots": "Shots", "swings": "Swings"}
+SELECTION_EXPORTS = {"shots": "Shots", "swings": "Swings", "serves": "Serve contacts"}
 #: Session columns first, then the record's own.
 _SESSION_EXPORT = (
     pa.field("session_id", pa.string()),
@@ -139,11 +179,14 @@ def selection_table(data: st.StatsData, what: str, records: list[dict] | None = 
     """The selection's shot (or swing) records with session columns. ``records``: the shot
     records the page shows (after its stroke / end filters), default all of them."""
     if what not in SELECTION_EXPORTS:
-        raise ExportError(f"Unknown export {what!r}; choose shots or swings")
+        raise ExportError(f"Unknown export {what!r}; choose {', '.join(SELECTION_EXPORTS)}")
     if what == "shots":
         rows, own = (data.records if records is None else records), ("t", "side", *st.SHOT_FIELDS)
+    elif what == "serves":
+        rows, own = data.serves, ("t", "side", *st.SERVE_FIELDS)
     else:
         rows, own = data.swings, ("t", "side", *st.SWING_FIELDS)
+    own = tuple(dict.fromkeys(own))
     schema = pa.schema([*_SESSION_EXPORT, *(STATS_RECORDS.field(n) for n in own)])
     info = {s["session_id"]: s for s in data.sessions}
     out = []

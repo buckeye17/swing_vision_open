@@ -186,6 +186,8 @@ class Profile(BaseModel):
     handedness: Handedness = "right"
     backhand: Backhand = "two_handed"
     height_m: float | None = Field(default=None, ge=1.0, le=2.5)
+    #: Heel to toe tip of the shoe (M7b: the toe when the shoe hides it from the camera).
+    shoe_length_m: float | None = Field(default=None, ge=0.18, le=0.40)
     created_at: str
     updated_at: str
 

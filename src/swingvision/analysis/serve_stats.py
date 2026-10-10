@@ -37,6 +37,8 @@ SERIOUS_FLAGS = frozenset(
         "contact_not_seen",
         "poor_toss_fit",
         "no_toe",
+        "dark",
+        "low_conf",
     }
 )
 MIN_BIN = 15
@@ -155,11 +157,20 @@ def _diff_rate(ka: int, na: int, kb: int, nb: int) -> tuple[float, float, float]
     return d, lo, hi
 
 
+def _strength(d: tuple[float, float, float] | None) -> float:
+    """How far a difference's 95% interval stays from 0, in half-widths (0: it includes 0)."""
+    if d is None or not (d[1] > 0 or d[2] < 0):
+        return 0.0
+    return abs(d[0]) / max(1e-9, (d[2] - d[1]) / 2)
+
+
 def findings(rows: list[dict], min_n: int = MIN_BIN) -> list[dict]:
-    """Bins whose speed or in % differs from the rest's with separated 95% intervals."""
+    """Per axis, the contact bin whose speed or in % differs most clearly from the rest's
+    (separated 95% intervals); none for an axis where no bin does."""
     out = []
     for axis in AXES:
         ordered = sorted((r for r in rows if r.get(axis) is not None), key=lambda r: r[axis])
+        best, best_s = None, 0.0
         for b in quantile_bins(ordered, axis, min_n):
             inside = [r for r in ordered if b["lo"] <= r[axis] <= b["hi"]]
             rest = [r for r in ordered if not b["lo"] <= r[axis] <= b["hi"]]
@@ -171,26 +182,27 @@ def findings(rows: list[dict], min_n: int = MIN_BIN) -> list[dict]:
             cb = [v for v in (_is_in(r) for r in rest) if v is not None]
             sp = _diff_mean(sa, sb)
             ip = _diff_rate(sum(ca), len(ca), sum(cb), len(cb))
-            sig_s = sp is not None and (sp[1] > 0 or sp[2] < 0)
-            sig_i = ip is not None and (ip[1] > 0 or ip[2] < 0)
-            if sig_s or sig_i:
-                out.append(
-                    {
-                        "axis": axis,
-                        "lo": b["lo"],
-                        "hi": b["hi"],
-                        "n": len(inside),
-                        "n_rest": len(rest),
-                        "speed": sp if sig_s else None,
-                        "in": ip if sig_i else None,
-                    }
-                )
+            strength = max(_strength(sp), _strength(ip))
+            if strength > best_s:
+                best_s = strength
+                best = {
+                    "axis": axis,
+                    "lo": b["lo"],
+                    "hi": b["hi"],
+                    "n": len(inside),
+                    "n_rest": len(rest),
+                    "speed": sp if _strength(sp) else None,
+                    "in": ip if _strength(ip) else None,
+                }
+        if best is not None:
+            out.append(best)
     return out
 
 
-def summary_text(found: dict, fmt_len) -> str:
+def summary_text(found: dict, fmt_range, fmt_speed) -> str:
     """One plain sentence for a finding, e.g. "Contacts 20–40 cm in front of the toe: +6 km/h
-    and +12 points of in % vs. the rest (n = 84 / 213)"."""
+    and +12 points of in % vs. the rest (n = 84 / 213)". ``fmt_range(lo, hi, axis)`` and
+    ``fmt_speed(kmh)`` format in the user's units."""
     where = {
         "forward_m": "in front of the toe",
         "lateral_m": "to the racket side of the toe",
@@ -198,11 +210,11 @@ def summary_text(found: dict, fmt_len) -> str:
     }[found["axis"]]
     parts = []
     if found["speed"] is not None:
-        parts.append(f"{found['speed'][0]:+.0f} km/h")
+        parts.append(f"{fmt_speed(found['speed'][0])}")
     if found["in"] is not None:
         parts.append(f"{100 * found['in'][0]:+.0f} points of in %")
     return (
-        f"Contacts {fmt_len(found['lo'])} to {fmt_len(found['hi'])} {where}: "
+        f"Contacts {fmt_range(found['lo'], found['hi'], found['axis'])} {where}: "
         f"{' and '.join(parts)} vs. the rest (n = {found['n']} / {found['n'] + found['n_rest']})"
     )
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from swingvision.storage.fsutil import atomic_write_text
-from swingvision.storage.schemas import PracticeShotEdit, SessionEdits, SwingEdit
+from swingvision.storage.schemas import PracticeShotEdit, ServeEdit, SessionEdits, SwingEdit
 from swingvision.storage.session import Session
 
 #: An edit applies to the practice shot whose anchor time is within this of its ``t``.
@@ -110,3 +110,37 @@ def set_swing_stroke(edits: SessionEdits, t: float, stroke: str | None) -> None:
     else:
         e.stroke = stroke
     edits.swings.sort(key=lambda x: x.t)
+
+
+def serve_edit(edits: SessionEdits, t: float) -> ServeEdit | None:
+    """The contact correction for the serve whose contact is at ``t`` (M7b)."""
+    best, best_d = None, MATCH_TOL_S
+    for e in edits.serves:
+        d = abs(e.t - t)
+        if d <= best_d:
+            best, best_d = e, d
+    return best
+
+
+def set_serve(
+    edits: SessionEdits,
+    t: float,
+    *,
+    frame: int | bool | None = False,
+    toe: list[float] | bool | None = False,
+) -> None:
+    """Change one serve's contact correction: the contact frame and the toe tip's pixel in
+    it. ``None`` clears a field, ``False`` (the default) leaves it; an edit with neither is
+    dropped. ``t`` is the serve's contact time *before* any frame correction (the swing's
+    estimate), so the edit finds the serve again after it moved."""
+    e = serve_edit(edits, t)
+    if e is None:
+        e = ServeEdit(t=round(t, 3))
+        edits.serves.append(e)
+    if frame is not False:
+        e.frame = None if frame is None else int(frame)  # type: ignore[arg-type]
+    if toe is not False:
+        e.toe = None if toe is None else [round(float(v), 1) for v in toe]  # type: ignore[union-attr]
+    if e.frame is None and e.toe is None:
+        edits.serves.remove(e)
+    edits.serves.sort(key=lambda x: x.t)

@@ -230,6 +230,7 @@ def save_profile(
     backhand: str = "two_handed",
     height_m: float | None = None,
     profile_id: str | None = None,
+    shoe_length_m: float | None = None,
 ) -> Profile:
     """Create a profile, or update ``profile_id``. Validates the values first."""
     name = (name or "").strip()
@@ -242,6 +243,7 @@ def save_profile(
         handedness=handedness,  # type: ignore[arg-type]
         backhand=backhand,  # type: ignore[arg-type]
         height_m=height_m,
+        shoe_length_m=shoe_length_m,
         created_at=ts,
         updated_at=ts,
     )
@@ -401,6 +403,28 @@ def edit_swing_stroke(
     if session is None:
         raise ValueError(f"Unknown session {session_id}")
     return edits.update(session, lambda e: edits.set_swing_stroke(e, t, stroke), expected_version)
+
+
+def edit_serve(
+    settings: AppSettings,
+    session_id: str,
+    t: float,
+    *,
+    frame: int | bool | None = False,
+    toe: list[float] | bool | None = False,
+    expected_version: int | None = None,
+) -> SessionEdits:
+    """Correct the contact frame and / or the toe tip of the serve at ``t`` (M7b; see
+    ``storage.edits.set_serve``). The corrections are also ground truth for ``sv serves
+    eval``."""
+    from swingvision.storage import edits
+
+    session = session_by_id(settings, session_id)
+    if session is None:
+        raise ValueError(f"Unknown session {session_id}")
+    return edits.update(
+        session, lambda e: edits.set_serve(e, t, frame=frame, toe=toe), expected_version
+    )
 
 
 def _target_set(row: dict) -> TargetSet:

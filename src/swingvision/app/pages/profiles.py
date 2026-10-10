@@ -24,6 +24,7 @@ from swingvision.app.components.ui import (
 from swingvision.storage.schemas import BACKHAND_LABELS, HANDEDNESS_LABELS, Profile
 
 HEIGHT_RANGE_M = (1.0, 2.5)  # Profile.height_m's allowed range
+SHOE_RANGE_M = (0.18, 0.40)  # Profile.shoe_length_m's
 
 
 def _height_bounds(u: units.Units) -> tuple[int, int]:
@@ -70,6 +71,16 @@ def layout(**_):
                 max=h_max,
                 step=1,
                 allowDecimal=False,
+            ),
+            dmc.NumberInput(
+                id="prof-shoe",
+                label=f"Shoe length ({u.small_unit})",
+                description="Heel to toe tip. Places the toe when the shoe hides it on serves "
+                "(otherwise 15% of the height). Optional.",
+                min=u.small(SHOE_RANGE_M[0]),
+                max=u.small(SHOE_RANGE_M[1]),
+                step=0.5,
+                decimalScale=1,
             ),
             dmc.Text(id="prof-error", c="red", size="sm"),
             dmc.Group(
@@ -210,6 +221,7 @@ def _render(_):
     Output("prof-hand", "value"),
     Output("prof-backhand", "value"),
     Output("prof-height", "value"),
+    Output("prof-shoe", "value"),
     Output("prof-error", "children"),
     Output("prof-delete", "style"),
     Input("prof-new", "n_clicks"),
@@ -219,7 +231,7 @@ def _render(_):
 def _open(_new, _edits):
     trig = ctx.triggered_id
     if not ctx.triggered or not ctx.triggered[0]["value"]:
-        return (no_update,) * 9
+        return (no_update,) * 10
     if trig == "prof-new":
         return (
             True,
@@ -229,14 +241,17 @@ def _open(_new, _edits):
             "right",
             "two_handed",
             None,
+            None,
             "",
             {"visibility": "hidden"},
         )
     p = services.get_profile(state.settings(), trig["index"])
     if p is None:
-        return (no_update,) * 9
-    height = units.current().height_to_input(p.height_m) if p.height_m else None
-    return True, f"Edit {p.name}", p.id, p.name, p.handedness, p.backhand, height, "", {}
+        return (no_update,) * 10
+    u = units.current()
+    height = u.height_to_input(p.height_m) if p.height_m else None
+    shoe = round(u.small(p.shoe_length_m), 1) if p.shoe_length_m else None
+    return True, f"Edit {p.name}", p.id, p.name, p.handedness, p.backhand, height, shoe, "", {}
 
 
 @callback(
@@ -250,10 +265,11 @@ def _open(_new, _edits):
     State("prof-hand", "value"),
     State("prof-backhand", "value"),
     State("prof-height", "value"),
+    State("prof-shoe", "value"),
     State("prof-version", "data"),
     prevent_initial_call=True,
 )
-def _save(n, pid, name, hand, backhand, height_in, version):
+def _save(n, pid, name, hand, backhand, height_in, shoe_in, version):
     if not n:
         return no_update, no_update, no_update, no_update
     u = units.current()
@@ -263,10 +279,20 @@ def _save(n, pid, name, hand, backhand, height_in, version):
         height = u.height_from_input(height_in) if height_in not in (None, "") else None
         if height is not None and not HEIGHT_RANGE_M[0] <= height <= HEIGHT_RANGE_M[1]:
             return no_update, range_msg, no_update, no_update
-        p = services.save_profile(state.settings(), name, hand, backhand, height, pid)
+        shoe = float(shoe_in) / u.small_factor if shoe_in not in (None, "") else None
+        p = services.save_profile(
+            state.settings(), name, hand, backhand, height, pid, shoe_length_m=shoe
+        )
     except ValidationError as exc:
         fields = {str(e["loc"][0]) for e in exc.errors() if e.get("loc")}
-        msg = range_msg if "height_m" in fields else str(exc)
+        lo, hi = (round(u.small(v), 1) for v in SHOE_RANGE_M)
+        msg = (
+            range_msg
+            if "height_m" in fields
+            else f"Shoe length must be between {lo} and {hi} {u.small_unit}."
+            if "shoe_length_m" in fields
+            else str(exc)
+        )
         return no_update, msg, no_update, no_update
     except ValueError as exc:
         return no_update, str(exc), no_update, no_update

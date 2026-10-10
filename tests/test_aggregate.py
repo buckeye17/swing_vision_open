@@ -86,6 +86,7 @@ def test_one_session_selection_equals_single_session(lib, excluded):
         assert [s["session_id"] for s in data.sessions] == [spec.id]
         assert data.records == single.records
         assert data.swings == single.swings
+        assert data.serves == single.serves and data.serves
         assert data.movement == single.movement
         assert data.is_practice == single.is_practice
         assert data.duration_s == single.duration_s
@@ -286,7 +287,7 @@ def test_records_file(lib):
     t = tables.read_table(sess.stats_records_path)
     assert t.schema.equals(STATS_RECORDS, check_metadata=False)
     kinds = t.column("kind").to_pylist()
-    assert set(kinds) == {"shot", "swing", "movement"} and kinds.count("movement") == 1
+    assert set(kinds) == {"shot", "swing", "serve", "movement"} and kinds.count("movement") == 1
     row = t.slice(0, 1).to_pylist()[0]
     assert row["session_id"] == "a1" and row["practice_type"] == "serve"
     assert row["profile_id"] == "p1" and row["calibration_by"] == "user"
@@ -380,6 +381,8 @@ def test_selection_export_matches_the_page(lib):
     assert "tags" in csv.column_names and "recorded_on" in csv.column_names
     sw = ex.selection_table(sel.data, "swings")
     assert sw.num_rows == len(sel.data.swings)
+    sv = ex.selection_table(sel.data, "serves")
+    assert sv.num_rows == len(sel.data.serves) > 0 and "forward_m" in sv.column_names
     with pytest.raises(ex.ExportError):
         ex.selection_table(sel.data, "pose")
 

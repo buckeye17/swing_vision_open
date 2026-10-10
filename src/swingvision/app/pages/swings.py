@@ -15,6 +15,7 @@ from dash import ALL, Input, Output, State, callback, clientside_callback, ctx, 
 
 from swingvision import services
 from swingvision.app import state
+from swingvision.app.components import serve_frames as sfr
 from swingvision.app.components import swings_view as sv
 from swingvision.app.components.ui import (
     export_menu,
@@ -221,6 +222,60 @@ def layout(session_id: str | None = None, **_):
                 ],
                 p="sm",
                 withBorder=True,
+            ),
+            dmc.Paper(
+                [
+                    dmc.Group(
+                        [
+                            dmc.Text("Serve contact", fw=600, size="sm"),
+                            dmc.Group(
+                                [
+                                    dmc.Button(
+                                        "Earlier",
+                                        id="sw-serve-earlier",
+                                        size="compact-xs",
+                                        variant="default",
+                                        leftSection=icon("tabler:chevron-left", 12),
+                                    ),
+                                    dmc.Button(
+                                        "Later",
+                                        id="sw-serve-later",
+                                        size="compact-xs",
+                                        variant="default",
+                                        rightSection=icon("tabler:chevron-right", 12),
+                                    ),
+                                    dmc.Button(
+                                        "Reset",
+                                        id="sw-serve-reset",
+                                        size="compact-xs",
+                                        variant="subtle",
+                                        color="gray",
+                                    ),
+                                ],
+                                gap=4,
+                            ),
+                        ],
+                        justify="space-between",
+                    ),
+                    dmc.Text(
+                        "Where the ball was struck relative to the front toe, in the contact "
+                        "frame (the last frame before the ball heads for the net). Step the "
+                        "contact frame if it's off; click the toe tip in the middle picture to "
+                        "move the toe.",
+                        size="xs",
+                        c="dimmed",
+                    ),
+                    dcc.Loading(html.Div(id="sw-serve"), type="dot"),
+                    dcc.Graph(
+                        id="sw-serve-toe",
+                        config={"displayModeBar": False},
+                        style={"display": "none"},
+                    ),
+                ],
+                id="sw-serve-paper",
+                p="sm",
+                withBorder=True,
+                style={"display": "none"},
             ),
             dmc.Paper(
                 [dmc.Text("Metrics", fw=600, size="sm", mb=4), html.Div(id="sw-metrics")],
@@ -483,3 +538,117 @@ clientside_callback(
     Input("sw-skel-on", "checked"),
     prevent_initial_call="initial_duplicate",
 )
+
+
+# ---------------------------------------------------------------------------
+# Serve contact (M7b): the contact frame, the toe, corrections
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("sw-serve-paper", "style"),
+    Output("sw-serve", "children"),
+    Output("sw-serve-toe", "figure"),
+    Output("sw-serve-toe", "style"),
+    Input("sw-selected", "data"),
+    Input("sw-version", "data"),
+    State("sw-session-id", "data"),
+)
+def _serve(swing_id, _version, session_id):
+    hidden = ({"display": "none"}, None, no_update, {"display": "none"})
+    session = _session(session_id)
+    if session is None or swing_id is None:
+        return hidden
+    row = sfr.contact_row(session, swing_id)
+    if row is None:
+        return hidden
+    try:
+        v = sfr.view(session, row)
+    except Exception as exc:  # the video moved, a decode error: still show the numbers
+        v = {"frames": [], "error": str(exc)}
+    strip = []
+    for item in v["frames"]:
+        label = f"{item['frame']}" + (" · contact" if item["contact"] else "")
+        cells = [dmc.Text(label, size="xs", c="dimmed", ta="center")]
+        if item.get("ball"):
+            cells.append(html.Img(src=item["ball"], style={"width": "100%", "borderRadius": 4}))
+        if item.get("toe") and not item["contact"]:
+            cells.append(html.Img(src=item["toe"], style={"width": "100%", "borderRadius": 4}))
+        strip.append(dmc.Stack(cells, gap=2, style={"flex": 1}))
+    children = [sfr.metrics(row)]
+    if strip:
+        children.append(dmc.Group(strip, gap=4, align="flex-start", grow=True, wrap="nowrap"))
+    elif v.get("error"):
+        children.append(dmc.Text(f"Frames unavailable: {v['error']}", size="xs", c="red"))
+    contact = next((i for i in v["frames"] if i["contact"] and i.get("toe_img")), None)
+    if contact is None:
+        return {"display": "block"}, children, no_update, {"display": "none"}
+    fig = sfr.toe_figure(contact, v.get("toe"))
+    return {"display": "block"}, children, fig, {"display": "block", "margin": "4px auto 0"}
+
+
+def _save_serve(session_id, swing_id, version, **change):
+    session = _session(session_id)
+    data = sv.load(session) if session else None
+    row = data.by_id(swing_id) if data else None
+    if row is None:
+        return no_update, no_update
+    s = state.settings()
+    try:
+        services.edit_serve(s, session_id, row["t_contact"], **change)
+        status, job = services.refresh_practice(s, session_id)
+    except (EditConflict, ValueError, RuntimeError) as exc:
+        return no_update, notification(str(exc), "Couldn't save", color="red")
+    if status != "ran":
+        msg = (
+            f"Saved; queued job #{job} to update the session."
+            if status == "queued"
+            else "Saved; the running job picks it up."
+        )
+        return version + 1, notification(msg, "Serve corrected", color="blue")
+    return version + 1, notification("Serve contact updated.", "Serve corrected")
+
+
+@callback(
+    Output("sw-version", "data", allow_duplicate=True),
+    Output("notify", "sendNotifications", allow_duplicate=True),
+    Input("sw-serve-earlier", "n_clicks"),
+    Input("sw-serve-later", "n_clicks"),
+    Input("sw-serve-reset", "n_clicks"),
+    State("sw-selected", "data"),
+    State("sw-session-id", "data"),
+    State("sw-version", "data"),
+    prevent_initial_call=True,
+)
+def _serve_step(earlier, later, reset, swing_id, session_id, version):
+    # The buttons report n_clicks when they mount; only a real click (a count) counts.
+    clicks = {"sw-serve-earlier": earlier, "sw-serve-later": later, "sw-serve-reset": reset}
+    if not clicks.get(ctx.triggered_id):
+        return no_update, no_update
+    session = _session(session_id)
+    row = sfr.contact_row(session, swing_id) if session is not None else None
+    if row is None or row["frame_contact"] is None:
+        return no_update, no_update
+    if ctx.triggered_id == "sw-serve-reset":
+        return _save_serve(session_id, swing_id, version, frame=None, toe=None)
+    step = -1 if ctx.triggered_id == "sw-serve-earlier" else 1
+    # The toe was placed in the old frame; a new frame finds it again from the keypoints.
+    return _save_serve(
+        session_id, swing_id, version, frame=int(row["frame_contact"]) + step, toe=None
+    )
+
+
+@callback(
+    Output("sw-version", "data", allow_duplicate=True),
+    Output("notify", "sendNotifications", allow_duplicate=True),
+    Input("sw-serve-toe", "clickData"),
+    State("sw-selected", "data"),
+    State("sw-session-id", "data"),
+    State("sw-version", "data"),
+    prevent_initial_call=True,
+)
+def _serve_toe(click, swing_id, session_id, version):
+    pt = (click or {}).get("points", [{}])[0]
+    if "x" not in pt or "y" not in pt:
+        return no_update, no_update
+    return _save_serve(session_id, swing_id, version, toe=[pt["x"], pt["y"]])
