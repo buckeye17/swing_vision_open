@@ -214,6 +214,26 @@ class Session:
         return self.pose_dir / "swings.json"
 
     @property
+    def serve_feet_path(self) -> Path:
+        """Foot keypoints around each serve's contact (``serve_feet``, M7b)."""
+        return self.pose_dir / "serve_feet.parquet"
+
+    @property
+    def serve_contact_path(self) -> Path:
+        """One row per serve: contact point relative to the front toe (``serve_contact``)."""
+        return self.pose_dir / "serve_contact.parquet"
+
+    @property
+    def serve_contact_summary_path(self) -> Path:
+        return self.pose_dir / "serve_contact.json"
+
+    @property
+    def toss_cache_path(self) -> Path:
+        """Toss-path contacts already computed (``swings`` and ``serve_contact`` share them,
+        so an edit that reruns ``swings`` doesn't refit every toss)."""
+        return self.work_dir / "toss_contacts.json"
+
+    @property
     def edits_path(self) -> Path:
         """User overrides (PLAN.md §9.3). Never written by the pipeline."""
         return self.path / "edits.json"

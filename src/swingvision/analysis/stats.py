@@ -31,7 +31,7 @@ from swingvision.storage.library import recording_time
 from swingvision.storage.schemas import MOVEMENT, PASS1_FRAMES, STATS_RECORDS, Calibration
 from swingvision.storage.session import Session
 
-STATS_VERSION = 2
+STATS_VERSION = 3  # 3 (M7b): serve contact records
 
 #: Groups shots are summarized by: the recognized stroke, else the practice shot kind.
 GROUPS = ("serve", "forehand", "backhand", "forehand_volley", "backhand_volley", "overhead")
@@ -51,6 +51,12 @@ SHOT_FIELDS = (
 SWING_FIELDS = (
     "swing_id", "stroke_type", "wrist_speed_peak", "forward_s", "contact_height_m",
     "chain_in_order",
+)  # fmt: skip
+SERVE_FIELDS = (
+    "swing_id", "shot_id", "serve_side", "forward_m", "lateral_m", "height_m", "height_rel",
+    "forward_sigma_m", "lateral_sigma_m", "height_sigma_m", "toe_to_baseline_m", "toe_moved_m",
+    "toe_on_ground", "contact_source", "serve_flags", "speed_kmh", "speed_ok", "outcome",
+    "excluded",
 )  # fmt: skip
 MOVEMENT_FIELDS = (
     "processed_frames", "lit_frames", "dark_frames", "tracked_lit_frames", "tracked_s",
@@ -90,6 +96,8 @@ class StatsData:
     is_practice: bool
     duration_s: float = 0.0
     notes: list[str] = field(default_factory=list)
+    #: Serve contact points (M7b) with their serve's speed and call.
+    serves: list[dict] = field(default_factory=list)
 
     @property
     def multi(self) -> bool:
@@ -207,6 +215,36 @@ def swing_record(s: dict) -> dict:
     }
 
 
+def serve_records(contacts: pa.Table | None, records: list[dict]) -> list[dict]:
+    """One record per serve contact (``serve_contact.parquet``), joined with its shot record
+    (by shot, else the nearest serve within 0.3 s) for the speed, the call and exclusion."""
+    if contacts is None:
+        return []
+    by_shot = {r["shot_id"]: r for r in records if r.get("shot_id") is not None}
+    serves = [r for r in records if r["group"] == "serve"]
+    out = []
+    for c in contacts.to_pylist():
+        rec = by_shot.get(c["shot_id"]) if c["shot_id"] is not None else None
+        if rec is None and serves:
+            near = min(serves, key=lambda r: abs((r["t"] or 0.0) - c["t_contact"]))
+            if abs((near["t"] or 0.0) - c["t_contact"]) <= 0.3:
+                rec = near
+        out.append(
+            {
+                "t": c["t_contact"],
+                "side": c["side"],
+                **{k: c[k] for k in SERVE_FIELDS if k in c},
+                "serve_flags": list(c["flags"] or []),
+                "shot_id": rec["shot_id"] if rec is not None else c["shot_id"],
+                "speed_kmh": rec["speed_kmh"] if rec is not None else None,
+                "speed_ok": bool(rec["speed_ok"]) if rec is not None else False,
+                "outcome": rec["outcome"] if rec is not None else None,
+                "excluded": bool(rec["excluded"]) if rec is not None else False,
+            }
+        )
+    return sorted(out, key=lambda r: r["t"] or 0.0)
+
+
 def distance_over_time(movement: pa.Table, bin_s: float = DISTANCE_BIN_S) -> dict:
     """Distance covered per ``bin_s`` of video (m), counted like the movement summary."""
     if movement.num_rows < 2:
@@ -312,7 +350,10 @@ def load(
     sid = info["session_id"]
     records = build_records(shots, practice, include_excluded)
     swing_rows = [swing_record(s) for s in swings.to_pylist()] if swings is not None else []
-    for r in (*records, *swing_rows):
+    serves = serve_records(_opt(session.serve_contact_path), build_records(shots, practice, True))
+    if not include_excluded:
+        serves = [r for r in serves if not r["excluded"]]
+    for r in (*records, *swing_rows, *serves):
         r["session_id"] = sid
     move = movement_record(
         movement if movement is not None else MOVEMENT.empty_table(),
@@ -329,6 +370,7 @@ def load(
         sessions=[info],
         is_practice=config.practice is not None,
         duration_s=info["duration_s"],
+        serves=serves,
     )
     if shots is None:
         data.notes.append("No shots yet: processing hasn't got to the Shots stage.")
@@ -341,7 +383,13 @@ def records_table(data: StatsData) -> pa.Table:
     """``data`` as ``stats_records.parquet`` rows (load with ``include_excluded=True``)."""
     info = {s["session_id"]: s for s in data.sessions}
     rows = []
-    for kind, recs in (("shot", data.records), ("swing", data.swings), ("movement", data.movement)):
+    kinds = (
+        ("shot", data.records),
+        ("swing", data.swings),
+        ("serve", data.serves),
+        ("movement", data.movement),
+    )
+    for kind, recs in kinds:
         for r in recs:
             row = {k: info[r["session_id"]].get(k) for k in SESSION_FIELDS}
             row.update({k: v for k, v in r.items() if k in STATS_RECORDS.names})

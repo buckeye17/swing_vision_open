@@ -169,6 +169,7 @@ class Selection:
             "shots": len(recs),
             "serves": sum(r["group"] == "serve" for r in recs),
             "swings": sum(s["stroke_type"] in st.GROUPS for s in self.data.swings),
+            "serve_contacts": sum(s["forward_m"] is not None for s in self.data.serves),
             "missing": len(self.missing),
             "filtered_out": len(self.filtered_out),
         }
@@ -273,11 +274,15 @@ def _read(rows, paths, missing, flt: SessionFilter, include_excluded: bool) -> S
     if not include_excluded:
         shots = [r for r in shots if not r["excluded"]]
     swings = _rows(table, "swing", (*base, *st.SWING_FIELDS))
+    serves = _rows(table, "serve", (*base, *st.SERVE_FIELDS))
+    if not include_excluded:
+        serves = [r for r in serves if not r["excluded"]]
     movement = _rows(table, "movement", ("session_id", *st.MOVEMENT_FIELDS))
     sessions = [_info(row, rec) for row, rec in keep]
     data = st.StatsData(
         records=ordered(shots),
         swings=ordered(swings),
+        serves=ordered(serves),
         movement=sorted(movement, key=lambda m: order[m["session_id"]]),
         sessions=sessions,
         is_practice=any(s["mode"] == "practice" for s in sessions),

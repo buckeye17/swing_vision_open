@@ -297,7 +297,7 @@ def set_session_player(settings: AppSettings, session_id: str, profile_id: str |
 # ---------------------------------------------------------------------------
 
 #: Stages cheap enough for the app to run itself after an edit (seconds, CPU).
-CHEAP_STAGES = frozenset({"swings", "shots", "segments", "practice_eval", "stats"})
+CHEAP_STAGES = frozenset({"swings", "shots", "serve_contact", "segments", "practice_eval", "stats"})
 
 
 def set_practice(
@@ -346,14 +346,19 @@ def refresh_practice(settings: AppSettings, session_id: str) -> tuple[str, int |
     config = session.load_config()
     target = "stats" if config.mode == "practice" else "shots"
     planned = plan(registry, session, config, settings, [target])
-    stale = {p.stage.name for p in planned if not p.fresh}
+    stale = [p.stage for p in planned if not p.fresh]
     if not stale:
         return "ran", None
-    if stale <= CHEAP_STAGES:
-        result = run(registry, session, settings, targets=[target])
-        if result.status != "done":
+
+    def cheap(stage) -> bool:
+        return stage.name in CHEAP_STAGES or stage.light(session, session.load_config(), settings)
+
+    if all(cheap(st) for st in stale):
+        result = run(registry, session, settings, targets=[target], allow=cheap)
+        if result.status == "done":
+            return "ran", None
+        if result.status != "blocked":
             raise RuntimeError(result.message or "Updating the session failed")
-        return "ran", None
     return "queued", enqueue(settings, session_id, targets=[target])
 
 

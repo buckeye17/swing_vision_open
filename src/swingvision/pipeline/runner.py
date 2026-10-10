@@ -172,7 +172,11 @@ def run(
     targets: list[str] | None = None,
     force: Iterable[str] = (),
     hooks: RunHooks | None = None,
+    allow: Callable[[Stage], bool] | None = None,
 ) -> RunResult:
+    """Run the stale stages needed for ``targets``. ``allow``: stages this caller may run;
+    a stale stage it refuses ends the run as ``blocked`` (the app runs only cheap stages
+    in-process and queues a job for the rest)."""
     hooks = hooks or RunHooks()
     config = session.load_config()
     planned = plan(registry, session, config, settings, targets, force)
@@ -192,6 +196,8 @@ def run(
             continue
         if hooks.is_cancelled():
             return RunResult("cancelled", "Cancelled", ran=ran)
+        if allow is not None and not allow(p.stage):
+            return RunResult("blocked", f"{p.stage.title or name} needs the worker", ran=ran)
         hooks.on_stage_start(name)
         logger.info("Stage {} starting ({})", name, p.reason)
         clear_manifest(session, name)

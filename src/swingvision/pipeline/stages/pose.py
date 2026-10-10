@@ -14,6 +14,7 @@ from swingvision.pipeline.stages.ingest import _source_path
 from swingvision.pipeline.stages.players import player_height
 from swingvision.pose import lift3d
 from swingvision.pose import pose2d as p2d
+from swingvision.pose import serve_contact as sc
 from swingvision.pose import swings as sw
 from swingvision.pose.windows import BoxTrack, merge_windows
 from swingvision.storage import tables
@@ -382,7 +383,8 @@ class SwingsStage(Stage):
 
     name = "swings"
     title = "Swings and strokes"
-    version = 1
+    #: 2 (M7b): serves' contacts from their toss paths.
+    version = 2
     depends_on = ("pose3d", "events", "ball_3d", "audio_onsets", "camera")
     weight = 0.3
 
@@ -401,6 +403,8 @@ class SwingsStage(Stage):
             "model": model.card.get("trained_at") if model else None,
             "model_name": model.name if model else None,
             "edits": [[s.t, s.stroke] for s in e.swings],
+            "serve_frames": [[s.t, s.frame] for s in e.serves if s.frame is not None],
+            "toss": sc.ContactParams().as_config(),
         }
 
     def outputs(self, session):
@@ -416,12 +420,20 @@ class SwingsStage(Stage):
         inp = swing_inputs(session, config, ctx.settings)
         model = st.active_model(ctx.settings.output_root, ctx.settings.processing.stroke_model)
         ctx.progress(0.3, "Analyzing swings")
+        from swingvision.pipeline.stages.serve import toss_function
+
+        cal = calib.load(session.calibration_path)
+        edits = ed.load(session)
+        toss = toss_function(session, cal)
         table, summary = sw.build_swings(
             inp,
             ball_context(session),
             model=model,
-            stroke_edits=[(s.t, s.stroke) for s in ed.load(session).swings],
+            stroke_edits=[(s.t, s.stroke) for s in edits.swings],
+            toss_fn=toss,
+            serve_frames=[(s.t, s.frame) for s in edits.serves if s.frame is not None],
         )
+        toss.save()
         session.pose_dir.mkdir(parents=True, exist_ok=True)
         tables.write_table(table, session.swings_path, SWINGS)
         atomic_write_json(session.swings_summary_path, summary)

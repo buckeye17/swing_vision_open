@@ -324,7 +324,7 @@ def test_library_v4_backfill(tmp_path):
         encoding="utf-8",
     )  # fmt: skip
     lib = Library(root).init()
-    assert lib.schema_version() == 4
+    assert lib.schema_version() == len(MIGRATIONS)
     s1, s2 = lib.get_session("s1"), lib.get_session("s2")
     assert s1["recorded_on"].startswith("2026-10-01") and s1["profile_id"] == "p9"
     assert s2["recorded_on"].startswith("2026-10-0") and s2["profile_id"] is None

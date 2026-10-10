@@ -31,6 +31,8 @@ practice_app = typer.Typer(
 app.add_typer(practice_app, name="practice")
 swings_app = typer.Typer(no_args_is_help=True, help="Swings: strokes, phases, kinematics.")
 app.add_typer(swings_app, name="swings")
+serves_app = typer.Typer(no_args_is_help=True, help="Serves: contact point vs the front toe (M7b).")
+app.add_typer(serves_app, name="serves")
 
 
 @app.command("app")
@@ -956,6 +958,119 @@ def eval_cmd(
     )
     for label, value, ok in checks:
         typer.echo(f"{'PASS' if ok else 'FAIL'}  {label}: {value}")
+
+
+@serves_app.command("contact")
+def serves_contact(
+    session_id: str,
+    all_serves: Annotated[bool, typer.Option("--all", help="Also far and flagged serves")] = False,
+) -> None:
+    """A session's serve contact points: contact frame, toe, offsets with σ, flags."""
+    from swingvision import services
+    from swingvision.analysis import serve_stats as ss
+    from swingvision.storage import tables
+
+    settings = load_settings()
+    session = services.session_by_id(settings, session_id)
+    if session is None or not session.serve_contact_path.exists():
+        raise typer.BadParameter("No serve contacts yet: process the session first")
+
+    def cm(v, s=None) -> str:
+        if v is None:
+            return "    -   "
+        return f"{100 * v:+5.0f}" + (f"±{100 * s:<2.0f}" if s is not None else "   ")
+
+    rows = tables.read_table(session.serve_contact_path).to_pylist()
+    shown = 0
+    for r in rows:
+        flags = set(r["flags"] or [])
+        if not all_serves and (r["side"] != -1 or ss.SERIOUS_FLAGS & flags):
+            continue
+        shown += 1
+        end = {-1: "near", 1: "far"}.get(r["side"], "?")
+        typer.echo(
+            f"#{r['swing_id']:<4} {r['t_contact']:8.2f} s  frame {r['frame_contact'] or '-':>6} "
+            f"({r['contact_source'] or '-':<9}) {end:<4} {r['serve_side'] or '-':<5} "
+            f"fwd {cm(r['forward_m'], r['forward_sigma_m'])} lat {cm(r['lateral_m'], r['lateral_sigma_m'])} "
+            f"cm  height {'-' if r['height_m'] is None else format(r['height_m'], '.2f')} m  "
+            f"toe {r['toe_source'] or '-'}{'' if r['toe_on_ground'] is not False else ' (lifted)'}  "
+            f"{' '.join(sorted(flags))}"
+        )
+    typer.echo(f"{shown} of {len(rows)} serves shown")
+
+
+@serves_app.command("eval")
+def serves_eval(
+    session_ids: Annotated[
+        list[str] | None, typer.Argument(help="Sessions (default: every labeled one)")
+    ] = None,
+) -> None:
+    """Score contact frames, toes and contact points against labeled serves
+    (training/serve_contact/<id>.json plus the Swings page's corrections; M7b exit criteria)."""
+    import json
+
+    from swingvision import services
+    from swingvision.court import calibration as calib
+    from swingvision.storage import edits as ed
+    from swingvision.storage import tables
+    from swingvision.training import serve_labels as sl
+
+    settings = load_settings()
+    root = settings.require_output_root()
+    if not session_ids:
+        d = root / "training" / sl.SERVE_DIR
+        session_ids = sorted(p.stem for p in d.glob("*.json")) if d.exists() else []
+    if not session_ids:
+        raise typer.BadParameter("No labeled sessions (training/serve_contact/<id>.json)")
+    total = sl.ServeReport()
+    for sid in session_ids:
+        session = services.session_by_id(settings, sid)
+        if session is None or not session.serve_contact_path.exists():
+            typer.echo(f"{sid}: no session or serve contacts")
+            continue
+        labels = sl.with_edits(sl.load_labels(root, sid), ed.load(session), sid)
+        cal = calib.load(session.calibration_path)
+        config = session.load_config()
+        rep = sl.evaluate(
+            tables.read_table(session.serve_contact_path),
+            labels,
+            lambda t, cal=cal: calib.camera_at(cal, t),
+            config.video.fps_avg if config.video else 60.0,
+        )
+        typer.echo(f"{sid}: {json.dumps(rep.summary())}")
+        total.merge(rep)
+    s = total.summary()
+
+    def ok(v, test) -> str:
+        return "----" if v is None else ("PASS" if test(v) else "FAIL")
+
+    def pct(v) -> str:
+        return "-" if v is None else f"{v:.1%}"
+
+    def cmv(v) -> str:
+        return "-" if v is None else f"{100 * v:.1f} cm"
+
+    checks = [
+        ("contact frame exact (>= 80%)", s["frame_exact"], lambda v: v >= 0.8, pct(s["frame_exact"])),
+        ("contact frame within ±1 (>= 95%)", s["frame_within_1"], lambda v: v >= 0.95,
+         pct(s["frame_within_1"])),
+        ("toe median (<= 3 cm)", s["toe_median_m"], lambda v: v <= 0.03, cmv(s["toe_median_m"])),
+        ("toe 90% (<= 6 cm)", s["toe_p90_m"], lambda v: v <= 0.06, cmv(s["toe_p90_m"])),
+        ("on-ground test agrees (>= 95%)", s["on_ground_agree"], lambda v: v >= 0.95,
+         pct(s["on_ground_agree"])),
+        ("contact point reprojected (median <= 4 px)", s["ball_median_px"], lambda v: v <= 4,
+         "-" if s["ball_median_px"] is None else f"{s['ball_median_px']:.1f} px"),
+        ("forward σ (median <= 8 cm)", s["forward_sigma_median_m"], lambda v: v <= 0.08,
+         cmv(s["forward_sigma_median_m"])),
+        ("coverage, near serves with the contact in frame (>= 85%)",
+         s["coverage_contact_in_frame"], lambda v: v >= 0.85, pct(s["coverage_contact_in_frame"])),
+    ]  # fmt: skip
+    for label, v, test, text in checks:
+        typer.echo(f"{ok(v, test)}  {label}: {text}")
+    typer.echo(
+        f"n: {s['contact_frames']} contact frames, {s['toes']} toes, {s['balls']} balls; "
+        f"{s['near']} near serves, {s['above_frame']} with the contact above the picture"
+    )
 
 
 @settings_app.command("show")

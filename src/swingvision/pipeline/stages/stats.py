@@ -19,7 +19,7 @@ class StatsStage(Stage):
     name = "stats"
     title = "Statistics"
     version = 2
-    depends_on = ("shots", "movement", "swings", "practice_eval")
+    depends_on = ("shots", "movement", "swings", "practice_eval", "serve_contact")
     modes = frozenset({"practice"})
     weight = 0.05
 

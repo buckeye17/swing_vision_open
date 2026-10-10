@@ -94,6 +94,11 @@ class Stage(ABC):
     def outputs(self, session: Session) -> list[Path]:
         return []
 
+    def light(self, session: Session, config: SessionConfig, settings: AppSettings) -> bool:
+        """When stale, this run would be cheap enough for the app to do in-process (e.g. a GPU
+        stage with nothing to process)."""
+        return False
+
     @abstractmethod
     def run(self, ctx: StageContext) -> dict[str, Any] | None:
         """Do the work; return extra info to store in the manifest."""

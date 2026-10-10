@@ -24,6 +24,7 @@ HF = "https://huggingface.co"
 VITPOSE_REV = "a93ac0c67e0b7e2c55287d21d4c460c8f3c54d45"
 VITPOSE_PLUS_HUGE_REV = "9f36d7aec1800d23e97f10c2e74393aee92aa53f"
 MOTIONBERT_REV = "370a9196aa3c89198b134c82476143b01c0fb32c"
+OPENMMLAB = "https://download.openmmlab.com/mmpose/v1/projects"
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,9 @@ class ModelSpec:
     task: str
     description: str
     size_mb: float
+    #: The download is a zip archive; this member of it is the weights file (``sha256`` is
+    #: the archive's).
+    member: str | None = None
 
     @property
     def path(self) -> Path:
@@ -118,6 +122,20 @@ REGISTRY: dict[str, ModelSpec] = {
             description="2D keypoint sequences to 3D (MotionBERT-Lite, in-the-wild checkpoint)",
             size_mb=64.1,
         ),
+        ModelSpec(
+            name="rtmw-l-wholebody",
+            filename="rtmw-l-wholebody-384x288.onnx",
+            urls=(
+                f"{OPENMMLAB}/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip",
+            ),
+            sha256="a87e1af41a0a067776dba7d46e1c21c8f6e9f18e247e0e606718dd1f31e96ffd",
+            license="Apache-2.0 (RTMW, OpenMMLab MMPose)",
+            task="pose2d (COCO-WholeBody-133 with the feet, top-down, ONNX)",
+            description="Toe, heel and ankle keypoints around serve contacts (RTMW-l distilled "
+            "from RTMW-x, 384×288)",
+            size_mb=213.4,
+            member="end2end.onnx",
+        ),
     )
 }
 
@@ -170,3 +188,20 @@ def _download(url: str, tmp: Path, spec: ModelSpec, progress) -> None:
                 progress(done / total)
     if spec.sha256 and h.hexdigest() != spec.sha256:
         raise ValueError(f"checksum mismatch (got {h.hexdigest()[:12]}…)")
+    if spec.member is not None:
+        _extract(tmp, spec.member)
+
+
+def _extract(path: Path, member: str) -> None:
+    """Replace the zip archive at ``path`` by its ``member`` (found by its base name)."""
+    import shutil
+    import zipfile
+
+    with zipfile.ZipFile(path) as z:
+        name = next((n for n in z.namelist() if n.rsplit("/", 1)[-1] == member), None)
+        if name is None:
+            raise ValueError(f"{member} isn't in the archive")
+        out = path.with_name(path.name + ".member")
+        with z.open(name) as src, out.open("wb") as dst:
+            shutil.copyfileobj(src, dst, 1 << 20)
+    out.replace(path)

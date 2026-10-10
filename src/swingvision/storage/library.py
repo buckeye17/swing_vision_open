@@ -134,6 +134,11 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    # v5: serve contact point (M7b): the player's shoe length (toe from the heel when the
+    # shoe hides the toe tip)
+    """
+    ALTER TABLE profiles ADD COLUMN shoe_length_m REAL;
+    """,
 ]
 
 
@@ -592,7 +597,7 @@ class Library:
         return [dict(r) for r in rows]
 
     # -- profiles ----------------------------------------------------------------
-    PROFILE_FIELDS = ("name", "handedness", "backhand", "height_m")
+    PROFILE_FIELDS = ("name", "handedness", "backhand", "height_m", "shoe_length_m")
 
     def add_profile(
         self,
@@ -602,13 +607,14 @@ class Library:
         handedness: str = "right",
         backhand: str = "two_handed",
         height_m: float | None = None,
+        shoe_length_m: float | None = None,
     ) -> None:
         ts = now_iso()
         with self.connect() as conn:
             conn.execute(
-                """INSERT INTO profiles (id, name, handedness, backhand, height_m, created_at,
-                                         updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (id, name, handedness, backhand, height_m, ts, ts),
+                """INSERT INTO profiles (id, name, handedness, backhand, height_m, shoe_length_m,
+                                         created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (id, name, handedness, backhand, height_m, shoe_length_m, ts, ts),
             )
 
     def get_profile(self, profile_id: str) -> dict[str, Any] | None:

@@ -31,6 +31,7 @@ dependencies = [
     "opencv-python>=4.10",
     "transformers>=4.48",
     "safetensors>=0.4",
+    "onnxruntime-gpu>=1.20,<1.23",  # CUDA 12 builds (torch is cu128)
 ]
 
 [project.optional-dependencies]

@@ -24,6 +24,7 @@ is only a prior: it decides when the pose evidence is thin, and a mismatch is fl
 from __future__ import annotations
 
 import itertools
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
@@ -37,6 +38,8 @@ from swingvision.storage.schemas import SWINGS
 SMOOTH = 7
 #: Span (s) of the racket wrist's average speed into the contact.
 CHORD_S = 0.3
+#: Flags :func:`analyze` sets (the others come later in :func:`build_swings`).
+ANALYZE_FLAGS = frozenset({"little_pose", "far", "implausible_speed", "low_conf"})
 #: An overhead contact is judged on the racket wrist's height this close (s) to the contact.
 OVERHEAD_WINDOW_S = 0.15
 
@@ -732,8 +735,17 @@ def build_swings(
     sp=None,
     model=None,
     stroke_edits: list[tuple[float, str]] = (),
+    toss_fn: Callable | None = None,
+    serve_frames: list[tuple[float, int]] = (),
 ) -> tuple[pa.Table, dict]:
-    """Every swing of the session → (SWINGS table, summary)."""
+    """Every swing of the session → (SWINGS table, summary).
+
+    ``toss_fn(t_guess, frame)`` → :class:`~swingvision.pose.serve_contact.TossContact`: a
+    serve's contact from its toss path (``frame``: a contact frame the user set, from
+    ``serve_frames`` (contact time, frame)). The serve's contact moves to that frame and its
+    phases and metrics are measured from there; the summary keeps each serve's toss contact
+    (``tosses``, by swing id) for ``serve_contact``.
+    """
     from swingvision.pose import strokes as st
 
     p = p or SwingParams()
@@ -808,6 +820,9 @@ def build_swings(
                 r["flags"].append("dark")
                 if r.get("stroke_conf") is not None and r.get("stroke_source") == "rules":
                     r["stroke_conf"] = min(r["stroke_conf"], 0.5)
+    tosses = {}
+    if toss_fn is not None:
+        tosses = _serve_contacts(rows, swings, inp, hand, p, toss_fn, serve_frames)
     for i, r in enumerate(rows):
         r["swing_id"] = i
     table = swings_table(rows)
@@ -827,8 +842,48 @@ def build_swings(
         "av_offset_s": round(inp.av_offset_s, 4),
         "av_offset_source": av_source,
         "stroke_model": getattr(model, "name", None),
+        "tosses": tosses,
     }
     return table, summary
+
+
+def _serve_contacts(
+    rows: list[dict],
+    swings: list[Swing],
+    inp: SwingInputs,
+    hand: str,
+    p: SwingParams,
+    toss_fn: Callable,
+    serve_frames: list[tuple[float, int]],
+) -> dict[str, dict]:
+    """Serves' contacts from their toss paths (PLAN.md §7.11): the swing's contact moves to
+    the contact frame, and its phases and metrics are measured again from there."""
+    from swingvision.pose import serve_contact as sc
+
+    out = {}
+    for i, (r, s) in enumerate(zip(rows, swings, strict=True)):
+        if r.get("stroke_type") != "serve":
+            continue
+        edit = min(serve_frames, key=lambda e: abs(e[0] - r["t_contact"]), default=None)
+        frame = edit[1] if edit is not None and abs(edit[0] - r["t_contact"]) <= 0.25 else None
+        c = toss_fn(r["t_contact"], frame)
+        if c is None:
+            continue
+        out[str(i)] = sc.toss_to_dict(c)
+        moved = (
+            c.frame is not None and c.t is not None and (c.theta is not None or frame is not None)
+        )
+        if not moved or abs(c.t - r["t_contact"]) < 1e-6:
+            continue
+        s.t_contact = c.t
+        rec = analyze(s, inp.pose, r["side"], hand, inp.fps, p)
+        keep = {k: r[k] for k in r if k.startswith("stroke") or k in ("player", "hit_event_id")}
+        extra = [f for f in r["flags"] if f not in ANALYZE_FLAGS]
+        r.update(rec)
+        r.update(keep)
+        r["flags"] = rec["flags"] + extra
+        r.update(t_contact=c.t, frame_contact=c.frame, contact_source="toss_path")
+    return out
 
 
 def _strongest_strokes(rows: list[dict], p: SwingParams) -> None:

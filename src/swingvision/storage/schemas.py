@@ -105,12 +105,23 @@ class SwingEdit(BaseModel):
     stroke: str
 
 
+class ServeEdit(BaseModel):
+    """The user's corrections to one serve's contact (M7b), found again by the swing's
+    contact time ``t``: the contact frame, and the front toe tip's pixel in that frame. Also
+    ground truth for ``sv serves eval``."""
+
+    t: float
+    frame: int | None = None
+    toe: list[float] | None = None
+
+
 class SessionEdits(BaseModel):
     """``edits.json``: user overrides layered over derived data (PLAN.md §9.3)."""
 
     version: int = 0
     practice_shots: list[PracticeShotEdit] = Field(default_factory=list)
     swings: list[SwingEdit] = Field(default_factory=list)
+    serves: list[ServeEdit] = Field(default_factory=list)
 
 
 class PracticeConfig(BaseModel):
@@ -712,7 +723,12 @@ SWINGS = table_schema(
         field("player", pa.string(), None, "me | opponent"),
         field("t_contact", pa.float64(), "s", "Contact time"),
         field("frame_contact", pa.int64(), None, "Frame nearest to the contact"),
-        field("contact_source", pa.string(), None, "hit (ball event) | audio | pose"),
+        field(
+            "contact_source",
+            pa.string(),
+            None,
+            "hit (ball event) | audio | pose | toss_path (serves: the last frame on the toss, M7b)",
+        ),
         field("t_contact_pose", pa.float64(), "s", "Contact estimated from the pose alone"),
         field("hit_event_id", pa.int32(), None, "The hit in events.parquet"),
         field("side", pa.int8(), None, "Player's half: -1 near (camera side), +1 far"),
@@ -789,6 +805,87 @@ SWINGS = table_schema(
     ],
 )
 
+#: Foot keypoints in the frames around each serve's contact (``serve_feet``, M7b).
+SERVE_FEET = table_schema(
+    "serve_feet",
+    1,
+    [
+        field("frame", pa.int64(), None, "Presentation-order frame number", nullable=False),
+        field("t_s", pa.float64(), "s", "Time on the video timeline", nullable=False),
+        field("window", pa.int32(), None, "Serve window (one per serve, in time order)"),
+        field(
+            "kp",
+            pa.list_(pa.float32(), 24),
+            "px",
+            "Ankle, big toe, small toe and heel of the left then the right foot "
+            "(pose.feet.FOOT): x, y (full-resolution display pixels), score",
+        ),
+        field("x0", pa.float32(), "px", "Crop the pose network saw"),
+        field("y0", pa.float32(), "px"),
+        field("x1", pa.float32(), "px"),
+        field("y1", pa.float32(), "px"),
+    ],
+)
+
+#: One row per serve: the contact point relative to the front toe (``serve_contact``, M7b).
+SERVE_CONTACT = table_schema(
+    "serve_contact",
+    1,
+    [
+        field("swing_id", pa.int32(), None, "The serve's swing", nullable=False),
+        field("shot_id", pa.int32(), None, "Its shot (null: contact not seen)"),
+        field("t_contact", pa.float64(), "s", "The contact frame's time"),
+        field("frame_contact", pa.int64(), None, "Contact frame: the last frame on the toss"),
+        field(
+            "contact_source",
+            pa.string(),
+            None,
+            "toss_path (the next frame's ball left the toss) | inferred | edit",
+        ),
+        field("side", pa.int8(), None, "Server's half: -1 near (camera side), +1 far"),
+        field("serve_side", pa.string(), None, "deuce | ad (from where the server stands)"),
+        field("racket_hand", pa.string(), None, "left | right"),
+        field("front_foot", pa.string(), None, "left | right (opposite the racket hand)"),
+        field("toe_x", pa.float64(), "m", "Front toe tip in the contact frame (court)"),
+        field("toe_y", pa.float64(), "m"),
+        field("toe_z", pa.float64(), "m", "Height (0: on the ground)"),
+        field("toe_sigma_m", pa.float64(), "m", "1-σ of the toe's ground position"),
+        field("toe_source", pa.string(), None, "toe | heel_length | edit"),
+        field("toe_on_ground", pa.bool_(), None, "Still in the image and low before the contact"),
+        field("toe_moved_m", pa.float64(), "m", "How far the toe moved from the toss release"),
+        field("toe_to_baseline_m", pa.float64(), "m", "Toe behind (+) the baseline at contact"),
+        field("toe_px_x", pa.float32(), "px", "The toe tip in the contact frame (image)"),
+        field("toe_px_y", pa.float32(), "px"),
+        field("contact_x", pa.float64(), "m", "Ball on the toss path in the contact frame"),
+        field("contact_y", pa.float64(), "m"),
+        field("contact_z", pa.float64(), "m"),
+        field(
+            "contact_cov",
+            pa.list_(pa.float32(), 9),
+            "m²",
+            "Covariance of the contact point (NaN: no contact point)",
+        ),
+        field("ball_px_x", pa.float32(), "px", "Contact point projected into the contact frame"),
+        field("ball_px_y", pa.float32(), "px"),
+        field("forward_m", pa.float64(), "m", "Contact ahead (+) of the toe, toward the net"),
+        field(
+            "lateral_m",
+            pa.float64(),
+            "m",
+            "Contact to the racket-arm side (+) of the toe, along the baseline",
+        ),
+        field("height_m", pa.float64(), "m", "Ball center above the ground"),
+        field("height_rel", pa.float64(), None, "Height / the player's height"),
+        field("forward_sigma_m", pa.float64(), "m"),
+        field("lateral_sigma_m", pa.float64(), "m"),
+        field("height_sigma_m", pa.float64(), "m"),
+        field("t_release", pa.float64(), "s", "The toss leaves the hand"),
+        field("toss_points", pa.int32(), None, "Detections on the toss path"),
+        field("toss_rms_px", pa.float32(), "px", "Toss fit reprojection RMS"),
+        field("flags", pa.list_(pa.string()), None, "Quality flags (PLAN.md §7.11)"),
+    ],
+)
+
 # ---------------------------------------------------------------------------
 # Statistics records (PLAN.md §7.13)
 # ---------------------------------------------------------------------------
@@ -799,7 +896,7 @@ SWINGS = table_schema(
 #: this file changes nothing.
 STATS_RECORDS = table_schema(
     "stats_records",
-    1,
+    2,
     [
         field("session_id", pa.string(), None, nullable=False),
         field("recorded_on", pa.string(), None, "Recording start, local time (ISO)"),
@@ -809,7 +906,7 @@ STATS_RECORDS = table_schema(
         field("device_key", pa.string(), None, "Recording device (M7c)"),
         field("calibration_by", pa.string(), None, "Court calibration accepted by: user | auto"),
         field("speeds_calibrated", pa.bool_(), None, "Speeds carry a device calibration (M7c)"),
-        field("kind", pa.string(), None, "shot | swing | movement", nullable=False),
+        field("kind", pa.string(), None, "shot | swing | serve | movement", nullable=False),
         field("t", pa.float64(), "s", "Contact time (shots, swings)"),
         field("side", pa.int8(), None, "Hitter's half: -1 near, +1 far"),
         # Shots
@@ -836,6 +933,20 @@ STATS_RECORDS = table_schema(
         field("forward_s", pa.float64(), "s"),
         field("contact_height_m", pa.float64(), "m"),
         field("chain_in_order", pa.bool_(), None),
+        # Serve contact points (M7b; with the serve's speed, call and exclusion above)
+        field("serve_side", pa.string(), None, "deuce | ad"),
+        field("forward_m", pa.float64(), "m", "Contact ahead of the front toe"),
+        field("lateral_m", pa.float64(), "m", "Contact to the racket-arm side of the toe"),
+        field("height_m", pa.float64(), "m", "Contact height above the ground"),
+        field("height_rel", pa.float64(), None, "Contact height / the player's height"),
+        field("forward_sigma_m", pa.float64(), "m"),
+        field("lateral_sigma_m", pa.float64(), "m"),
+        field("height_sigma_m", pa.float64(), "m"),
+        field("toe_to_baseline_m", pa.float64(), "m"),
+        field("toe_moved_m", pa.float64(), "m"),
+        field("toe_on_ground", pa.bool_(), None),
+        field("contact_source", pa.string(), None, "toss_path | inferred | edit"),
+        field("serve_flags", pa.list_(pa.string()), None),
         # Movement: what pooled movement figures need (sums and counts, not just ratios)
         field("processed_frames", pa.int64(), None),
         field("lit_frames", pa.int64(), None),
@@ -873,5 +984,7 @@ SCHEMAS: dict[str, pa.Schema] = {
     "pose2d": POSE2D,
     "pose3d": POSE3D,
     "swings": SWINGS,
+    "serve_feet": SERVE_FEET,
+    "serve_contact": SERVE_CONTACT,
     "stats_records": STATS_RECORDS,
 }
