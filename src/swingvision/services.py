@@ -9,7 +9,7 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
-from swingvision.io.probe import probe_video, source_info
+from swingvision.io.probe import device_key, probe_video, source_info
 from swingvision.settings import AppSettings
 from swingvision.storage.library import Library, now_iso, recording_time
 from swingvision.storage.schemas import (
@@ -53,6 +53,7 @@ def create_session(
     practice_submode: PracticeSubmode = "self_feed",
     me_profile_id: str | None = None,
     practice_targets: list[Target] | None = None,
+    air_temp_c: float | None = None,
 ) -> Session:
     library = open_library(settings)
     source = source_info(Path(source_path))
@@ -78,8 +79,12 @@ def create_session(
         ),
         match=MatchConfig() if mode == "match" else None,
         players=PlayersConfig(me_profile_id=me_profile_id),
+        device_key=device_key(video),
+        air_temp_c=air_temp_c,
     )
     session.save_config(config)
+    if config.device_key:
+        library.add_device(config.device_key, video)
     library.add_session(
         id=session_id,
         name=name,
@@ -93,6 +98,7 @@ def create_session(
         recorded_on=recording_time(video.creation_time, config.created_at),
         profile_id=me_profile_id,
     )
+    library.update_session(session_id, device_key=config.device_key, air_temp_c=air_temp_c)
     return session
 
 
@@ -299,7 +305,9 @@ def set_session_player(settings: AppSettings, session_id: str, profile_id: str |
 # ---------------------------------------------------------------------------
 
 #: Stages cheap enough for the app to run itself after an edit (seconds, CPU).
-CHEAP_STAGES = frozenset({"swings", "shots", "serve_contact", "segments", "practice_eval", "stats"})
+CHEAP_STAGES = frozenset(
+    {"swings", "shots", "serve_contact", "speed_refs", "segments", "practice_eval", "stats"}
+)
 
 
 def set_practice(
@@ -325,7 +333,9 @@ def set_practice(
     return config
 
 
-def refresh_practice(settings: AppSettings, session_id: str) -> tuple[str, int | None]:
+def refresh_practice(
+    settings: AppSettings, session_id: str, target: str | None = None
+) -> tuple[str, int | None]:
     """Bring ``segments``, ``practice_eval`` and ``stats`` (and the swings and shots they
     read) up to date after an edit.
 
@@ -346,7 +356,7 @@ def refresh_practice(settings: AppSettings, session_id: str) -> tuple[str, int |
         raise ValueError(f"Unknown session {session_id}")
     registry = default_registry()
     config = session.load_config()
-    target = "stats" if config.mode == "practice" else "shots"
+    target = target or ("stats" if config.mode == "practice" else "shots")
     planned = plan(registry, session, config, settings, [target])
     stale = [p.stage for p in planned if not p.fresh]
     if not stale:
@@ -490,3 +500,207 @@ def save_view(settings: AppSettings, name: str, query: str) -> str:
     view_id = same[0]["id"] if same else secrets.token_hex(4)
     library.save_view(view_id, name, query.lstrip("?"))
     return view_id
+
+
+# ---------------------------------------------------------------------------
+# Devices and speed calibration (M7c)
+# ---------------------------------------------------------------------------
+
+
+def backfill_devices(settings: AppSettings) -> list[str]:
+    """Give sessions probed before M7c their recording device: re-probe each source video
+    that is still where it was (a second or less each) and store the device tags. Returns
+    the ids of the sessions that got one."""
+    library = open_library(settings)
+    done = []
+    for row in library.list_sessions():
+        if row.get("device_key"):
+            continue
+        session = Session.open(library.root, row["dir_name"])
+        if not session.config_path.exists():
+            continue
+        config = session.load_config()
+        key = config.device_key or device_key(config.video)
+        if key is None and not source_missing(row) and config.video is not None:
+            try:
+                probed = probe_video(settings.ffprobe(), Path(row["source_path"]))
+            except Exception:  # a missing ffprobe or an unreadable file: try again later
+                continue
+            for f in ("device_make", "device_model", "device_lens"):
+                setattr(config.video, f, getattr(probed, f))
+            key = device_key(config.video)
+        if key is None:
+            continue
+        config.device_key = key
+        session.save_config(config)
+        library.add_device(key, config.video)
+        library.update_session(row["id"], device_key=key)
+        done.append(row["id"])
+    return done
+
+
+def device_name(row: dict | None) -> str:
+    """A ``devices`` row as people read it: the user's label, else "OnePlus Open · back_main
+    · 3840×2160 60 fps"."""
+    if not row:
+        return "Unknown device"
+    if row.get("label"):
+        return row["label"]
+    name = row.get("model") or row["device_key"]
+    if row.get("make") and not name.lower().startswith(row["make"].lower()):
+        name = f"{row['make']} {name}"
+    bits = [name] + ([row["lens"]] if row.get("lens") else [])
+    if row.get("width"):
+        bits.append(f"{row['width']}×{row['height']} {round(row.get('fps') or 0)} fps")
+    return " · ".join(bits)
+
+
+def speed_status(settings: AppSettings, session: Session) -> tuple[dict | None, str | None]:
+    """(the speed calibration the session's shots were made with, its device's name), for
+    the badges."""
+    from swingvision.analysis.stats import speed_calibration
+
+    cal = speed_calibration(session)
+    if cal is None:
+        return None, None
+    row = open_library(settings).get_device(cal.get("device_key") or "") or {}
+    return cal, row.get("label") or row.get("model") or cal.get("device_key")
+
+
+def set_air_temperature(settings: AppSettings, session_id: str, temp_c: float | None) -> None:
+    """The air temperature during the recording (°C; ``None``: not known, 20 °C assumed)."""
+    session = session_by_id(settings, session_id)
+    if session is None:
+        raise ValueError(f"Unknown session {session_id}")
+    config = session.load_config()
+    config.air_temp_c = None if temp_c is None else round(float(temp_c), 1)
+    SessionConfig.model_validate(config.model_dump())  # range check
+    session.save_config(config)
+    open_library(settings).update_session(session_id, air_temp_c=config.air_temp_c)
+
+
+def set_session_speed_calibration(
+    settings: AppSettings, session_id: str, value: str | None
+) -> None:
+    """Which calibration the session's speeds use: ``None`` its device's active one,
+    ``"none"`` none, else a calibration id."""
+    session = session_by_id(settings, session_id)
+    if session is None:
+        raise ValueError(f"Unknown session {session_id}")
+    if value not in (None, "none") and open_library(settings).get_calibration(value) is None:
+        raise ValueError(f"Unknown calibration {value}")
+    config = session.load_config()
+    config.speed_calibration = value
+    session.save_config(config)
+
+
+def edit_speed_ref(
+    settings: AppSettings,
+    session_id: str,
+    t: float,
+    *,
+    status: str | bool | None = False,
+    marked: bool | None = None,
+    t_racket: float | bool | None = False,
+    t_tape: float | bool | None = False,
+    expected_version: int | None = None,
+) -> SessionEdits:
+    """Review the reference serve at ``t`` (see ``storage.edits.set_speed_ref``); the
+    session's reviews are also saved as ground truth (``training/speed_refs/``)."""
+    from swingvision.storage import edits
+    from swingvision.training import speed_labels
+
+    session = session_by_id(settings, session_id)
+    if session is None:
+        raise ValueError(f"Unknown session {session_id}")
+    out = edits.update(
+        session,
+        lambda e: edits.set_speed_ref(
+            e, t, status=status, marked=marked, t_racket=t_racket, t_tape=t_tape
+        ),
+        expected_version,
+    )
+    speed_labels.save_from_edits(settings.require_output_root(), session.load_config(), out)
+    return out
+
+
+def device_references(settings: AppSettings, device: str) -> list[dict]:
+    """Every accepted reference of the device's sessions, with its session id."""
+    from swingvision.storage import tables
+
+    library = open_library(settings)
+    out = []
+    for row in library.sessions_of_device(device):
+        session = Session.open(library.root, row["dir_name"])
+        if not session.speed_refs_path.exists():
+            continue
+        for r in tables.read_table(session.speed_refs_path).to_pylist():
+            if r["status"] == "accepted" and r["ratio"] is not None:
+                out.append({**r, "session_id": row["id"]})
+    return out
+
+
+#: What a calibration keeps of each reference (``speed_calibrations.refs_json``).
+REF_KEYS = (
+    "session_id", "ref_id", "t_contact", "ratio", "ratio_sigma", "v_ref_kmh", "v_fit_kmh",
+    "rs_rate", "img_vy", "dt_s", "flags",
+)  # fmt: skip
+
+
+def calibrate_device(settings: AppSettings, device: str, save: bool = True):
+    """Fit the device's speed calibration from its accepted references (§7.12) and, with
+    ``save``, store it as the device's new active version. Returns (calibration or None
+    when there are too few references, the stored row or None, the references used)."""
+    from swingvision.ball import speed_refs as sr
+
+    library = open_library(settings)
+    if library.get_device(device) is None:
+        raise ValueError(f"Unknown device {device}")
+    refs = device_references(settings, device)
+    cal = sr.fit_calibration(refs)
+    if cal is None or not save:
+        return cal, None, refs
+    kept = [{k: r.get(k) for k in REF_KEYS} for r in refs]
+    row = library.add_calibration(
+        secrets.token_hex(4), device, kept, cal.diagnostics, model=cal.model, k=cal.k,
+        k_sigma=cal.k_sigma, tau_s=cal.tau_s, tau_sigma_s=cal.tau_sigma_s, n_refs=cal.n_refs,
+        loo_sd=cal.loo_sd,
+    )  # fmt: skip
+    return cal, row, refs
+
+
+def set_active_calibration(settings: AppSettings, device: str, cal_id: str | None) -> None:
+    open_library(settings).set_active_calibration(device, cal_id)
+
+
+def rename_device(settings: AppSettings, device: str, label: str | None) -> None:
+    open_library(settings).rename_device(device, (label or "").strip() or None)
+
+
+def merge_devices(settings: AppSettings, src: str, dst: str) -> list[str]:
+    """Treat ``src`` as the same phone and mode as ``dst``: its sessions move over (their
+    ``session.json`` too) and ``src`` goes. Calibrate ``dst`` again to use their references."""
+    library = open_library(settings)
+    moved = library.merge_devices(src, dst)
+    for sid in moved:
+        session = session_by_id(settings, sid)
+        if session is None:
+            continue
+        config = session.load_config()
+        config.device_key = dst
+        session.save_config(config)
+    return moved
+
+
+def refresh_device(settings: AppSettings, device: str) -> dict[str, list]:
+    """Bring the device's sessions up to date after its calibration changed (``shots`` and
+    what reads it): in-app where cheap, else queued. Returns session ids by outcome."""
+    out: dict[str, list] = {"ran": [], "queued": [], "busy": []}
+    for row in open_library(settings).sessions_of_device(device):
+        try:
+            how, _job = refresh_practice(settings, row["id"])
+        except Exception:  # one broken session doesn't stop the others
+            how = "queued"
+            enqueue(settings, row["id"])
+        out[how].append(row["id"])
+    return out

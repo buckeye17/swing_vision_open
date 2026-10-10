@@ -15,6 +15,7 @@ from swingvision.pipeline.stages.pose import Pass2PoseStage, Pose3DStage, Swings
 from swingvision.pipeline.stages.practice import PracticeEvalStage, SegmentsStage
 from swingvision.pipeline.stages.serve import ServeContactStage, ServeFeetStage
 from swingvision.pipeline.stages.shots import Ball3DStage, ShotsStage
+from swingvision.pipeline.stages.speed import SpeedRefsStage
 from swingvision.pipeline.stages.stats import StatsStage
 
 
@@ -42,6 +43,7 @@ def default_registry() -> Registry:
             ShotsStage(),
             ServeFeetStage(),
             ServeContactStage(),
+            SpeedRefsStage(),
             SegmentsStage(),
             PracticeEvalStage(),
             StatsStage(),

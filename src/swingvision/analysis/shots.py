@@ -8,6 +8,11 @@ flagged ``close_call``.
 
 Stroke type, serve and swing fields come from the ``swings`` stage (M6), when the hit has
 the player's pose around it.
+
+Speeds carry the recording device's calibration from net-tape serves when it has one
+(M7c, PLAN.md §7.12): every speed × the calibration's factor (per flight, with a rolling
+shutter readout time), and the error every speed shares is then 2σ of the calibration
+instead of :data:`SPEED_SCALE_ERROR`.
 """
 
 from __future__ import annotations
@@ -34,12 +39,14 @@ SPEED_UNCERTAIN_OPEN_END = 0.05
 #: Spin is reported only beyond this many σ (and this magnitude, 1/m).
 SPIN_SIGMAS = 2.0
 SPIN_MIN = 0.002
-#: Speeds are not calibrated against a radar gun or a ball machine. Bound on the error shared
-#: by every speed (the camera's metric scale and the video clock, checked against gravity on
-#: two sessions: +0.6% and +1.5%; ≈1% from the drag model in the synthetic tests; rolling
-#: shutter < 1%). See docs/m4-ball-3d.md. Replace with the measured offset's uncertainty once
-#: a radar or ball-machine session exists.
+#: Bound on the error shared by every *uncalibrated* speed (the camera's metric scale and the
+#: video clock, checked against gravity on two sessions: +0.6% and +1.5%; ≈1% from the drag
+#: model in the synthetic tests; rolling shutter < 1%). See docs/m4-ball-3d.md. A device
+#: calibration from net-tape serves (M7c) replaces it with 2σ of its factor.
 SPEED_SCALE_ERROR = 0.03
+#: Flights are this long at most (s) for the rolling-shutter rate a calibration's readout
+#: time applies to (contact → net for a serve).
+RS_SPAN_S = 0.4
 #: Flags that mean the flight's numbers shouldn't be trusted.
 BAD_FLIGHT_FLAGS = frozenset({"poor_fit", "few_points"})
 
@@ -75,23 +82,73 @@ def spin_sign(spin: float | None, sigma: float | None) -> int | None:
     return 1 if spin > 0 else -1
 
 
-def speed_error_kmh(speed_kmh: float | None, sigma_kmh: float | None) -> float | None:
-    """How far an uncalibrated speed could be off: the shared bound plus 2σ of its own fit."""
+def speed_error_kmh(
+    speed_kmh: float | None, sigma_kmh: float | None, scale_err: float | None = None
+) -> float | None:
+    """How far a speed could be off: the bound every speed shares (``scale_err``, the
+    shot's ``speed_scale_err``; uncalibrated :data:`SPEED_SCALE_ERROR`) plus 2σ of its own
+    fit."""
     if speed_kmh is None:
         return None
-    return SPEED_SCALE_ERROR * speed_kmh + 2 * (sigma_kmh or 0.0)
+    scale = SPEED_SCALE_ERROR if scale_err is None else scale_err
+    return scale * speed_kmh + 2 * (sigma_kmh or 0.0)
 
 
-def speed_error_text() -> str:
-    """One-paragraph explanation of the uncalibrated speed error, for the app and the CLI."""
+def speed_error_text(calibration: dict | None = None, device: str | None = None) -> str:
+    """One-paragraph explanation of the speed error, for the app and the CLI."""
+    if calibration:
+        pct = f"{2 * calibration['k_sigma'] / calibration['k']:.1%}"
+        n = calibration.get("n_refs")
+        return (
+            f"Speeds are calibrated for {device or 'this recording device'} from "
+            f"{n} serves that hit the net tape (their speed timed by the racket and tape "
+            f"sounds): × {calibration['k']:.3f}. Every speed can still be off by up to "
+            f"{pct} in the same direction (twice the calibration's uncertainty), plus each "
+            "shot's own fit uncertainty. The ± shown with a speed is that plus twice its own "
+            "uncertainty."
+        )
     pct = f"{SPEED_SCALE_ERROR:.0%}"
     return (
-        "Speeds aren't calibrated against a radar gun or a ball machine yet. Every speed can "
+        "Speeds aren't calibrated yet: no serves that hit the net tape have been reviewed for "
+        "this recording device (Calibration → Speed). Every speed can "
         f"be off by up to about {pct} in the same direction (camera scale and clock, checked "
         "against gravity on real footage: 0.6-1.5%), plus each shot's own fit uncertainty "
         "(typically ±2% for shots from the camera's end, ±5% or more from the far end or in "
         f"poor light). The ± shown with a speed is {pct} plus twice its own uncertainty."
     )
+
+
+def is_calibrated(scale_err: float | None) -> bool:
+    """Whether a speed's shared error bound comes from a calibration (they are only used
+    when tighter than the uncalibrated bound)."""
+    return scale_err is not None and scale_err < SPEED_SCALE_ERROR - 1e-4
+
+
+def calibration_scale_err(calibration: dict | None) -> float:
+    """The bound every speed shares: 2σ of the calibration, or :data:`SPEED_SCALE_ERROR`."""
+    if not calibration:
+        return SPEED_SCALE_ERROR
+    return 2 * float(calibration["k_sigma"]) / float(calibration["k"])
+
+
+def flight_rs_rate(f: dict, cam: Camera, rotation_cw: int) -> float | None:
+    """The sensor readout fraction a flight crosses per second over its first
+    :data:`RS_SPAN_S` (where its speeds are measured), for a rolling-shutter calibration."""
+    from swingvision.ball import physics as ph
+    from swingvision.ball.speed_refs import readout_fraction
+
+    theta = np.array(
+        [f[k] for k in ("p0_x", "p0_y", "p0_z", "v0_x", "v0_y", "v0_z", "spin", "cd")], float
+    )
+    if not np.isfinite(theta).all():
+        return None
+    t0 = float(f["t0_s"])
+    t1 = min(float(f["t1_s"]), t0 + RS_SPAN_S)
+    if t1 <= t0:
+        return None
+    P = ph.simulate(theta[None], t0, np.array([t0, t1]))[0][0]
+    s0, s1 = readout_fraction(cam.project(P), rotation_cw, cam.width, cam.height)
+    return float((s1 - s0) / (t1 - t0))
 
 
 def _num(v) -> float | None:
@@ -105,9 +162,15 @@ def assemble_shots(
     camera_at: Callable[[float], Camera],
     rejected_hits: set[int] | None = None,
     swings: pa.Table | None = None,
+    calibration: dict | None = None,
+    rotation_cw: int = 0,
 ) -> pa.Table:
     """Shots from hit events (minus ``rejected_hits``, which the 3D fits showed weren't the
-    hitter's contact), with the stroke of the player's swing at the hit (M6)."""
+    hitter's contact), with the stroke of the player's swing at the hit (M6), and speeds
+    corrected by the device's ``calibration`` (M7c; ``ball.speed_refs.speed_factor``)."""
+    from swingvision.ball.speed_refs import speed_factor
+
+    scale_err = calibration_scale_err(calibration)
     rejected_hits = rejected_hits or set()
     swing_by_hit = {
         r["hit_event_id"]: r
@@ -169,6 +232,12 @@ def assemble_shots(
         share = SPEED_UNCERTAIN_OPEN_END if end_kind == "lost" else SPEED_UNCERTAIN
         if v0 is not None and (v0s is None or v0s > share * v0):
             flags.append("speed_uncertain")
+        factor = 1.0
+        if calibration and good:
+            rs = None
+            if calibration.get("model") == "rolling_shutter":
+                rs = flight_rs_rate(f, camera_at(f["t0_s"]), rotation_cw)
+            factor = speed_factor(calibration, rs)
         t_end = land_t if land_t is not None else (f["t1_s"] if f is not None else None)
         sw = swing_by_hit.get(e["event_id"])
         stroke = sw["stroke_type"] if sw else None
@@ -193,13 +262,16 @@ def assemble_shots(
                 "landing_in": land_in,
                 "landing_margin_m": margin,
                 "landing_zone": zone,
-                "speed_racket_kmh": None if v0 is None else v0 * KMH,
-                "speed_net_kmh": _kmh(f, "speed_net") if good else None,
-                "speed_avg_kmh": _kmh(f, "speed_avg") if good else None,
+                "speed_racket_kmh": None if v0 is None else v0 * KMH * factor,
+                "speed_net_kmh": _kmh(f, "speed_net", factor) if good else None,
+                "speed_avg_kmh": _kmh(f, "speed_avg", factor) if good else None,
                 "speed_bounce_kmh": (
-                    _kmh(f, "speed_end") if good and end_kind == "bounce" else None
+                    _kmh(f, "speed_end", factor) if good and end_kind == "bounce" else None
                 ),
-                "speed_sigma_kmh": None if v0s is None else v0s * KMH,
+                "speed_sigma_kmh": None if v0s is None else v0s * KMH * factor,
+                "speed_factor": factor,
+                "speed_scale_err": scale_err,
+                "speed_calibration": calibration["id"] if calibration else None,
                 "net_clearance_m": _num(f["net_clearance"]) if good else None,
                 "apex_m": _num(f["apex_z"]) if good else None,
                 "spin_sign": spin_sign(f["spin"], f["spin_sigma"]) if good else None,
@@ -221,6 +293,6 @@ def assemble_shots(
     )
 
 
-def _kmh(f: dict, key: str) -> float | None:
+def _kmh(f: dict, key: str, factor: float = 1.0) -> float | None:
     v = _num(f[key])
-    return None if v is None else v * KMH
+    return None if v is None else v * KMH * factor

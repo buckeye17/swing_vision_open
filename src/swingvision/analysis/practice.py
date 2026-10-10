@@ -175,6 +175,10 @@ def evaluate(
     targets = [normalized(t) for t in targets if target_valid(normalized(t))]
     edits = edits or SessionEdits()
     shot_by_id = {r["shot_id"]: r for r in (shots.to_pylist() if shots is not None else [])}
+    # Feed speeds come straight from their flights: they take the session's speed
+    # calibration factor (M7c) from the shots.
+    factors = [r.get("speed_factor") for r in shot_by_id.values() if r.get("speed_factor")]
+    feed_factor = float(np.median(factors)) if factors else 1.0
     feed_flight = {
         f["start_event_id"]: f
         for f in (flights.to_pylist() if flights is not None else [])
@@ -262,12 +266,17 @@ def evaluate(
                 v = None
                 flags.append("speed_implausible")
             row["speed_kmh"] = v
-            row["speed_err_kmh"] = speed_error_kmh(v, _num(shot["speed_sigma_kmh"]))
+            row["speed_scale_err"] = _num(shot.get("speed_scale_err"))
+            row["speed_err_kmh"] = speed_error_kmh(
+                v, _num(shot["speed_sigma_kmh"]), row["speed_scale_err"]
+            )
             if "speed_uncertain" in (shot["quality_flags"] or []):
                 flags.append("speed_uncertain")
         f = feed_flight.get(seg["feed_event_id"]) if seg["feed_event_id"] is not None else None
         if f is not None and f["ok"]:
-            row["feed_speed_kmh"] = None if _num(f["speed0"]) is None else f["speed0"] * KMH
+            row["feed_speed_kmh"] = (
+                None if _num(f["speed0"]) is None else f["speed0"] * KMH * feed_factor
+            )
             row["feed_land_x"], row["feed_land_y"] = _num(f["landing_x"]), _num(f["landing_y"])
         row["flags"] = flags
         rows.append(row)

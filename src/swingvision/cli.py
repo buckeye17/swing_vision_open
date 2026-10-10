@@ -33,6 +33,10 @@ swings_app = typer.Typer(no_args_is_help=True, help="Swings: strokes, phases, ki
 app.add_typer(swings_app, name="swings")
 serves_app = typer.Typer(no_args_is_help=True, help="Serves: contact point vs the front toe (M7b).")
 app.add_typer(serves_app, name="serves")
+speed_app = typer.Typer(
+    no_args_is_help=True, help="Speed calibration from serves that hit the net tape (M7c)."
+)
+app.add_typer(speed_app, name="speed")
 
 
 @app.command("app")
@@ -997,6 +1001,196 @@ def serves_contact(
             f"{' '.join(sorted(flags))}"
         )
     typer.echo(f"{shown} of {len(rows)} serves shown")
+
+
+def _refresh_refs(settings, session_id: str) -> None:
+    from swingvision import services
+
+    status, job = services.refresh_practice(settings, session_id, target="speed_refs")
+    if status != "ran":
+        raise typer.BadParameter(
+            f"The session needs processing first ({status}{f', job #{job}' if job else ''})"
+        )
+
+
+@speed_app.command("refs")
+def speed_refs(
+    session_id: str,
+    accept: Annotated[list[int] | None, typer.Option(help="Accept these references (ids)")] = None,
+    reject: Annotated[list[int] | None, typer.Option(help="Reject these references")] = None,
+    reset: Annotated[list[int] | None, typer.Option(help="Forget these references' review")] = None,
+    mark: Annotated[
+        list[float] | None, typer.Option(help="Mark the serve at this time (s) as a tape hit")
+    ] = None,
+    temp: Annotated[
+        float | None, typer.Option(help="Air temperature during the recording, °C")
+    ] = None,
+) -> None:
+    """A session's net-tape reference serves: Δt from the sounds, reference vs fitted speed,
+    review status. Reviews (--accept / --reject / --mark) are saved like the app's."""
+    from swingvision import services
+    from swingvision.storage import tables
+    from swingvision.storage.fsutil import read_json
+
+    settings = load_settings()
+    session = services.session_by_id(settings, session_id)
+    if session is None:
+        raise typer.BadParameter(f"Unknown session {session_id}")
+    if temp is not None:
+        services.set_air_temperature(settings, session_id, temp)
+    _refresh_refs(settings, session_id)
+    rows = tables.read_table(session.speed_refs_path).to_pylist()
+    by_id = {r["ref_id"]: r for r in rows}
+    changed = False
+    for ids, status in ((accept, "accepted"), (reject, "rejected"), (reset, None)):
+        for i in ids or []:
+            if i not in by_id:
+                raise typer.BadParameter(f"No reference {i}")
+            services.edit_speed_ref(settings, session_id, by_id[i]["t_contact"], status=status,
+                                    **({"marked": False, "t_racket": None, "t_tape": None}
+                                       if status is None else {}))  # fmt: skip
+            changed = True
+    for t in mark or []:
+        services.edit_speed_ref(settings, session_id, t, marked=True)
+        changed = True
+    if changed:
+        _refresh_refs(settings, session_id)
+        rows = tables.read_table(session.speed_refs_path).to_pylist()
+    summary = read_json(session.speed_refs_summary_path)
+
+    def f(v, fmt):
+        return "-" if v is None else format(v, fmt)
+
+    for r in rows:
+        typer.echo(
+            f"#{r['ref_id']:<3} {r['t_contact']:8.2f} s  shot {f(r['shot_id'], '')}  "
+            f"{r['end_kind'] or '-':<6} clear {f(r['clearance_m'], '+.3f')} m  "
+            f"SNR {f(r['snr_racket_db'], '.0f')}/{f(r['snr_tape_db'], '.0f')} dB  "
+            f"Δt {f(r['dt_s'] and 1000 * r['dt_s'], '.1f')} ms  "
+            f"ref {f(r['v_ref_kmh'], '.1f')} fit {f(r['v_fit_kmh'], '.1f')} km/h  "
+            f"ratio {f(r['ratio'], '.4f')} ± {f(r['ratio_sigma'], '.4f')}  "
+            f"{r['status']:<9} {r['source']:<4} {' '.join(r['flags'] or [])}"
+        )
+    typer.echo(
+        f"{summary['references']} references ({summary['accepted']} accepted, "
+        f"{summary['rejected']} rejected) from {summary['near_serves']} near-end serves; "
+        f"audio/video offset {1000 * summary['av_offset_s']:.1f} ms "
+        f"({summary['av_offset_serves']} serves), sound {summary['sound_speed_mps']:.1f} m/s"
+        + ("" if summary["air_temp_c"] is not None else " (20 °C assumed: set --temp)")
+    )
+
+
+def _device_arg(settings, device: str | None, session_id: str | None) -> str:
+    from swingvision import services
+
+    if session_id:
+        row = services.open_library(settings).get_session(session_id)
+        if row is None:
+            raise typer.BadParameter(f"Unknown session {session_id}")
+        device = row.get("device_key")
+        if not device:
+            raise typer.BadParameter("The session's recording device isn't known")
+    if not device:
+        raise typer.BadParameter("Give a device key (sv speed show) or --session")
+    return device
+
+
+@speed_app.command("calibrate")
+def speed_calibrate(
+    device: Annotated[str | None, typer.Argument(help="Device key (sv speed show)")] = None,
+    session_id: Annotated[
+        str | None, typer.Option("--session", help="The device this session was recorded with")
+    ] = None,
+    dry_run: Annotated[bool, typer.Option(help="Fit and show, don't store")] = False,
+) -> None:
+    """Fit a device's speed calibration from its accepted references and make it the active
+    one; its sessions' shots are brought up to date."""
+    from swingvision import services
+
+    settings = load_settings()
+    device = _device_arg(settings, device, session_id)
+    cal, row, refs = services.calibrate_device(settings, device, save=not dry_run)
+    if cal is None:
+        raise typer.BadParameter(
+            f"{len(refs)} accepted references for {device}: at least 3 are needed"
+        )
+    _print_calibration(cal.as_dict(), refs)
+    if row is None:
+        typer.echo("(not stored: --dry-run)")
+        return
+    typer.echo(f"Stored as version {row['version']} ({row['id']}), active.")
+    done = services.refresh_device(settings, device)
+    typer.echo(
+        f"Sessions updated: {len(done['ran'])}; queued: {len(done['queued'])}; "
+        f"busy: {len(done['busy'])}"
+    )
+
+
+def _print_calibration(c: dict, refs: list[dict]) -> None:
+    d = c.get("diagnostics") or {}
+    rel = c["k_sigma"] / c["k"]
+    typer.echo(
+        f"model {c['model']}: k = {c['k']:.4f} ± {c['k_sigma']:.4f} ({rel:.2%})"
+        + (
+            f", readout τ = {1000 * c['tau_s']:.1f} ± {1000 * (c.get('tau_sigma_s') or 0):.1f} ms"
+            if c.get("tau_s") is not None
+            else ""
+        )
+        + f"  from {c['n_refs']} references"
+    )
+    if c.get("loo_sd") is not None:
+        typer.echo(f"  leave-one-out spread {c['loo_sd']:.2%} (1 SD); χ²/dof {d.get('chi2_dof')}")
+    for name in ("speed", "rolling_shutter"):
+        t = d.get(f"trend_{name}")
+        if t:
+            typer.echo(
+                f"  trend vs {name.replace('_', ' ')}: slope {t['slope']:.3g} ± "
+                f"{t['slope_sigma']:.2g}, p = {t['p']:.2f}"
+                + (" (significant)" if t["significant"] else "")
+            )
+    bs = d.get("by_session")
+    if bs:
+        per = ", ".join(f"{k} {v['k']:.4f} (n {v['n']})" for k, v in bs["sessions"].items())
+        typer.echo(f"  by session: {per}; p = {bs['p']:.2f}")
+    sessions = sorted({r.get("session_id") for r in refs})
+    typer.echo(f"  sessions: {', '.join(s for s in sessions if s)}")
+
+
+@speed_app.command("show")
+def speed_show(
+    device: Annotated[str | None, typer.Argument(help="Device key (default: list devices)")] = None,
+) -> None:
+    """Recording devices and their speed calibrations."""
+    from swingvision import services
+
+    settings = load_settings()
+    services.backfill_devices(settings)
+    lib = services.open_library(settings)
+    if device is None:
+        for d in lib.list_devices():
+            cal = lib.get_calibration(d["calibration_id"]) if d["calibration_id"] else None
+            state = (
+                f"× {cal['k']:.4f} ± {cal['k_sigma'] / cal['k']:.2%} (v{cal['version']}, "
+                f"{cal['n_refs']} refs)"
+                if cal
+                else "uncalibrated"
+            )
+            typer.echo(
+                f"{d['device_key']:<44} {services.device_name(d):<44} "
+                f"{d['n_sessions']:>3} sessions  {state}"
+            )
+        return
+    d = lib.get_device(device)
+    if d is None:
+        raise typer.BadParameter(f"Unknown device {device}")
+    typer.echo(f"{device}: {services.device_name(d)}")
+    for row in lib.sessions_of_device(device):
+        typer.echo(f"  session {row['id']}  {(row.get('recorded_on') or '')[:10]}  {row['name']}")
+    refs = services.device_references(settings, device)
+    typer.echo(f"  {len(refs)} accepted references")
+    for c in lib.list_calibrations(device):
+        typer.echo(f"version {c['version']} ({c['id']}){' active' if c['active'] else ''}:")
+        _print_calibration(c, c["refs"])
 
 
 @serves_app.command("eval")

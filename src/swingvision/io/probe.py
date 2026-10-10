@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from fractions import Fraction
 from pathlib import Path
@@ -69,6 +70,64 @@ def _rotation_cw(stream: dict[str, Any]) -> int:
     return 0
 
 
+#: Container tags naming the recording device: iPhones write ``com.apple.quicktime.*``,
+#: Android phones ``com.android.*`` (some vendors their own prefix, e.g.
+#: ``com.oplus.product.model``). Location tags are never read.
+_MAKE_SUFFIXES = (".make", ".manufacturer")
+
+
+def device_tags(tags: dict[str, Any] | None) -> tuple[str | None, str | None, str | None]:
+    """(make, model, lens) from container tags; a model whose make isn't tagged takes its
+    first word as the make ("OnePlus Open" → "OnePlus")."""
+    make = model = lens = None
+    for key, value in (tags or {}).items():
+        k, v = key.lower(), str(value).strip()
+        if not v:
+            continue
+        if "lens" in k:
+            if k.endswith(".model") and lens is None:
+                lens = v
+        elif k.endswith(_MAKE_SUFFIXES) and make is None:
+            make = v
+        elif k.endswith(".model") and model is None:
+            model = v
+    if make is None and model:
+        make = model.split()[0]
+    return make, model, lens
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def device_key(video) -> str | None:
+    """A recording device and mode: make, model, lens, coded size and frame rate, e.g.
+    ``oneplus-open-back-main-3840x2160-60``. ``None`` without a model tag (a calibration
+    must not mix phones)."""
+    if video is None or not getattr(video, "device_model", None):
+        return None
+    model = video.device_model
+    make = video.device_make or ""
+    name = model if model.lower().startswith(make.lower()) else f"{make} {model}"
+    parts = [name, video.device_lens or "", f"{video.width}x{video.height}"]
+    parts.append(f"{round(video.fps_nominal or video.fps_avg or 0)}")
+    return "-".join(p for p in (_slug(x) for x in parts) if p)
+
+
+def device_label(video) -> str:
+    """A readable name: "OnePlus Open · back_main · 3840×2160 60 fps"."""
+    if video is None:
+        return "Unknown device"
+    name = video.device_model or "Unknown phone"
+    if video.device_make and not name.lower().startswith(video.device_make.lower()):
+        name = f"{video.device_make} {name}"
+    bits = [name]
+    if video.device_lens:
+        bits.append(video.device_lens)
+    bits.append(f"{video.width}×{video.height} {round(video.fps_nominal or video.fps_avg)} fps")
+    return " · ".join(bits)
+
+
 def parse_probe(data: dict[str, Any]) -> VideoInfo:
     streams = data.get("streams", [])
     video = next(
@@ -96,6 +155,7 @@ def parse_probe(data: dict[str, Any]) -> VideoInfo:
     w, h = int(video["width"]), int(video["height"])
     dw, dh = (h, w) if rotation in (90, 270) else (w, h)
     is_vfr = bool(fps_nominal) and abs(fps_nominal - fps_avg) / fps_nominal > VFR_TOLERANCE
+    make, model, lens = device_tags({**(video.get("tags") or {}), **(fmt.get("tags") or {})})
 
     return VideoInfo(
         codec=video.get("codec_name", "unknown"),
@@ -119,6 +179,9 @@ def parse_probe(data: dict[str, Any]) -> VideoInfo:
         audio_channels=audio.get("channels") if audio else None,
         audio_start_time_s=_float(audio.get("start_time")) if audio else None,
         creation_time=(fmt.get("tags") or {}).get("creation_time"),
+        device_make=make,
+        device_model=model,
+        device_lens=lens,
     )
 
 

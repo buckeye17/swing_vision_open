@@ -1,5 +1,5 @@
 """SQLite library in the output root: sessions index, job queue, profiles, worker heartbeat,
-session tags and saved Stats views.
+session tags and saved Stats views, recording devices and their speed calibrations.
 
 The app (many Flask threads) and the worker process both use this file, so every
 operation opens a short-lived connection in WAL mode. Long-running processes hold one more
@@ -139,6 +139,42 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE profiles ADD COLUMN shoe_length_m REAL;
     """,
+    # v6: speed calibration (M7c): recording devices, their versioned speed calibrations, and
+    # each session's device (backfilled from session.json, see ``_backfill_v6``) and air
+    # temperature
+    """
+    CREATE TABLE devices (
+        device_key TEXT PRIMARY KEY,
+        make TEXT,
+        model TEXT,
+        lens TEXT,
+        width INTEGER,
+        height INTEGER,
+        fps REAL,
+        label TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE speed_calibrations (
+        id TEXT PRIMARY KEY,
+        device_key TEXT NOT NULL REFERENCES devices(device_key) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        model TEXT NOT NULL,
+        k REAL NOT NULL,
+        k_sigma REAL NOT NULL,
+        tau_s REAL,
+        tau_sigma_s REAL,
+        n_refs INTEGER NOT NULL,
+        loo_sd REAL,
+        refs_json TEXT NOT NULL DEFAULT '[]',
+        diagnostics_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (device_key, version)
+    );
+    CREATE INDEX speed_calibrations_device_idx ON speed_calibrations(device_key, active);
+    ALTER TABLE sessions ADD COLUMN device_key TEXT;
+    ALTER TABLE sessions ADD COLUMN air_temp_c REAL;
+    """,
 ]
 
 
@@ -256,6 +292,8 @@ class Library:
                 conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {i};\nCOMMIT;")
                 if i == 4:
                     self._backfill_v4(conn)
+                if i == 6:
+                    self._backfill_v6(conn)
         _ready.add(self.path)
         return self
 
@@ -276,6 +314,28 @@ class Library:
             conn.execute(
                 "UPDATE sessions SET recorded_on = ?, profile_id = ? WHERE id = ?",
                 (when, profile, row["id"]),
+            )
+
+    def _backfill_v6(self, conn: sqlite3.Connection) -> None:
+        """Each session's device and air temperature from its ``session.json``. Sessions probed
+        before M7c have no device tags yet: ``services.backfill_devices`` re-probes them."""
+        from swingvision.io.probe import device_key
+        from swingvision.storage.schemas import VideoInfo
+
+        rows = conn.execute("SELECT id, dir_name FROM sessions").fetchall()
+        for row in rows:
+            path = self.root / "sessions" / row["dir_name"] / "session.json"
+            try:
+                cfg = json.loads(path.read_text(encoding="utf-8"))
+                video = VideoInfo.model_validate(cfg["video"]) if cfg.get("video") else None
+            except (OSError, ValueError, KeyError):
+                continue
+            key = cfg.get("device_key") or device_key(video)
+            if key and video is not None:
+                self._add_device(conn, key, video)
+            conn.execute(
+                "UPDATE sessions SET device_key = ?, air_temp_c = ? WHERE id = ?",
+                (key, cfg.get("air_temp_c"), row["id"]),
             )
 
     def keep_open(self) -> Library:
@@ -641,6 +701,153 @@ class Library:
     def delete_profile(self, profile_id: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+
+    # -- devices and speed calibrations (M7c) ----------------------------------------
+    @staticmethod
+    def _add_device(conn: sqlite3.Connection, key: str, video) -> None:
+        conn.execute(
+            """INSERT INTO devices (device_key, make, model, lens, width, height, fps,
+                                    created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(device_key) DO NOTHING""",
+            (
+                key, video.device_make, video.device_model, video.device_lens, video.width,
+                video.height, round(video.fps_nominal or video.fps_avg or 0, 3), now_iso(),
+            ),
+        )  # fmt: skip
+
+    def add_device(self, key: str, video) -> None:
+        """Register a recording device (``video``: its :class:`VideoInfo`) if it's new."""
+        with self.connect() as conn:
+            self._add_device(conn, key, video)
+
+    def get_device(self, key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM devices WHERE device_key = ?", (key,)).fetchone()
+        return dict(row) if row else None
+
+    def list_devices(self) -> list[dict[str, Any]]:
+        """Devices with their session count and active calibration's id."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT d.*,
+                          (SELECT COUNT(*) FROM sessions s WHERE s.device_key = d.device_key)
+                              AS n_sessions,
+                          (SELECT c.id FROM speed_calibrations c
+                            WHERE c.device_key = d.device_key AND c.active = 1) AS calibration_id
+                   FROM devices d ORDER BY COALESCE(d.label, d.model, d.device_key)"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def rename_device(self, key: str, label: str | None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE devices SET label = ? WHERE device_key = ?", ((label or None), key)
+            )
+
+    def merge_devices(self, src: str, dst: str) -> list[str]:
+        """Move ``src``'s sessions to ``dst`` and drop ``src`` (and its calibrations): the same
+        phone and mode under two keys. Returns the moved sessions' ids."""
+        if src == dst:
+            return []
+        with self.transaction() as conn:
+            if (
+                conn.execute("SELECT 1 FROM devices WHERE device_key = ?", (dst,)).fetchone()
+                is None
+            ):
+                raise ValueError(f"Unknown device {dst}")
+            ids = [
+                r[0] for r in conn.execute("SELECT id FROM sessions WHERE device_key = ?", (src,))
+            ]
+            conn.execute(
+                "UPDATE sessions SET device_key = ?, updated_at = ? WHERE device_key = ?",
+                (dst, now_iso(), src),
+            )
+            conn.execute("DELETE FROM devices WHERE device_key = ?", (src,))
+        return ids
+
+    def sessions_of_device(self, key: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE device_key = ? ORDER BY recorded_on", (key,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    CALIBRATION_FIELDS = ("model", "k", "k_sigma", "tau_s", "tau_sigma_s", "n_refs", "loo_sd")
+
+    def add_calibration(
+        self, id: str, device_key: str, refs: list, diagnostics: dict, **values: Any
+    ) -> dict[str, Any]:
+        """A new calibration version for the device, made the active one."""
+        unknown = set(values) - set(self.CALIBRATION_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown calibration fields {sorted(unknown)}")
+        with self.transaction() as conn:
+            version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM speed_calibrations WHERE device_key = ?",
+                (device_key,),
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE speed_calibrations SET active = 0 WHERE device_key = ?", (device_key,)
+            )
+            cols = ["id", "device_key", "version", *values, "refs_json", "diagnostics_json",
+                    "created_at", "active"]  # fmt: skip
+            vals = [id, device_key, version, *values.values(), json.dumps(refs),
+                    json.dumps(diagnostics), now_iso(), 1]  # fmt: skip
+            conn.execute(
+                f"INSERT INTO speed_calibrations ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' * len(cols))})",
+                vals,
+            )
+        cal = self.get_calibration(id)
+        assert cal is not None
+        return cal
+
+    @staticmethod
+    def _calibration(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        d["refs"] = json.loads(d.pop("refs_json") or "[]")
+        d["diagnostics"] = json.loads(d.pop("diagnostics_json") or "{}")
+        d["active"] = bool(d["active"])
+        return d
+
+    def get_calibration(self, cal_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM speed_calibrations WHERE id = ?", (cal_id,)
+            ).fetchone()
+        return self._calibration(row) if row else None
+
+    def list_calibrations(self, device_key: str | None = None) -> list[dict[str, Any]]:
+        q = "SELECT * FROM speed_calibrations"
+        args: tuple = ()
+        if device_key is not None:
+            q += " WHERE device_key = ?"
+            args = (device_key,)
+        with self.connect() as conn:
+            rows = conn.execute(q + " ORDER BY device_key, version DESC", args).fetchall()
+        return [self._calibration(r) for r in rows]
+
+    def active_calibration(self, device_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM speed_calibrations WHERE device_key = ? AND active = 1",
+                (device_key,),
+            ).fetchone()
+        return self._calibration(row) if row else None
+
+    def set_active_calibration(self, device_key: str, cal_id: str | None) -> None:
+        """Make ``cal_id`` the device's calibration (``None``: none is active)."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE speed_calibrations SET active = 0 WHERE device_key = ?", (device_key,)
+            )
+            if cal_id is not None:
+                n = conn.execute(
+                    "UPDATE speed_calibrations SET active = 1 WHERE id = ? AND device_key = ?",
+                    (cal_id, device_key),
+                ).rowcount
+                if not n:
+                    raise ValueError(f"No calibration {cal_id} for {device_key}")
 
     # -- target sets ---------------------------------------------------------------
     def save_target_set(self, id: str, name: str, targets_json: str) -> None:

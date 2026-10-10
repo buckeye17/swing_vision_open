@@ -13,7 +13,13 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from swingvision.storage.fsutil import atomic_write_text
-from swingvision.storage.schemas import PracticeShotEdit, ServeEdit, SessionEdits, SwingEdit
+from swingvision.storage.schemas import (
+    PracticeShotEdit,
+    ServeEdit,
+    SessionEdits,
+    SpeedRefEdit,
+    SwingEdit,
+)
 from swingvision.storage.session import Session
 
 #: An edit applies to the practice shot whose anchor time is within this of its ``t``.
@@ -144,3 +150,43 @@ def set_serve(
     if e.frame is None and e.toe is None:
         edits.serves.remove(e)
     edits.serves.sort(key=lambda x: x.t)
+
+
+def speed_ref_edit(edits: SessionEdits, t: float) -> SpeedRefEdit | None:
+    """The review of the reference serve whose contact is at ``t`` (M7c)."""
+    best, best_d = None, MATCH_TOL_S
+    for e in edits.speed_refs:
+        d = abs(e.t - t)
+        if d <= best_d:
+            best, best_d = e, d
+    return best
+
+
+def set_speed_ref(
+    edits: SessionEdits,
+    t: float,
+    *,
+    status: str | bool | None = False,
+    marked: bool | None = None,
+    t_racket: float | bool | None = False,
+    t_tape: float | bool | None = False,
+) -> None:
+    """Change one reference serve's review: ``status`` accepted | rejected (``None`` clears
+    the decision), ``marked`` as a tape hit, onsets placed on the waveform (audio clock;
+    ``None`` back to the detected one). ``False`` leaves a field; an edit back at the
+    defaults is dropped."""
+    e = speed_ref_edit(edits, t)
+    if e is None:
+        e = SpeedRefEdit(t=round(t, 3))
+        edits.speed_refs.append(e)
+    if status is not False:
+        e.status = status  # type: ignore[assignment]
+    if marked is not None:
+        e.marked = marked
+    if t_racket is not False:
+        e.t_racket = None if t_racket is None else round(float(t_racket), 5)  # type: ignore[arg-type]
+    if t_tape is not False:
+        e.t_tape = None if t_tape is None else round(float(t_tape), 5)  # type: ignore[arg-type]
+    if e.status is None and not e.marked and e.t_racket is None and e.t_tape is None:
+        edits.speed_refs.remove(e)
+    edits.speed_refs.sort(key=lambda x: x.t)

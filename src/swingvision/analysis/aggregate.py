@@ -38,6 +38,7 @@ QUERY_KEYS = {
     "modes": "mode",
     "practice_types": "type",
     "profiles": "profile",
+    "devices": "device",
     "tags": "tag",
     "include": "sessions",
     "exclude": "exclude",
@@ -60,12 +61,14 @@ class SessionFilter:
     modes: tuple[str, ...] = ()
     practice_types: tuple[str, ...] = ()
     profiles: tuple[str, ...] = ()
+    #: Recording devices (library ``devices.device_key``, M7c).
+    devices: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     #: Only sessions whose court calibration the user confirmed (not auto-accepted).
     user_calibration: bool = False
-    #: Only sessions with calibrated speeds (speed calibration arrives with M7c).
+    #: Only sessions whose speeds carry a device calibration (M7c).
     calibrated_speeds: bool = False
 
     @classmethod
@@ -143,6 +146,8 @@ def resolve(library: Library, flt: SessionFilter) -> list[dict]:
         if flt.practice_types and row["submode"] not in flt.practice_types:
             continue
         if flt.profiles and row.get("profile_id") not in flt.profiles:
+            continue
+        if flt.devices and row.get("device_key") not in flt.devices:
             continue
         if want_tags and not want_tags <= {t.lower() for t in row["tags"]}:
             continue

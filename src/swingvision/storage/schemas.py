@@ -56,6 +56,11 @@ class VideoInfo(BaseModel):
     audio_channels: int | None = None
     audio_start_time_s: float | None = None
     creation_time: str | None = None
+    #: The recording phone and lens from the container's tags (M7c; ``io.probe``). Speed
+    #: calibrations are kept per device.
+    device_make: str | None = None
+    device_model: str | None = None
+    device_lens: str | None = None
 
 
 class Target(BaseModel):
@@ -115,6 +120,19 @@ class ServeEdit(BaseModel):
     toe: list[float] | None = None
 
 
+class SpeedRefEdit(BaseModel):
+    """The user's review of one net-tape reference serve (M7c), found again by the serve's
+    contact time ``t``: accepted or rejected, marked as a tape hit by hand, and onsets moved
+    on the waveform (audio-file seconds). Also ground truth (``training/speed_refs/``)."""
+
+    t: float
+    status: Literal["accepted", "rejected"] | None = None
+    #: The user says this serve hit the tape (it is measured even if no rule picked it).
+    marked: bool = False
+    t_racket: float | None = None
+    t_tape: float | None = None
+
+
 class SessionEdits(BaseModel):
     """``edits.json``: user overrides layered over derived data (PLAN.md §9.3)."""
 
@@ -122,6 +140,7 @@ class SessionEdits(BaseModel):
     practice_shots: list[PracticeShotEdit] = Field(default_factory=list)
     swings: list[SwingEdit] = Field(default_factory=list)
     serves: list[ServeEdit] = Field(default_factory=list)
+    speed_refs: list[SpeedRefEdit] = Field(default_factory=list)
 
 
 class PracticeConfig(BaseModel):
@@ -170,6 +189,14 @@ class SessionConfig(BaseModel):
     match: MatchConfig | None = None
     players: PlayersConfig = Field(default_factory=PlayersConfig)
     notes: str = ""
+    #: The recording device's key in the library (M7c; from the probe's device tags, or the
+    #: device it was merged into in Settings).
+    device_key: str | None = None
+    #: Air temperature during the recording (°C), for the speed of sound (M7c).
+    air_temp_c: float | None = Field(default=None, ge=-30.0, le=50.0)
+    #: Which speed calibration applies: ``None`` the device's active one, ``"none"`` no
+    #: calibration, else a calibration id picked by hand.
+    speed_calibration: str | None = None
 
 
 Handedness = Literal["right", "left"]
@@ -537,7 +564,7 @@ BALL_FLIGHT_PATHS = table_schema(
 #: segments with M5.
 SHOTS = table_schema(
     "shots",
-    1,
+    2,
     [
         field("shot_id", pa.int32(), None, "Shot number within the session", nullable=False),
         field("session_id", pa.string(), None, nullable=False),
@@ -568,6 +595,16 @@ SHOTS = table_schema(
         field("speed_avg_kmh", pa.float32(), "km/h", "Path length / flight time"),
         field("speed_bounce_kmh", pa.float32(), "km/h", "Speed just before the bounce"),
         field("speed_sigma_kmh", pa.float32(), "km/h", "1-σ of the speed off the racket"),
+        field(
+            "speed_factor", pa.float32(), None, "Speed calibration factor applied (M7c; 1: none)"
+        ),
+        field(
+            "speed_scale_err",
+            pa.float32(),
+            None,
+            "Error bound every speed shares (fraction): 3% uncalibrated, else 2σ of the calibration",
+        ),
+        field("speed_calibration", pa.string(), None, "Calibration applied (null: uncalibrated)"),
         field("net_clearance_m", pa.float32(), "m", "Ball center above the net"),
         field("apex_m", pa.float32(), "m", "Highest point of the flight"),
         field("spin_sign", pa.int8(), None, "+1 topspin, -1 backspin/slice, 0 unclear"),
@@ -576,6 +613,58 @@ SHOTS = table_schema(
         field("swing_id", pa.int32(), None, "(M6)"),
         field("fit_rms_px", pa.float32(), "px"),
         field("quality_flags", pa.list_(pa.string()), None),
+    ],
+)
+
+#: Net-tape reference serves (``speed_refs``; PLAN.md §7.12, M7c): a near-end serve that hit
+#: the tape gives a speed from two sounds on one clock and two well-calibrated points.
+#: Audio times are on the audio file's clock (``audio.flac``), video times on the video's.
+SPEED_REFS = table_schema(
+    "speed_refs",
+    1,
+    [
+        field("ref_id", pa.int32(), None, "Reference number within the session", nullable=False),
+        field("shot_id", pa.int32(), None),
+        field("swing_id", pa.int32(), None, "The serve's swing"),
+        field("flight_id", pa.int32(), None, "The serve's fitted flight"),
+        field("t_contact", pa.float64(), "s", "The serve's contact (video clock)"),
+        field("t_cross", pa.float64(), "s", "The fitted path reaches the net plane (video)"),
+        field("t_racket_audio", pa.float64(), "s", "Racket impact sound's onset (audio clock)"),
+        field("t_tape_audio", pa.float64(), "s", "Tape impact sound's onset (audio clock)"),
+        field("onsets_by", pa.string(), None, "auto | user (an onset moved on the waveform)"),
+        field("t_racket_pred_audio", pa.float64(), "s", "Where the racket sound was searched for"),
+        field("t_tape_pred_audio", pa.float64(), "s", "... and the tape sound (window centers)"),
+        field("snr_racket_db", pa.float32(), "dB", "Racket sound's peak over the noise floor"),
+        field("snr_tape_db", pa.float32(), "dB", "Tape sound's peak over the noise floor"),
+        field("contact_x", pa.float64(), "m", "Ball at the impact (toss path)"),
+        field("contact_y", pa.float64(), "m"),
+        field("contact_z", pa.float64(), "m"),
+        field("tape_x", pa.float64(), "m", "Ball center at the tape (net plane)"),
+        field("tape_z", pa.float64(), "m", "Tape top + ½ ball radius"),
+        field("d_contact_m", pa.float64(), "m", "Contact to the camera (microphone)"),
+        field("d_tape_m", pa.float64(), "m", "Tape point to the camera"),
+        field("sound_speed_mps", pa.float64(), "m/s", "From the air temperature"),
+        field("dt_s", pa.float64(), "s", "Flight time contact → tape, sound delays removed"),
+        field("dt_sigma_s", pa.float64(), "s"),
+        field("path_m", pa.float64(), "m", "Path length contact → tape"),
+        field("path_sigma_m", pa.float64(), "m"),
+        field("v_ref_kmh", pa.float64(), "km/h", "Reference average speed: path / dt"),
+        field("v_fit_kmh", pa.float64(), "km/h", "The 3D fit's average speed over the same part"),
+        field("ratio", pa.float64(), None, "v_ref / v_fit"),
+        field("ratio_sigma", pa.float64(), None),
+        field("img_vy", pa.float64(), "px/s", "Ball's vertical image speed, contact → tape"),
+        field(
+            "rs_rate",
+            pa.float64(),
+            "1/s",
+            "Sensor readout fraction crossed per second, contact → tape (rolling shutter)",
+        ),
+        field("clearance_m", pa.float64(), "m", "Fitted ball center above the tape top"),
+        field("end_kind", pa.string(), None, "The flight's end: net | bounce | lost"),
+        field("av_offset_s", pa.float64(), "s", "Audio onset − video contact − sound delay"),
+        field("status", pa.string(), None, "candidate | accepted | rejected"),
+        field("source", pa.string(), None, "auto (found by the rules) | user (marked a tape hit)"),
+        field("flags", pa.list_(pa.string()), None, "Quality flags (PLAN.md §7.12)"),
     ],
 )
 
@@ -628,7 +717,7 @@ SEGMENTS = table_schema(
 #: One row per practice shot: line call, targets, accuracy (``practice_eval``).
 PRACTICE = table_schema(
     "practice",
-    1,
+    2,
     [
         field("segment_id", pa.int32(), None, "The shot's segment", nullable=False),
         field("block_id", pa.int32(), None),
@@ -658,8 +747,9 @@ PRACTICE = table_schema(
         field("target_edge_m", pa.float32(), "m", "Inside (+) / outside (-) that target"),
         field("depth_err_m", pa.float32(), "m", "Deeper (+) / shorter (-) than its center"),
         field("width_err_m", pa.float32(), "m", "Hitter's right (+) / left (-) of its center"),
-        field("speed_kmh", pa.float32(), "km/h", "Speed off the racket (uncalibrated)"),
-        field("speed_err_kmh", pa.float32(), "km/h", "Uncalibrated error bound"),
+        field("speed_kmh", pa.float32(), "km/h", "Speed off the racket"),
+        field("speed_err_kmh", pa.float32(), "km/h", "Error bound (shared + 2× its own σ)"),
+        field("speed_scale_err", pa.float32(), None, "The shared part (fraction; M7c)"),
         field("feed_speed_kmh", pa.float32(), "km/h", "Ball-machine feed speed"),
         field("feed_land_x", pa.float32(), "m", "Ball-machine feed bounce"),
         field("feed_land_y", pa.float32(), "m"),
@@ -898,7 +988,7 @@ SERVE_CONTACT = table_schema(
 #: this file changes nothing.
 STATS_RECORDS = table_schema(
     "stats_records",
-    2,
+    3,
     [
         field("session_id", pa.string(), None, nullable=False),
         field("recorded_on", pa.string(), None, "Recording start, local time (ISO)"),
@@ -917,6 +1007,7 @@ STATS_RECORDS = table_schema(
         field("group", pa.string(), None, "Stroke group: serve | forehand | ... | unknown"),
         field("speed_kmh", pa.float64(), "km/h", "Speed off the racket"),
         field("speed_sigma_kmh", pa.float64(), "km/h"),
+        field("speed_scale_err", pa.float64(), None, "Error bound shared by the session's speeds"),
         field("speed_ok", pa.bool_(), None, "The speed is certain enough to count"),
         field("landing_x", pa.float64(), "m", "Landing on the court (after edits)"),
         field("landing_y", pa.float64(), "m"),
@@ -981,6 +1072,7 @@ SCHEMAS: dict[str, pa.Schema] = {
     "ball_flights": BALL_FLIGHTS,
     "ball_flight_paths": BALL_FLIGHT_PATHS,
     "shots": SHOTS,
+    "speed_refs": SPEED_REFS,
     "segments": SEGMENTS,
     "practice": PRACTICE,
     "pose2d": POSE2D,

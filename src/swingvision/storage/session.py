@@ -162,6 +162,16 @@ class Session:
         return self.ball_dir / "flights.json"
 
     @property
+    def speed_refs_path(self) -> Path:
+        """Net-tape reference serves (M7c)."""
+        return self.ball_dir / "speed_refs.parquet"
+
+    @property
+    def speed_refs_summary_path(self) -> Path:
+        """The session's audio/video offset and candidate counts (M7c)."""
+        return self.ball_dir / "speed_refs.json"
+
+    @property
     def ball_flight_paths_path(self) -> Path:
         return self.ball_dir / "flight_paths.parquet"
 

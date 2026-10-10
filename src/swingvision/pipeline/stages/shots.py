@@ -84,18 +84,22 @@ class Ball3DStage(Stage):
 class ShotsStage(Stage):
     name = "shots"
     title = "Shots"
-    version = 2
+    version = 3
     depends_on = ("ball_3d", "events", "camera", "swings")
     weight = 0.2
 
     def config(self, session, config, settings):
         from swingvision.analysis import shots as sh
+        from swingvision.pipeline.stages.speed import speed_calibration_for
 
         return {
             "landing_px_sigma": sh.LANDING_PX_SIGMA,
             "close_call_sigmas": sh.CLOSE_CALL_SIGMAS,
             "speed_uncertain": [sh.SPEED_UNCERTAIN, sh.SPEED_UNCERTAIN_OPEN_END],
             "spin": [sh.SPIN_SIGMAS, sh.SPIN_MIN],
+            # M7c: a new calibration (or another one picked) reruns shots → … → stats.
+            "speed_calibration": speed_calibration_for(settings, config),
+            "rs_span_s": sh.RS_SPAN_S,
         }
 
     def outputs(self, session):
@@ -106,7 +110,10 @@ class ShotsStage(Stage):
         cal = calib.load(session.calibration_path)
         if cal is None:
             raise RuntimeError("No calibration")
+        from swingvision.pipeline.stages.speed import speed_calibration_for
+
         summary = read_json(session.ball_flights_summary_path)
+        calibration = speed_calibration_for(ctx.settings, ctx.config)
         shots = assemble_shots(
             ctx.config.id,
             tables.read_table(session.events_path),
@@ -114,6 +121,8 @@ class ShotsStage(Stage):
             _camera_at(cal),
             rejected_hits=set(summary.get("rejected_hits", [])),
             swings=tables.read_table(session.swings_path) if session.swings_path.exists() else None,
+            calibration=calibration,
+            rotation_cw=ctx.config.video.rotation_cw if ctx.config.video else 0,
         )
         tables.write_table(shots, session.shots_path, SHOTS)
         speeds = [v for v in shots.column("speed_racket_kmh").to_pylist() if v is not None]
@@ -124,4 +133,5 @@ class ShotsStage(Stage):
             "in": outcomes.count("in"),
             "out": sum(o.startswith("out") for o in outcomes),
             "net": outcomes.count("net"),
+            "calibration": calibration,
         }

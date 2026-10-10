@@ -23,6 +23,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from swingvision.court import model as court_model
+from swingvision.io.probe import device_key
 from swingvision.players import movement as mv
 from swingvision.pose.strokes import STROKE_LABELS
 from swingvision.settings import ProcessingDefaults
@@ -44,9 +45,9 @@ DISTANCE_BIN_S = 300.0
 
 #: Record fields per kind (besides the session columns, ``kind``, ``t`` and ``side``).
 SHOT_FIELDS = (
-    "shot_id", "segment_id", "group", "speed_kmh", "speed_sigma_kmh", "speed_ok", "landing_x",
-    "landing_y", "rel_x", "rel_y", "outcome", "net_clearance_m", "spin_sign", "contact_seen",
-    "excluded", "in_target",
+    "shot_id", "segment_id", "group", "speed_kmh", "speed_sigma_kmh", "speed_scale_err",
+    "speed_ok", "landing_x", "landing_y", "rel_x", "rel_y", "outcome", "net_clearance_m",
+    "spin_sign", "contact_seen", "excluded", "in_target",
 )  # fmt: skip
 SWING_FIELDS = (
     "swing_id", "stroke_type", "wrist_speed_peak", "forward_s", "contact_height_m",
@@ -140,6 +141,7 @@ def _record_from_shot(s: dict) -> dict:
         "side": s["side"],
         "speed_kmh": _num(s["speed_racket_kmh"]),
         "speed_sigma_kmh": _num(s["speed_sigma_kmh"]),
+        "speed_scale_err": _num(s.get("speed_scale_err")),
         "speed_ok": s["speed_racket_kmh"] is not None and "speed_uncertain" not in flags,
         "landing_x": _num(s["landing_x"]),
         "landing_y": _num(s["landing_y"]),
@@ -178,7 +180,8 @@ def build_records(
         s = by_id.get(p["shot_id"]) if p["shot_id"] is not None else None
         r = _record_from_shot(s) if s is not None else {
             "shot_id": None, "speed_kmh": None, "speed_sigma_kmh": None, "speed_ok": False,
-            "net_clearance_m": None, "spin_sign": None, "contact_seen": False,
+            "speed_scale_err": None, "net_clearance_m": None, "spin_sign": None,
+            "contact_seen": False,
         }  # fmt: skip
         group = stroke_group(p["stroke_type"], p["shot_kind"])
         r.update(
@@ -311,6 +314,15 @@ def _calibration_by(session: Session) -> str | None:
     return cal.confirmed_by
 
 
+def speed_calibration(session: Session) -> dict | None:
+    """The speed calibration the session's shots were made with (M7c; from the ``shots``
+    manifest), or ``None``."""
+    from swingvision.pipeline.stage import read_manifest
+
+    m = read_manifest(session, "shots") or {}
+    return (m.get("extra") or {}).get("calibration")
+
+
 def session_info(session: Session, config=None) -> dict:
     """The per-session columns of the records (what a selection is filtered by)."""
     config = config or session.load_config()
@@ -324,9 +336,9 @@ def session_info(session: Session, config=None) -> dict:
         "mode": config.mode,
         "practice_type": config.practice.submode if config.practice else None,
         "profile_id": config.players.me_profile_id,
-        "device_key": None,  # M7c
+        "device_key": config.device_key or device_key(config.video),
         "calibration_by": _calibration_by(session),
-        "speeds_calibrated": False,  # M7c
+        "speeds_calibrated": speed_calibration(session) is not None,
         "tags": [],
     }
 
