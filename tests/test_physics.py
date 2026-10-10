@@ -396,3 +396,45 @@ def test_uncalibrated_speed_error():
     assert err(100.0, None) == pytest.approx(100 * shots_mod.SPEED_SCALE_ERROR)
     assert err(None, 2.0) is None
     assert f"{shots_mod.SPEED_SCALE_ERROR:.0%}" in shots_mod.speed_error_text()
+
+
+def test_calibrated_shots():
+    """A device calibration (M7c) scales every speed and sets the shared error from its σ."""
+    from swingvision.app.components import shots_view as sv
+
+    track, events, _, _ = _track_and_events(np.random.default_rng(1))
+    specs, fits, rejected = fl.fit_session(track, events, _ctx())
+    flights = fl.flights_table(specs, fits)
+    plain = shots_mod.assemble_shots("sid", events, flights, lambda t: CAM, rejected)
+    cal = {"id": "c1", "device_key": "d", "model": "scalar", "k": 1.02, "k_sigma": 0.004,
+           "tau_s": None, "n_refs": 9}  # fmt: skip
+    shots = shots_mod.assemble_shots(
+        "sid", events, flights, lambda t: CAM, rejected, calibration=cal
+    )
+    a, b = plain.to_pylist()[0], shots.to_pylist()[0]
+    assert a["speed_factor"] == 1.0 and a["speed_calibration"] is None
+    assert a["speed_scale_err"] == pytest.approx(shots_mod.SPEED_SCALE_ERROR)
+    for k in ("speed_racket_kmh", "speed_net_kmh", "speed_avg_kmh", "speed_sigma_kmh"):
+        assert b[k] == pytest.approx(a[k] * 1.02, rel=1e-5)
+    assert b["speed_factor"] == pytest.approx(1.02)
+    assert b["speed_scale_err"] == pytest.approx(2 * 0.004 / 1.02, rel=1e-5)
+    assert b["speed_calibration"] == "c1"
+    assert shots_mod.is_calibrated(b["speed_scale_err"])
+    assert not shots_mod.is_calibrated(a["speed_scale_err"])
+    assert shots_mod.speed_error_kmh(100.0, 1.0, b["speed_scale_err"]) == pytest.approx(
+        100 * b["speed_scale_err"] + 2.0
+    )
+    assert "net tape" in shots_mod.speed_error_text(cal, "OnePlus Open")
+    # A rolling-shutter calibration corrects each flight by its readout rate.
+    rs_cal = {**cal, "model": "rolling_shutter", "tau_s": 0.02}
+    rs = shots_mod.assemble_shots(
+        "sid", events, flights, lambda t: CAM, rejected, calibration=rs_cal, rotation_cw=180
+    ).to_pylist()[0]
+    f = next(r for r in flights.to_pylist() if r["flight_id"] == b["flight_id"])
+    rate = shots_mod.flight_rs_rate(f, CAM, 180)
+    assert rate is not None and rate != 0
+    assert rs["speed_factor"] == pytest.approx(1 / (1 / 1.02 + 0.02 * rate), rel=1e-5)
+    # The Shots card says so.
+    card = str(sv.shots_card(shots, cal, "OnePlus Open"))
+    assert "Calibrated · OnePlus Open" in card and "calibrated" in card
+    assert "Uncalibrated" in str(sv.shots_card(plain))

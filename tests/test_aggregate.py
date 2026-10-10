@@ -402,14 +402,17 @@ def test_stats_page_over_a_selection(settings, monkeypatch):
     multi["layout"]()
     q = "type=serve,self_feed"
     out = page._render({"query": q}, [], "all", False, "heat")
-    assert len(out) == 11
+    assert len(out) == 12
     assert "3 sessions" in _js(out[9])
     fig = page._trend({"query": q}, [], "all", False, "speed_median")
     assert len(fig.data[0].x) == 3
     for kpi in st.TREND_KPIS:
         page._trend({"query": q}, ["serve"], "near", True, kpi)
-    assert page._filter(["2026-10-01", "2026-10-05"], ["practice"], [], [], [], [], [], False,
-                        {"query": ""}) == {"query": "from=2026-10-01&to=2026-10-05&mode=practice"}  # fmt: skip
+    assert page._filter(["2026-10-01", "2026-10-05"], ["practice"], [], [], [], [], [], [], False,
+                        False, {"query": ""}) == {"query": "from=2026-10-01&to=2026-10-05&mode=practice"}  # fmt: skip
+    assert page._filter([], [], [], [], ["dev-a"], [], [], [], False, True, {"query": ""}) == {
+        "query": "device=dev-a&speeds=calibrated"
+    }
     assert page._open_view("v1")[2] == ["serve"]
     assert page.export_query("type=serve", ["serve"], "near", True) == (
         "type=serve&groups=serve&end=near&excluded=1"

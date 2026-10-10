@@ -225,7 +225,8 @@ def timeline_figure(
                     hovertemplate=f"%{{x:.1f}}s · %{{y:.0f}} ± %{{customdata:.0f}} {u.speed_unit}"
                     + "<extra>"
                     + outcome
-                    + " (uncalibrated)</extra>",
+                    + (" (calibrated)" if shots.get("calibrated") else " (uncalibrated)")
+                    + "</extra>",
                 ),
                 row=shots_row,
                 col=1,
@@ -710,7 +711,9 @@ def layout(session_id: str | None = None, t: str | None = None, **_):
                     dmc.GridCol(
                         dmc.Stack(
                             [
-                                shots_card(shots),
+                                shots_card(
+                                    shots, *services.speed_status(state.settings(), session)
+                                ),
                                 html.Div(
                                     movement_card(
                                         movement,
@@ -836,6 +839,30 @@ def _set_profile(profile_id, session_id):
     if p is None:
         return "No profile assigned.", no_update
     return profile_facts(p), notification(f"Player set to {p.name}.", icon_name="tabler:check")
+
+
+@callback(
+    Output("notify", "sendNotifications", allow_duplicate=True),
+    Input("review-temp", "value"),
+    State("review-session-id", "data"),
+    prevent_initial_call=True,
+)
+def _set_temp(value, session_id):
+    found = state.session_for(session_id or "")
+    if found is None:
+        return no_update
+    temp = None if value in (None, "") else round(float(value), 1)
+    if temp == found[2].load_config().air_temp_c:
+        return no_update
+    s = state.settings()
+    try:
+        services.set_air_temperature(s, session_id, temp)
+        if found[2].speed_refs_path.exists():
+            services.refresh_practice(s, session_id, target="speed_refs")
+    except (ValueError, RuntimeError) as exc:
+        return notification(str(exc), "Couldn't save", color="red")
+    shown = "not set (20 °C assumed)" if temp is None else f"{temp:g} °C"
+    return notification(f"Air temperature {shown}.", icon_name="tabler:check")
 
 
 @callback(

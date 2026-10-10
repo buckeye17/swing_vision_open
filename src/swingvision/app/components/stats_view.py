@@ -15,9 +15,10 @@ import numpy as np
 import plotly.graph_objects as go
 
 from swingvision.analysis import stats as st
-from swingvision.analysis.shots import SPEED_SCALE_ERROR, speed_error_kmh
+from swingvision.analysis.shots import speed_error_kmh
 from swingvision.app import units
 from swingvision.app.components.court_diagram import VIEW_Y, court_figure
+from swingvision.app.components.shots_view import records_scale_text
 from swingvision.app.components.swings_view import STROKE_COLORS
 from swingvision.app.components.ui import fmt_duration, stat_grid, stat_tile
 from swingvision.court import model as court_model
@@ -118,7 +119,7 @@ def kpis(records: list[dict], movement: dict, sessions: list[dict] | None = None
         stat_tile(
             "Speed",
             u.speed_str(s["speed_median"]),
-            f"median of {s['n_speed']}, ± {SPEED_SCALE_ERROR:.0%} uncalibrated",
+            f"median of {s['n_speed']}, {records_scale_text(records)}",
         ),
         stat_tile("Fastest", u.speed_str(s["speed_max"]), "off the racket"),
     ]
@@ -152,7 +153,10 @@ def speed_figure(records: list[dict], labels: dict[str, str] | None = None) -> g
     groups = [g for g in (*st.GROUPS, "unknown") if any(r["group"] == g for r in rows)]
     for g in groups:
         rs = [r for r in rows if r["group"] == g]
-        errs = [speed_error_kmh(r["speed_kmh"], r["speed_sigma_kmh"]) for r in rs]
+        errs = [
+            speed_error_kmh(r["speed_kmh"], r["speed_sigma_kmh"], r.get("speed_scale_err"))
+            for r in rs
+        ]
         fig.add_trace(
             go.Box(
                 x=[group_label(g)] * len(rs),

@@ -13,7 +13,6 @@ from dash import html
 
 from swingvision.analysis import practice as pr
 from swingvision.analysis.segmentation import blocks_of
-from swingvision.analysis.shots import SPEED_SCALE_ERROR
 from swingvision.app import units
 from swingvision.app.components.court_diagram import court_figure
 from swingvision.app.components.target_editor import (
@@ -340,8 +339,11 @@ def rolling_figure(rows: list[dict], has_targets: bool) -> go.Figure:
 
 
 def kpis(rows: list[dict], has_targets: bool):
+    from swingvision.app.components.shots_view import records_scale_text
+
     u = units.current()
     s = pr.summarize(rows)
+    speed_note = records_scale_text(rows)
     items = [
         stat_tile("Shots", str(s["n"]), f"{s['n_landed']} landings seen"),
         stat_tile("In", pct(s["in_pct"]), f"{s['n_in']} of {s['n_called']} called"),
@@ -369,7 +371,7 @@ def kpis(rows: list[dict], has_targets: bool):
         stat_tile(
             "Speed",
             u.speed_str(s["speed_median"]),
-            f"median of {s['n_speed']}, ± {SPEED_SCALE_ERROR:.0%} uncalibrated",
+            f"median of {s['n_speed']}, {speed_note}",
         ),
     ]
     if s["feed_speed_mean"] is not None:
@@ -581,8 +583,7 @@ def shot_detail(r: dict | None, placing: bool):
         lines.append(
             dmc.Text(
                 f"{u.speed(r['speed_kmh']):.0f} ± {u.speed(r['speed_err_kmh'] or 0):.0f} "
-                f"{u.speed_unit} off the racket "
-                "(uncalibrated)",
+                f"{u.speed_unit} off the racket",
                 size="xs",
             )
         )

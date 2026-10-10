@@ -1,4 +1,5 @@
-"""Calibrate: review and adjust the court calibration of one session (PLAN.md §9.1).
+"""Calibrate: review and adjust the court calibration of one session (PLAN.md §9.1), and
+(the Speed tab, M7c) its net-tape reference serves and the device's speed calibration.
 
 The background image (players removed) is shown with the projected court on top.
 Every court keypoint and the three net points are draggable handles: a dragged
@@ -23,6 +24,7 @@ from dash import Input, Output, State, callback, ctx, dcc, html, no_update
 
 from swingvision import services
 from swingvision.app import state, units
+from swingvision.app.components import speed_view
 from swingvision.app.components.court_overlay import COURT_COLOR, NET_COLOR, polylines, trace_xy
 from swingvision.app.components.ui import (
     fmt_duration,
@@ -328,7 +330,35 @@ def _view_options(st: dict) -> list[dict]:
     return opts
 
 
-def layout(session_id: str | None = None, **_):
+def _tabs(court, session, tab: str | None):
+    """The Court and Speed tabs (``?tab=speed`` opens the second)."""
+    speed = html.Div(speed_view.speed_panel(session, session.load_config()), id="spd-body")
+    return dmc.Tabs(
+        [
+            dmc.TabsList(
+                [
+                    dmc.TabsTab("Court", value="court", leftSection=icon("tabler:grid-dots", 14)),
+                    dmc.TabsTab("Speed", value="speed", leftSection=icon("tabler:gauge", 14)),
+                ],
+                mb="sm",
+            ),
+            dmc.TabsPanel(court, value="court"),
+            dmc.TabsPanel(
+                [
+                    speed,
+                    dcc.Store(id="spd-version", data=0),
+                    dcc.Store(id="spd-sink"),
+                    dcc.Store(id="spd-drag"),  # onset-line drags (assets/speed_wave.js)
+                ],
+                value="speed",
+            ),
+        ],
+        value=tab if tab in ("court", "speed") else "court",
+        id="cal-tabs",
+    )
+
+
+def layout(session_id: str | None = None, tab: str | None = None, **_):
     if state.settings().output_root is None:
         return dmc.Container([page_header("Calibrate"), no_output_root_alert()], size="xl", px=0)
     found = state.session_for(session_id or "")
@@ -436,68 +466,65 @@ def layout(session_id: str | None = None, **_):
         size="xs",
         c="dimmed",
     )
+    court = [
+        dmc.Text("Line up the court model with the painted lines.", c="dimmed", mb="md"),
+        dcc.Store(id="cal-state", data=st),
+        dmc.Grid(
+            [
+                dmc.GridCol(
+                    dmc.Stack(
+                        [
+                            dmc.Paper(graph, withBorder=True, p=0, style={"overflow": "hidden"}),
+                            dmc.Group(
+                                [
+                                    dmc.Select(
+                                        id="cal-view",
+                                        data=view_opts,
+                                        value="bg",
+                                        allowDeselect=False,
+                                        size="xs",
+                                        w=260,
+                                        label="Image",
+                                    ),
+                                    help_text,
+                                ],
+                                align="flex-end",
+                                wrap="nowrap",
+                                gap="md",
+                            ),
+                        ],
+                        gap="xs",
+                    ),
+                    span={"base": 12, "lg": 9},
+                ),
+                dmc.GridCol(
+                    dmc.Stack(
+                        [
+                            dmc.Paper(buttons, p="md", withBorder=True),
+                            dmc.Paper(
+                                dmc.Stack(_panel(st), id="cal-panel", gap=6),
+                                p="md",
+                                withBorder=True,
+                            ),
+                            dmc.Paper(
+                                [
+                                    dmc.Title("Drift check", order=5, mb="xs"),
+                                    html.Div(_drift_panel(st), id="cal-drift"),
+                                ],
+                                p="md",
+                                withBorder=True,
+                            ),
+                        ],
+                        gap="sm",
+                    ),
+                    span={"base": 12, "lg": 3},
+                ),
+            ],
+            gutter="md",
+        ),
+    ]
     return dmc.Container(
-        [
-            header,
-            dmc.Text("Line up the court model with the painted lines.", c="dimmed", mb="md"),
-            dcc.Store(id="cal-state", data=st),
-            dcc.Store(id="cal-sid", data=session_id),
-            dmc.Grid(
-                [
-                    dmc.GridCol(
-                        dmc.Stack(
-                            [
-                                dmc.Paper(
-                                    graph, withBorder=True, p=0, style={"overflow": "hidden"}
-                                ),
-                                dmc.Group(
-                                    [
-                                        dmc.Select(
-                                            id="cal-view",
-                                            data=view_opts,
-                                            value="bg",
-                                            allowDeselect=False,
-                                            size="xs",
-                                            w=260,
-                                            label="Image",
-                                        ),
-                                        help_text,
-                                    ],
-                                    align="flex-end",
-                                    wrap="nowrap",
-                                    gap="md",
-                                ),
-                            ],
-                            gap="xs",
-                        ),
-                        span={"base": 12, "lg": 9},
-                    ),
-                    dmc.GridCol(
-                        dmc.Stack(
-                            [
-                                dmc.Paper(buttons, p="md", withBorder=True),
-                                dmc.Paper(
-                                    dmc.Stack(_panel(st), id="cal-panel", gap=6),
-                                    p="md",
-                                    withBorder=True,
-                                ),
-                                dmc.Paper(
-                                    [
-                                        dmc.Title("Drift check", order=5, mb="xs"),
-                                        html.Div(_drift_panel(st), id="cal-drift"),
-                                    ],
-                                    p="md",
-                                    withBorder=True,
-                                ),
-                            ],
-                            gap="sm",
-                        ),
-                        span={"base": 12, "lg": 3},
-                    ),
-                ],
-                gutter="md",
-            ),
-        ],
+        [header, dcc.Store(id="cal-sid", data=session_id), _tabs(court, session, tab)],
         fluid=True,
         px=0,
     )

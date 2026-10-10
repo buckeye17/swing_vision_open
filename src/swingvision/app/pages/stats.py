@@ -33,7 +33,7 @@ from swingvision.app import state, units
 from swingvision.app.components import serve_view
 from swingvision.app.components import stats_view as sv
 from swingvision.app.components.court_diagram import heatmap_figure
-from swingvision.app.components.shots_view import uncalibrated_badge
+from swingvision.app.components.shots_view import speed_badge, uncalibrated_badge
 from swingvision.app.components.ui import (
     export_menu,
     fmt_duration,
@@ -104,7 +104,7 @@ def _body(trends: bool):
                     _card(
                         "Speed by stroke",
                         _graph("st-speed"),
-                        right=uncalibrated_badge(),
+                        right=html.Div(uncalibrated_badge(), id="st-speed-badge"),
                         hint="Every shot whose contact was seen; the box spans the middle "
                         "half, the line is the median. Click a shot to watch it.",
                     ),
@@ -335,6 +335,9 @@ def _filter_panel(flt: agg.SessionFilter, lib):
     rows = lib.list_sessions()
     sessions = [{"value": r["id"], "label": _session_label(r)} for r in rows]
     profiles = [{"value": p.id, "label": p.name} for p in services.list_profiles(state.settings())]
+    devices = [
+        {"value": d["device_key"], "label": services.device_name(d)} for d in lib.list_devices()
+    ]
     known = {r["id"] for r in rows}
     tags = sorted(set(lib.all_tags()) | set(flt.tags), key=str.lower)
     ms = {"size": "xs", "clearable": True, "searchable": True}
@@ -385,6 +388,15 @@ def _filter_panel(flt: agg.SessionFilter, lib):
                             **ms,
                         ),
                         dmc.MultiSelect(
+                            id="st-f-device",
+                            label="Recorded with",
+                            data=devices,
+                            value=[d for d in flt.devices if d in {x["value"] for x in devices}],
+                            placeholder="Any device",
+                            w=240,
+                            **ms,
+                        ),
+                        dmc.MultiSelect(
                             id="st-f-tags",
                             label="Tags (all of)",
                             data=tags,
@@ -429,12 +441,11 @@ def _filter_panel(flt: agg.SessionFilter, lib):
                                     dmc.Switch(
                                         id="st-f-speeds",
                                         label="Only calibrated speeds",
-                                        checked=False,
-                                        disabled=True,
+                                        checked=flt.calibrated_speeds,
                                         size="xs",
                                     ),
-                                    label="Speed calibration from net-tape serves isn't "
-                                    "available yet, so no session has calibrated speeds.",
+                                    label="Sessions whose speeds carry their recording "
+                                    "device's calibration from net-tape serves.",
                                     multiline=True,
                                     w=260,
                                 ),
@@ -658,6 +669,7 @@ def _selection_export(query: str, groups, end, excluded, has_rows: bool):
     Output("st-distance", "figure"),
     Output("st-count", "children"),
     Output("st-export", "children"),
+    Output("st-speed-badge", "children"),
     Input("st-scope", "data"),
     Input("st-groups", "value"),
     Input("st-end", "value"),
@@ -667,7 +679,7 @@ def _selection_export(query: str, groups, end, excluded, has_rows: bool):
 def _render(scope, groups, end, excluded, view):
     data, sel = _load(scope, excluded)
     if data is None:
-        return (no_update,) * 11
+        return (no_update,) * 12
     rows = sv.filtered(data.records, groups or None, end)
     movement = st.summarize_movement(data)
     labels = sv.short_labels(data.sessions)
@@ -704,7 +716,18 @@ def _render(scope, groups, end, excluded, view):
         sv.distance_figure(st.distance_series(data)),
         _count_text(sel),
         exports,
+        _speed_badge(data.sessions),
     )
+
+
+def _speed_badge(sessions: list[dict]):
+    """Calibrated / uncalibrated speeds of the sessions shown (M7c)."""
+    n_cal = sum(bool(s.get("speeds_calibrated")) for s in sessions)
+    if len(sessions) == 1 and n_cal:
+        found = state.session_for(sessions[0]["session_id"])
+        if found is not None:
+            return speed_badge(*services.speed_status(state.settings(), found[2]))
+    return speed_badge(mixed=(n_cal, len(sessions)) if sessions else None)
 
 
 @callback(
@@ -772,14 +795,16 @@ def _trend(scope, groups, end, excluded, kpi):
     Input("st-f-mode", "value"),
     Input("st-f-type", "value"),
     Input("st-f-profile", "value"),
+    Input("st-f-device", "value"),
     Input("st-f-tags", "value"),
     Input("st-f-include", "value"),
     Input("st-f-exclude", "value"),
     Input("st-f-cal", "checked"),
+    Input("st-f-speeds", "checked"),
     State("st-scope", "data"),
     prevent_initial_call=True,
 )
-def _filter(dates, modes, types, profiles, tags, include, exclude, cal, scope):
+def _filter(dates, modes, types, profiles, devices, tags, include, exclude, cal, speeds, scope):
     dates = [d for d in (dates or []) if d] if isinstance(dates, list) else []
     flt = agg.SessionFilter.make(
         date_from=dates[0] if dates else None,
@@ -787,10 +812,12 @@ def _filter(dates, modes, types, profiles, tags, include, exclude, cal, scope):
         modes=modes,
         practice_types=types,
         profiles=profiles,
+        devices=devices,
         tags=tags,
         include=include,
         exclude=exclude,
         user_calibration=cal,
+        calibrated_speeds=speeds,
     )
     query = flt.to_query()
     if scope and scope.get("query") == query:
@@ -925,10 +952,12 @@ def _refresh_missing(clicks, scope):
     Output("st-f-mode", "value"),
     Output("st-f-type", "value"),
     Output("st-f-profile", "value"),
+    Output("st-f-device", "value"),
     Output("st-f-tags", "value"),
     Output("st-f-include", "value"),
     Output("st-f-exclude", "value"),
     Output("st-f-cal", "checked"),
+    Output("st-f-speeds", "checked"),
     Input("st-view", "value"),
     prevent_initial_call=True,
 )
@@ -936,7 +965,7 @@ def _open_view(view_id):
     lib = state.library()
     view = lib.get_view(view_id) if lib and view_id else None
     if view is None:
-        return (no_update,) * 8
+        return (no_update,) * 10
     f = agg.SessionFilter.from_query(view["query"])
     dates = [f.date_from, f.date_to]
     return (
@@ -944,10 +973,12 @@ def _open_view(view_id):
         list(f.modes),
         list(f.practice_types),
         list(f.profiles),
+        list(f.devices),
         list(f.tags),
         list(f.include),
         list(f.exclude),
         f.user_calibration,
+        f.calibrated_speeds,
     )
 
 

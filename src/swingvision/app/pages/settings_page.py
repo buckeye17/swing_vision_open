@@ -11,6 +11,7 @@ import dash_mantine_components as dmc
 from dash import Input, Output, State, callback, dcc, html, no_update
 
 from swingvision.app import state
+from swingvision.app.components.devices_view import devices_card
 from swingvision.app.components.file_browser import file_browser, register_file_browser
 from swingvision.app.components.ui import icon, notification, page_header
 from swingvision.app.units import Units
@@ -483,6 +484,7 @@ def layout(**_):
                         p="lg",
                         withBorder=True,
                     ),
+                    devices_card(),
                     _players_card(s),
                     _ball_card(s),
                     _pose_card(s),

@@ -15,7 +15,12 @@ import plotly.graph_objects as go
 import pyarrow as pa
 from dash import dcc, html
 
-from swingvision.analysis.shots import SPEED_SCALE_ERROR, speed_error_kmh, speed_error_text
+from swingvision.analysis.shots import (
+    SPEED_SCALE_ERROR,
+    is_calibrated,
+    speed_error_kmh,
+    speed_error_text,
+)
 from swingvision.app import units
 from swingvision.app.components.ui import icon, stat_grid, stat_tile
 from swingvision.court import calibration as calib
@@ -108,6 +113,7 @@ def shots_store(
                 idx = order[a:b]
                 by_flight[int(u)] = (t[idx], px[idx])
     out: dict = {k: [] for k in ("id", "t0", "t1", "v", "e", "o", "cx", "cy", "path")}
+    out["calibrated"] = any(r.get("speed_calibration") for r in rows)
     for r in rows:
         t_end = r["t_contact"] + (r["flight_time_s"] or 1.0)
         path = []
@@ -131,11 +137,11 @@ def shots_store(
 
 
 def _error(r: dict) -> float | None:
-    return speed_error_kmh(r["speed_racket_kmh"], r["speed_sigma_kmh"])
+    return speed_error_kmh(r["speed_racket_kmh"], r["speed_sigma_kmh"], r.get("speed_scale_err"))
 
 
 def _speed_pm(r: dict, u: units.Units | None = None) -> str:
-    """'139 ± 10' (display speed units), with the uncalibrated error bound."""
+    """'139 ± 10' (display speed units), with the error bound (shared + 2× its own σ)."""
     u = u or units.current()
     v, e = u.speed(r["speed_racket_kmh"]), u.speed(_error(r))
     if v is None:
@@ -143,23 +149,80 @@ def _speed_pm(r: dict, u: units.Units | None = None) -> str:
     return f"{v:.0f}" + ("" if e is None else f" ± {e:.0f}")
 
 
-def uncalibrated_badge():
+def scale_text(scale_err: float | None, calibrated: bool) -> str:
+    """ "± 3% uncalibrated" / "± 0.8% calibrated": the bound every speed shares."""
+    scale = SPEED_SCALE_ERROR if scale_err is None else scale_err
+    return f"± {scale:.0%} uncalibrated" if not calibrated else f"± {scale:.1%} calibrated"
+
+
+def table_scale(shots: pa.Table | None) -> tuple[float, bool]:
+    """(shared error bound, calibrated) of a session's shots table."""
+    if shots is None or "speed_scale_err" not in shots.column_names:
+        return SPEED_SCALE_ERROR, False
+    errs = [v for v in shots.column("speed_scale_err").to_pylist() if v is not None]
+    scale = max(errs) if errs else SPEED_SCALE_ERROR
+    return scale, is_calibrated(scale)
+
+
+def speed_badge(
+    calibration: dict | None = None, device: str | None = None, mixed: tuple[int, int] | None = None
+):
+    """*Uncalibrated · ±3%*, or *Calibrated · device · ±x%* (PLAN.md §7.12). ``mixed``:
+    (calibrated, all) sessions of a selection where only some are."""
+    if mixed is not None and 0 < mixed[0] < mixed[1]:
+        text, color = f"Calibrated in {mixed[0]} of {mixed[1]} sessions", "yellow"
+        tip = (
+            "Some of these sessions' speeds carry their recording device's calibration from "
+            "net-tape serves, the others are uncalibrated (± "
+            f"{SPEED_SCALE_ERROR:.0%}). Use 'Only calibrated speeds' to compare like with like."
+        )
+    elif calibration or (mixed is not None and mixed[0] and mixed[0] == mixed[1]):
+        pct = f" · ±{2 * calibration['k_sigma'] / calibration['k']:.1%}" if calibration else ""
+        text = f"Calibrated{' · ' + device if device else ''}{pct}"
+        color = "teal"
+        tip = (
+            speed_error_text(calibration, device)
+            if calibration
+            else (
+                "Every session's speeds carry its recording device's calibration from net-tape "
+                "serves."
+            )
+        )
+    else:
+        text, color = f"Uncalibrated · ±{SPEED_SCALE_ERROR:.0%}", "yellow"
+        tip = speed_error_text()
     return dmc.Tooltip(
         dmc.Badge(
-            f"Uncalibrated · ±{SPEED_SCALE_ERROR:.0%}",
-            color="yellow",
+            text,
+            color=color,
             variant="light",
             size="md",
             tt="none",
             leftSection=icon("tabler:info-circle", 13),
             style={"cursor": "help"},
         ),
-        label=speed_error_text(),
+        label=tip,
         multiline=True,
         w=320,
         withArrow=True,
         position="bottom",
     )
+
+
+def uncalibrated_badge():
+    return speed_badge()
+
+
+def records_scale_text(rows: list[dict]) -> str:
+    """The shared error bound of a list of records with speeds (``speed_scale_err``)."""
+    errs = [r.get("speed_scale_err") for r in rows if r.get("speed_kmh") is not None]
+    known = [e for e in errs if e is not None]
+    cal = [is_calibrated(e) for e in errs]
+    if known and all(cal):
+        return scale_text(max(known), True)
+    if any(cal):
+        return f"± {min(e for e in known if is_calibrated(e)):.1%}–{SPEED_SCALE_ERROR:.0%}, partly calibrated"
+    return scale_text(None, False)
 
 
 def shot_summary(shots: pa.Table | None) -> dict:
@@ -232,13 +295,16 @@ def shots_table(shots: pa.Table | None, video_id: str = "review-video"):
     )
 
 
-def shots_card(shots: pa.Table | None):
+def shots_card(shots: pa.Table | None, calibration: dict | None = None, device: str | None = None):
+    """``calibration``: the speed calibration the shots were made with (M7c), and its
+    ``device``'s name, for the badge."""
     title = dmc.Title("Shots", order=5)
     if shots is None:
         body = [dmc.Text("Shot analysis (3D flight) hasn't run yet.", size="sm", c="dimmed")]
         return dmc.Paper([title, *body], p="md", withBorder=True)
     u = units.current()
     s = shot_summary(shots)
+    scale, calibrated = table_scale(shots)
     in_pct = f"{s['in'] / s['called']:.0%}" if s["called"] else "–"
     body = [
         stat_grid(
@@ -248,7 +314,7 @@ def shots_card(shots: pa.Table | None):
                 stat_tile(
                     "Median speed",
                     u.speed_str(s["median"]),
-                    f"off the racket, ± {SPEED_SCALE_ERROR:.0%}",
+                    f"off the racket, {scale_text(scale, calibrated)}",
                 ),
                 stat_tile("Fastest", u.speed_str(s["max"]), "off the racket"),
             ],
@@ -280,7 +346,7 @@ def shots_card(shots: pa.Table | None):
             dmc.Group(
                 [
                     dmc.Group([title, dmc.Badge(str(s["n"]), variant="light")], gap="xs"),
-                    uncalibrated_badge(),
+                    speed_badge(calibration if calibrated else None, device),
                 ],
                 justify="space-between",
             ),
@@ -289,6 +355,11 @@ def shots_card(shots: pa.Table | None):
         p="md",
         withBorder=True,
     )
+
+
+def _scale_pct(r: dict) -> str:
+    v = r.get("speed_scale_err")
+    return f"{SPEED_SCALE_ERROR:.0%}" if v is None else f"{v:.1%}"
 
 
 def shot_detail(r: dict | None):
@@ -311,8 +382,8 @@ def shot_detail(r: dict | None):
         f"net {kmh(r['speed_net_kmh'])} · before bounce {kmh(r['speed_bounce_kmh'])} "
         f"{u.speed_unit}"
         + (
-            f" · ± is the uncalibrated error ({SPEED_SCALE_ERROR:.0%} + 2× fit σ "
-            f"{u.speed(r['speed_sigma_kmh']):.0f})"
+            f" · ± is the {'calibrated' if r.get('speed_calibration') else 'uncalibrated'} "
+            f"error ({_scale_pct(r)} + 2× fit σ {u.speed(r['speed_sigma_kmh']):.0f})"
             if r["speed_sigma_kmh"] is not None
             else ""
         ),

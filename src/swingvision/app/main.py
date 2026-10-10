@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import threading
 
 import dash
 import dash_mantine_components as dmc
@@ -277,10 +278,25 @@ def create_app() -> dash.Dash:
     return app
 
 
+def _backfill_devices(settings) -> None:
+    """Sessions made before M7c get their recording device (a quick re-probe each)."""
+    from swingvision import services
+
+    try:
+        done = services.backfill_devices(settings)
+    except Exception as exc:  # never keep the app from starting
+        logger.warning("Device backfill failed: {}", exc)
+        return
+    if done:
+        logger.info("Recording device found for {} sessions", len(done))
+
+
 def serve(port: int | None = None, start_worker: bool = True, debug: bool = False) -> None:
     settings = state.settings()
     state.OPTIONS.start_worker = start_worker
     app = create_app()
+    if settings.output_root is not None:
+        threading.Thread(target=_backfill_devices, args=(settings,), daemon=True).start()
     if start_worker:
         ensure_worker(settings.output_root)
     port = port or settings.port

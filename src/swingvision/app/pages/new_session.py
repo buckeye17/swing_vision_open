@@ -124,6 +124,18 @@ def layout(**_):
                     ],
                     align="flex-end",
                 ),
+                dmc.NumberInput(
+                    id="ns-temp",
+                    label="Air temperature (optional)",
+                    description="For the speed of sound when speeds are calibrated from serves "
+                    "that hit the net tape; 20 °C is assumed without it.",
+                    suffix=" °C",
+                    min=-30,
+                    max=50,
+                    step=1,
+                    decimalScale=1,
+                    w=260,
+                ),
             ],
             gap="md",
         ),
@@ -306,10 +318,11 @@ def _video_picked(result, name):
     State("ns-submode", "value"),
     State("ns-profile", "value"),
     State("ns-tgt-targets", "data"),
+    State("ns-temp", "value"),
     running=[(Output("ns-create", "loading"), True, False)],
     prevent_initial_call=True,
 )
-def _create(n, video, name, mode, submode, profile_id, targets):
+def _create(n, video, name, mode, submode, profile_id, targets, temp=None):
     if not n or not video:
         return no_update, no_update
     s = state.settings()
@@ -322,6 +335,7 @@ def _create(n, video, name, mode, submode, profile_id, targets):
             submode,
             me_profile_id=profile_id or None,
             practice_targets=targets_from_store(targets),
+            air_temp_c=None if temp in (None, "") else float(temp),
         )
         config = session.load_config()
         job_id = services.enqueue(s, config.id)
